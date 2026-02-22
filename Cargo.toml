@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "proxy",
+    "migration",
+]
+resolver = "2"

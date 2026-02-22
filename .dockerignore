@@ -1,0 +1,47 @@
+## Git
+.git/
+
+## Environment / secrets
+**/.env
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+## macOS
+**/.DS_Store
+
+## Editor / IDE
+.idea/
+.vscode/
+.claude/
+
+## Rust build artifacts
+target/
+**/target/
+.target/
+.cargo/
+
+## admin-ui (Node.js / Vite)
+admin-ui/node_modules/
+admin-ui/dist/
+admin-ui/.vite/
+
+## SQLite databases
+*.db
+**/*.db
+*.db-shm
+**/*.db-shm
+*.db-wal
+**/*.db-wal
+
+## Docs / local files
+*.md
+**/*.md
+mydocs/
+pythonpoc/
+
+## Tests
+tests/
+**/*_test.rs

@@ -1,0 +1,62 @@
+[package]
+name = "proxy"
+version = "0.2.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+pgwire = "0.38"
+async-trait = "0.1"
+futures = "0.3"
+async-stream = "0.3"
+dotenvy = "0.15"
+
+# DataFusion dependencies (v51 — shared by datafusion-table-providers and datafusion-pg-catalog)
+datafusion = "51"
+datafusion-expr = "51"
+datafusion-sql = "51"
+datafusion-table-providers = { version = "0.9", features = ["postgres"] }
+datafusion-pg-catalog = "0.13.1"
+
+# Postgres dependencies
+tokio-postgres = "0.7"
+
+chrono = "0.4"
+rust_decimal = "1"
+pg_interval = { version = "0.5.1", package = "pg_interval_2" }
+
+# Admin store (SeaORM + SQLite/Postgres backend)
+sea-orm = { version = "1", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "with-uuid"] }
+migration = { path = "../migration" }
+
+# UUID generation
+uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
+
+# Password hashing
+argon2 = "0.5"
+password-hash = { version = "0.5", features = ["std"] }
+rand_core = { version = "0.6", features = ["std"] }
+
+# Encryption
+aes-gcm = "0.10"
+base64 = "0.22"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Admin REST API
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors"] }
+jsonwebtoken = "9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+[dev-dependencies]
+arrow = "57"
+tokio-test = "0.4"

@@ -1,0 +1,8 @@
+[package]
+name = "migration"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+sea-orm-migration = { version = "1", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls"] }
+tokio = { version = "1", features = ["full"] }

@@ -1,0 +1,5 @@
+services:
+  proxy:
+    build:
+      target: prod
+    restart: always

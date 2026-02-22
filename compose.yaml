@@ -1,0 +1,9 @@
+services:
+  proxy:
+    build:
+      context: .
+    env_file: proxy/.env
+    environment:
+      PROXY_BIND_ADDR: "0.0.0.0:5434"
+    ports:
+      - "5434:5434"

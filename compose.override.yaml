@@ -1,0 +1,14 @@
+services:
+  proxy:
+    build:
+      target: dev
+    volumes:
+      - ./Cargo.toml:/app/Cargo.toml
+      - ./Cargo.lock:/app/Cargo.lock
+      - ./proxy:/app/proxy
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-target:/app/target
+
+volumes:
+  cargo-registry:
+  cargo-target:

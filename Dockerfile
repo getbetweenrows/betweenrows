@@ -1,3 +1,12 @@
+# ── ui-builder: compile admin UI ─────────────────────────────────────────────
+FROM node:22-alpine AS ui-builder
+
+WORKDIR /app/admin-ui
+COPY admin-ui/package.json admin-ui/package-lock.json ./
+RUN npm ci
+COPY admin-ui/ ./
+RUN npm run build
+
 # ── base: dependency cache layer ─────────────────────────────────────────────
 FROM rust:1.93-bookworm AS base
 
@@ -25,7 +34,8 @@ FROM base AS dev
 
 RUN cargo install cargo-watch
 
-ENV PROXY_BIND_ADDR=0.0.0.0:5434
+ENV BR_PROXY_BIND_ADDR=0.0.0.0:5434
+ENV BR_ADMIN_BIND_ADDR=0.0.0.0:5435
 
 WORKDIR /app/proxy
 
@@ -46,10 +56,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/proxy /usr/local/bin/proxy
+# Pre-create /data so the volume mount has a writable landing spot
+RUN mkdir -p /data && chown -R 1000:1000 /data
 
-ENV PROXY_BIND_ADDR=0.0.0.0:5434
+COPY --from=builder /app/target/release/proxy /usr/local/bin/proxy
+COPY --from=ui-builder /app/admin-ui/dist /usr/local/share/admin-ui
+
+ENV BR_PROXY_BIND_ADDR=0.0.0.0:5434
+ENV BR_ADMIN_BIND_ADDR=0.0.0.0:5435
 
 EXPOSE 5434
+EXPOSE 5435
 
+USER 1000
 CMD ["/usr/local/bin/proxy"]

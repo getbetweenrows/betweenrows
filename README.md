@@ -2,6 +2,64 @@
 
 A high-performance PostgreSQL wire protocol proxy in Rust. Sits between clients and upstream Postgres backends, providing query governance (row-level security, data masking) via a hook pipeline. Data sources and users are managed through a REST Admin API and React UI.
 
+## Deploy to Fly.io
+
+[![Deploy to Fly](https://fly.io/launch/deploy.svg)](https://fly.io/launch?source=https://github.com/getbetweenrows/betweenrows)
+
+Provisions a Fly.io VM, builds the Docker image (including the admin UI), mounts a 1 GB
+persistent volume for the SQLite database, and starts both services:
+
+| Service | External | Internal | Protocol |
+|---------|----------|----------|----------|
+| Admin UI + REST API | `:80` / `:443` | `:5435` | HTTP/S |
+| pgwire (PostgreSQL) | `:5432` (IPv6) | `:5434` | raw TCP |
+
+After deploying, the Admin UI is available at `https://<app-name>.fly.dev`.
+
+### Set required secrets (after deploy)
+
+```sh
+fly secrets set \
+  BR_ENCRYPTION_KEY=$(openssl rand -hex 32) \
+  BR_ADMIN_JWT_SECRET=$(openssl rand -hex 32) \
+  BR_ADMIN_PASSWORD=<strong-password>
+```
+
+## Upgrading
+
+Pull the latest image and redeploy:
+
+```sh
+fly deploy --image ghcr.io/getbetweenrows/betweenrows:latest --app <your-app-name>
+```
+
+Or if your `fly.toml` already references the image, just:
+
+```sh
+fly deploy
+```
+
+### Connecting via pgwire
+
+The pgwire port is accessible for free via **IPv6** (most modern clients resolve it automatically):
+
+```sh
+psql "postgresql://admin:<password>@<app-name>.fly.dev:5432/<datasource-name>"
+```
+
+For **IPv4-only** environments (no IPv6 support), tunnel via WireGuard:
+
+```sh
+fly proxy 5432:5434 --app <app-name>
+psql "postgresql://admin:<password>@127.0.0.1:5432/<datasource-name>"
+```
+
+Or allocate a dedicated IPv4 ($2/mo):
+
+```sh
+fly ips allocate-v4 --app <app-name>
+```
+
 ## How It Works
 
 ```
@@ -93,15 +151,17 @@ cargo run -p proxy -- user create --username alice --password secret --tenant ac
 
 | Env var | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | `sqlite://proxy_admin.db?mode=rwc` | SeaORM connection URL (use `postgres://…` for shared backend) |
-| `PROXY_BIND_ADDR` | `127.0.0.1:5434` | pgwire listen address |
-| `ADMIN_BIND_ADDR` | `127.0.0.1:5435` | Admin REST API listen address |
-| `ENCRYPTION_KEY` | *(random, warns)* | 64-char hex — AES-256-GCM key for secrets at rest. **Set in prod.** |
-| `ADMIN_JWT_SECRET` | *(random, warns)* | HMAC-SHA256 signing key. **Set in prod** or tokens invalidate on restart. |
-| `ADMIN_JWT_EXPIRY_HOURS` | `24` | JWT lifetime |
-| `PROXY_ADMIN_USER` | `admin` | Auto-seed username |
-| `PROXY_ADMIN_PASSWORD` | `admin` | Auto-seed password. **Change in prod.** |
-| `PROXY_ADMIN_TENANT` | `default` | Auto-seed tenant |
+| `BR_ADMIN_DATABASE_URL` | `sqlite://proxy_admin.db?mode=rwc` | SeaORM connection URL (use `postgres://…` for shared backend) |
+| `BR_PROXY_BIND_ADDR` | `127.0.0.1:5434` | pgwire listen address |
+| `BR_ADMIN_BIND_ADDR` | `127.0.0.1:5435` | Admin REST API listen address |
+| `BR_ENCRYPTION_KEY` | *(random, warns)* | 64-char hex — AES-256-GCM key for secrets at rest. **Set in prod.** |
+| `BR_ADMIN_JWT_SECRET` | *(random, warns)* | HMAC-SHA256 signing key. **Set in prod** or tokens invalidate on restart. |
+| `BR_ADMIN_JWT_EXPIRY_HOURS` | `24` | JWT lifetime |
+| `BR_ADMIN_USER` | `admin` | Auto-seed username |
+| `BR_ADMIN_PASSWORD` | *(required on first boot)* | Auto-seed password. **Must be set** when no users exist in DB. |
+| `BR_ADMIN_TENANT` | `default` | Auto-seed tenant |
+| `BR_CORS_ALLOWED_ORIGINS` | *(empty, same-origin only)* | Comma-separated list of allowed CORS origins for the Admin API |
+| `RUST_LOG` | `info` | Log filter (standard Rust/tracing convention) |
 
 ## Connecting via pgwire
 

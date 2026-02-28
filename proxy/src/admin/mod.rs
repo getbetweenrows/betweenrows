@@ -1,5 +1,5 @@
 use axum::{
-    http::StatusCode,
+    http::{header, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{get, post, put},
     Router,
@@ -7,7 +7,10 @@ use axum::{
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
+use tower_http::normalize_path::NormalizePathLayer;
+use tower_http::services::ServeDir;
+use tower_http::set_header::response::SetResponseHeaderLayer;
 
 use crate::auth::Auth;
 use crate::engine::EngineCache;
@@ -68,14 +71,41 @@ impl IntoResponse for ApiErr {
 // ---------- router ----------
 
 pub fn admin_router(state: AdminState) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let allowed_origins: Vec<HeaderValue> = std::env::var("BR_CORS_ALLOWED_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+
+    let cors = if allowed_origins.is_empty() {
+        CorsLayer::new() // no origins allowed = same-origin only
+    } else {
+        CorsLayer::new()
+            .allow_origin(allowed_origins)
+            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+            .allow_credentials(true)
+    };
 
     Router::new()
+        .route("/health", get(|| async { StatusCode::OK }))
         .nest("/api/v1", api_v1())
+        .fallback_service(ServeDir::new("/usr/local/share/admin-ui"))
         .layer(cors)
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::STRICT_TRANSPORT_SECURITY,
+            HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(NormalizePathLayer::trim_trailing_slash())
         .with_state(state)
 }
 

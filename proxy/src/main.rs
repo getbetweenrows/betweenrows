@@ -59,11 +59,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     // Connect to admin DB and run migrations
-    let database_url = std::env::var("DATABASE_URL")
+    let database_url = std::env::var("BR_ADMIN_DATABASE_URL")
         .unwrap_or_else(|_| "sqlite://proxy_admin.db?mode=rwc".to_string());
+
+    tracing::info!(database = %redact_db_url(&database_url), "connecting to database");
 
     let db = Database::connect(&database_url).await?;
     Migrator::up(&db, None).await?;
+
+    tracing::info!("database initialized");
 
     let auth = Arc::new(Auth::new(db.clone()));
 
@@ -82,24 +86,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Parse ENCRYPTION_KEY env var as 64-char hex → [u8; 32].
+/// Redact the password from a database URL for safe logging.
+/// Strips query params and replaces inline password: `scheme://user:pass@host` → `scheme://user:****@host`.
+fn redact_db_url(url: &str) -> String {
+    let base = url.split('?').next().unwrap_or(url);
+    if let Some(at) = base.rfind('@') {
+        if let Some(scheme_end) = base.find("://") {
+            let userinfo = &base[scheme_end + 3..at];
+            if let Some(colon) = userinfo.find(':') {
+                let user = &userinfo[..colon];
+                let rest = &base[at..];
+                return format!("{}://{}:****{}", &base[..scheme_end], user, rest);
+            }
+        }
+    }
+    base.to_string()
+}
+
+/// Parse BR_ENCRYPTION_KEY env var as 64-char hex → [u8; 32].
 /// If unset, generate a random key and warn (tokens will not survive restarts).
 fn parse_or_generate_encryption_key() -> [u8; 32] {
-    match std::env::var("ENCRYPTION_KEY") {
+    match std::env::var("BR_ENCRYPTION_KEY") {
         Ok(hex) => {
             match parse_hex_key(&hex) {
                 Ok(key) => key,
                 Err(e) => {
-                    tracing::warn!("ENCRYPTION_KEY is invalid: {}. Using a random key.", e);
-                    random_key()
+                    eprintln!(
+                        "FATAL: BR_ENCRYPTION_KEY is invalid: {}. \
+                         Fix the value or unset it to use a random key.",
+                        e
+                    );
+                    std::process::exit(1);
                 }
             }
         }
         Err(_) => {
             tracing::warn!(
-                "ENCRYPTION_KEY not set — using a random key. \
+                "BR_ENCRYPTION_KEY not set — using a random key. \
                  Encrypted data will be unreadable after restart. \
-                 Set ENCRYPTION_KEY to a 64-char hex string (32 bytes) in production."
+                 Set BR_ENCRYPTION_KEY to a 64-char hex string (32 bytes) in production."
             );
             random_key()
         }
@@ -136,17 +161,25 @@ async fn serve(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Auto-seed default admin if no users exist
     if auth.count_users().await? == 0 {
-        let admin_user = std::env::var("PROXY_ADMIN_USER")
+        let admin_user = std::env::var("BR_ADMIN_USER")
             .unwrap_or_else(|_| "admin".to_string());
-        let admin_pass = std::env::var("PROXY_ADMIN_PASSWORD")
-            .unwrap_or_else(|_| "admin".to_string());
-        let admin_tenant = std::env::var("PROXY_ADMIN_TENANT")
+        let admin_pass = match std::env::var("BR_ADMIN_PASSWORD") {
+            Ok(p) if !p.is_empty() => p,
+            _ => {
+                eprintln!(
+                    "FATAL: BR_ADMIN_PASSWORD is not set. \
+                     Set this environment variable to a strong password before starting."
+                );
+                std::process::exit(1);
+            }
+        };
+        let admin_tenant = std::env::var("BR_ADMIN_TENANT")
             .unwrap_or_else(|_| "default".to_string());
 
         tracing::warn!(
             username = %admin_user,
             tenant = %admin_tenant,
-            "No users found — seeding default admin. Change the password immediately!"
+            "No users found — seeding default admin."
         );
         auth.create_user(&admin_user, &admin_pass, &admin_tenant, true).await?;
     }
@@ -155,9 +188,9 @@ async fn serve(
     let engine_cache = EngineCache::new(db.clone(), master_key);
 
     // ── Admin REST API ────────────────────────────────────────────────────────
-    let jwt_secret = std::env::var("ADMIN_JWT_SECRET").unwrap_or_else(|_| {
+    let jwt_secret = std::env::var("BR_ADMIN_JWT_SECRET").unwrap_or_else(|_| {
         tracing::warn!(
-            "ADMIN_JWT_SECRET not set — using a random secret. \
+            "BR_ADMIN_JWT_SECRET not set — using a random secret. \
              Tokens will be invalidated on every restart."
         );
         let mut bytes = [0u8; 32];
@@ -165,12 +198,12 @@ async fn serve(
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     });
 
-    let jwt_expiry_hours: u64 = std::env::var("ADMIN_JWT_EXPIRY_HOURS")
+    let jwt_expiry_hours: u64 = std::env::var("BR_ADMIN_JWT_EXPIRY_HOURS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(24);
 
-    let admin_bind_addr = std::env::var("ADMIN_BIND_ADDR")
+    let admin_bind_addr = std::env::var("BR_ADMIN_BIND_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:5435".to_string());
 
     let admin_state = AdminState {
@@ -197,7 +230,7 @@ async fn serve(
     // ── pgwire proxy ──────────────────────────────────────────────────────────
     let handler = Arc::new(ProxyHandler::new(auth, engine_cache));
 
-    let bind_addr = std::env::var("PROXY_BIND_ADDR")
+    let bind_addr = std::env::var("BR_PROXY_BIND_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:5434".to_string());
     let listener = TcpListener::bind(&bind_addr).await?;
     tracing::info!(addr = %bind_addr, "Proxy online");

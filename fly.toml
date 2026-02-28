@@ -1,0 +1,67 @@
+# fly.toml — QueryProxy on Fly.io
+app = 'betweenrows'
+primary_region = 'ord'
+
+image = 'ghcr.io/getbetweenrows/betweenrows:latest'
+
+[env]
+  BR_PROXY_BIND_ADDR      = '0.0.0.0:5434'
+  BR_ADMIN_BIND_ADDR      = '0.0.0.0:5435'
+  BR_ADMIN_DATABASE_URL   = 'sqlite:///data/proxy_admin.db?mode=rwc'
+
+# Persistent volume for SQLite DB — created automatically on first fly launch
+[mounts]
+  source       = 'betweenrows_data'
+  destination  = '/data'
+  initial_size = '1gb'
+
+# ── VM size: smallest available (shared CPU, 256 MB RAM) ─────────────────────
+[[vm]]
+  size   = 'shared-cpu-1x'
+  memory = '256mb'
+
+# ── Admin REST API + bundled UI (HTTP/HTTPS on 80/443) ────────────────────────
+[[services]]
+  protocol      = 'tcp'
+  internal_port = 5435
+
+  [[services.ports]]
+    port        = 80
+    handlers    = ['http']
+    force_https = true
+
+  [[services.ports]]
+    port     = 443
+    handlers = ['tls', 'http']
+
+  [services.concurrency]
+    type       = 'connections'
+    hard_limit = 25
+    soft_limit = 20
+
+  [[services.http_checks]]
+    path         = '/health'
+    method       = 'GET'
+    interval     = '15s'
+    timeout      = '2s'
+    grace_period = '30s'
+
+# ── pgwire / PostgreSQL wire protocol (raw TCP on port 5432) ─────────────────
+# Free via Fly's IPv6 address. IPv4 clients use `fly proxy 5432:5434`.
+[[services]]
+  protocol      = 'tcp'
+  internal_port = 5434
+
+  [[services.ports]]
+    port     = 5432
+    handlers = []     # raw TCP passthrough
+
+  [services.concurrency]
+    type       = 'connections'
+    hard_limit = 100
+    soft_limit = 80
+
+  [[services.tcp_checks]]
+    interval     = '15s'
+    timeout      = '2s'
+    grace_period = '30s'

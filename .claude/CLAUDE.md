@@ -14,6 +14,8 @@ Key versions: pgwire 0.38, DataFusion 51, axum 0.8, SeaORM 1, tokio-postgres 0.7
 - `proxy/src/admin/datasource_types.rs` — `split_config`, `merge_config`, `get_type_defs`
 - `proxy/src/admin/discovery_job.rs` — `JobStore`, `DiscoveryJob`, `DiscoveryEvent`, `DiscoveryRequest`
 - `proxy/src/engine/mod.rs` — `EngineCache`, `VirtualCatalogProvider`, `build_arrow_schema()`, `arrow_type_to_string()`
+- `proxy/src/hooks/read_only.rs` — `ReadOnlyHook` (allowlist: Query, Show*, Explain*)
+- `proxy/src/hooks/rls.rs` — `RLSHook`
 - `proxy/src/discovery/` — `DiscoveryProvider` trait + Postgres impl
 - `proxy/src/crypto.rs` — AES-256-GCM `encrypt_json` / `decrypt_json`
 - `migration/src/lib.rs` — `Migrator` (4 migrations)
@@ -43,6 +45,7 @@ Always get Arrow types from the library's `get_schema()` during discovery — th
 `job_store: Arc<Mutex<discovery_job::JobStore>>` replaced the old `discovery_locks: Arc<Mutex<HashSet<i32>>>`.
 
 ## Key Patterns
+- **Hook ordering**: `ReadOnlyHook` runs first (blocks writes with SQLSTATE 25006), then `RLSHook`. Hooks run in both simple and extended query paths. The allowlist in `ReadOnlyHook` must be reviewed before adding new `Statement` variants.
 - `ApiErr` implements `IntoResponse` → JSON `{"error": "..."}` error bodies
 - `AdminClaims` / `AuthClaims` use `FromRequestParts<S> where AdminState: FromRef<S>`; `AdminClaims` also checks `is_admin == true`
 - Cache invalidation: `engine_cache.invalidate(name)` after catalog operations (keeps shared pool). `engine_cache.invalidate_all(name)` after datasource edit/delete (removes pool too). Never swap these — see README § Performance.

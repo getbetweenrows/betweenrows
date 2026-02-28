@@ -4,6 +4,11 @@ services:
       context: .
     env_file: proxy/.env
     environment:
-      PROXY_BIND_ADDR: "0.0.0.0:5434"
+      BR_PROXY_BIND_ADDR: "0.0.0.0:5434"
+      BR_ADMIN_BIND_ADDR: "0.0.0.0:5435"
+      BR_ADMIN_DATABASE_URL: "sqlite:///data/proxy_admin.db?mode=rwc"
     ports:
       - "5434:5434"
+      - "5435:5435"
+    volumes:
+      - ./data:/data

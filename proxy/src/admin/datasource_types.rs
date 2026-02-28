@@ -115,8 +115,8 @@ pub fn split_config(
     ds_type: &str,
     config_input: serde_json::Value,
 ) -> Result<(serde_json::Value, serde_json::Value), ConfigError> {
-    let type_def = get_type_def(ds_type)
-        .ok_or_else(|| ConfigError::UnknownType(ds_type.to_string()))?;
+    let type_def =
+        get_type_def(ds_type).ok_or_else(|| ConfigError::UnknownType(ds_type.to_string()))?;
 
     let input = config_input
         .as_object()
@@ -176,8 +176,8 @@ pub fn merge_config(
     existing_secure: serde_json::Value,
     update_input: serde_json::Value,
 ) -> Result<(serde_json::Value, serde_json::Value), ConfigError> {
-    let type_def = get_type_def(ds_type)
-        .ok_or_else(|| ConfigError::UnknownType(ds_type.to_string()))?;
+    let type_def =
+        get_type_def(ds_type).ok_or_else(|| ConfigError::UnknownType(ds_type.to_string()))?;
 
     let input = update_input
         .as_object()
@@ -412,7 +412,10 @@ mod tests {
         let (_config, secure) =
             merge_config("postgres", existing_config, existing_secure, update_input).unwrap();
 
-        assert_eq!(secure["password"], "new-password", "Password should be updated");
+        assert_eq!(
+            secure["password"], "new-password",
+            "Password should be updated"
+        );
     }
 
     #[test]

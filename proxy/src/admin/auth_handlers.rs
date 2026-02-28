@@ -1,17 +1,13 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-};
+use axum::{extract::State, http::StatusCode, response::Json};
 use chrono::Utc;
 use sea_orm::EntityTrait;
 
 use crate::entity::proxy_user;
 
 use super::{
-    dto::{LoginRequest, LoginResponse, UserResponse},
-    jwt::{encode_jwt, AuthClaims, Claims},
     AdminState, ApiErr,
+    dto::{LoginRequest, LoginResponse, UserResponse},
+    jwt::{AuthClaims, Claims, encode_jwt},
 };
 
 pub async fn login(

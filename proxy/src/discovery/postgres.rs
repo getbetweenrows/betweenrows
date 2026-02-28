@@ -1,21 +1,21 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 use datafusion::arrow::datatypes::Schema;
 use datafusion::sql::TableReference;
 use datafusion_table_providers::{
+    UnsupportedTypeAction,
     sql::db_connection_pool::{
-        DbConnectionPool,
-        dbconnection::get_schema,
-        postgrespool::PostgresConnectionPool,
+        DbConnectionPool, dbconnection::get_schema, postgrespool::PostgresConnectionPool,
     },
     util::secrets::to_secret_map,
-    UnsupportedTypeAction,
 };
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio_postgres::NoTls;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::{arrow_type_to_string, build_postgres_params, DataSourceConfig};
-use super::{DiscoveredColumn, DiscoveredSchema, DiscoveredTable, DiscoveryError, DiscoveryProvider};
+use super::{
+    DiscoveredColumn, DiscoveredSchema, DiscoveredTable, DiscoveryError, DiscoveryProvider,
+};
+use crate::engine::{DataSourceConfig, arrow_type_to_string, build_postgres_params};
 
 pub struct PostgresDiscoveryProvider {
     cfg: DataSourceConfig,
@@ -200,7 +200,9 @@ impl DiscoveryProvider for PostgresDiscoveryProvider {
             if cancel.is_cancelled() {
                 return Err(DiscoveryError::Cancelled);
             }
-            let conn = pool.connect().await
+            let conn = pool
+                .connect()
+                .await
                 .map_err(|e| DiscoveryError::Connect(e.to_string()))?;
             let table_ref = TableReference::full("postgres", schema.as_str(), table.as_str());
             match get_schema(conn, &table_ref).await {
@@ -237,7 +239,9 @@ impl DiscoveryProvider for PostgresDiscoveryProvider {
             for (i, (schema, table)) in chunk.iter().enumerate() {
                 let s_idx = i * 2 + 1;
                 let t_idx = i * 2 + 2;
-                conditions.push(format!("(table_schema = ${s_idx} AND table_name = ${t_idx})"));
+                conditions.push(format!(
+                    "(table_schema = ${s_idx} AND table_name = ${t_idx})"
+                ));
                 flat_params.push(schema.clone());
                 flat_params.push(table.clone());
             }
@@ -252,8 +256,10 @@ impl DiscoveryProvider for PostgresDiscoveryProvider {
             );
 
             // &(dyn ToSql + Sync) is Send because dyn ToSql + Sync: Sync
-            let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-                flat_params.iter().map(|p| p as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+            let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = flat_params
+                .iter()
+                .map(|p| p as &(dyn tokio_postgres::types::ToSql + Sync))
+                .collect();
 
             let rows = tokio::select! {
                 res = client.query(sql.as_str(), &param_refs) => {
@@ -310,7 +316,8 @@ impl DiscoveryProvider for PostgresDiscoveryProvider {
 
             let schema_p: &(dyn tokio_postgres::types::ToSql + Sync) = schema;
             let table_p: &(dyn tokio_postgres::types::ToSql + Sync) = table;
-            let matview_params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[schema_p, table_p];
+            let matview_params: &[&(dyn tokio_postgres::types::ToSql + Sync)] =
+                &[schema_p, table_p];
             let matview_fut = client.query(
                 "SELECT a.attname, a.attnum, t.typname, NOT a.attnotnull \
                  FROM pg_attribute a \

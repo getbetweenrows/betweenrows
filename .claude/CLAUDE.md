@@ -52,5 +52,11 @@ Always get Arrow types from the library's `get_schema()` during discovery — th
 - Discovery jobs: one active job per datasource enforced by `JobStore.active_by_ds`; cancellation via `CancellationToken` passed through all `DiscoveryProvider` methods
 - Catalog UUID v5 key format: `"{parent_uuid}:{child_name}"` — same natural key → same ID → re-discovery is a safe upsert
 
+## Pre-commit Hook
+A `.githooks/pre-commit` script runs `cargo fmt --check` and `cargo clippy -p proxy -- -D warnings`. Enable it once per clone:
+```bash
+git config core.hooksPath .githooks
+```
+
 ## Known Issues
 - **JSONB / regclass / regproc not supported** — `datafusion-table-providers` silently drops these columns (`UnsupportedTypeAction::Warn`). Catalog stores `arrow_type = NULL`; `build_arrow_schema` skips them.

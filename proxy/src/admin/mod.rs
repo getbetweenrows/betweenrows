@@ -1,8 +1,8 @@
 use axum::{
-    http::{header, HeaderValue, Method, StatusCode},
+    Router,
+    http::{HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Json, Response},
     routing::{get, post, put},
-    Router,
 };
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
@@ -158,8 +158,7 @@ fn api_v1() -> Router<AdminState> {
         )
         .route(
             "/datasources/{id}/discover/{job_id}",
-            get(catalog_handlers::discovery_status)
-                .delete(catalog_handlers::cancel_discovery),
+            get(catalog_handlers::discovery_status).delete(catalog_handlers::cancel_discovery),
         )
         .route(
             "/datasources/{id}/discover/{job_id}/events",

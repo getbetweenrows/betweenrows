@@ -1,8 +1,8 @@
 use axum::{
     extract::{FromRef, FromRequestParts},
-    http::{request::Parts, StatusCode},
+    http::{StatusCode, request::Parts},
 };
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -56,8 +56,10 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let state = AdminState::from_ref(state);
 
-        let token = extract_bearer(parts)
-            .ok_or((StatusCode::UNAUTHORIZED, "Missing or invalid Authorization header"))?;
+        let token = extract_bearer(parts).ok_or((
+            StatusCode::UNAUTHORIZED,
+            "Missing or invalid Authorization header",
+        ))?;
 
         let claims = decode_jwt(token, &state.jwt_secret)
             .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired token"))?;
@@ -83,8 +85,10 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let state = AdminState::from_ref(state);
 
-        let token = extract_bearer(parts)
-            .ok_or((StatusCode::UNAUTHORIZED, "Missing or invalid Authorization header"))?;
+        let token = extract_bearer(parts).ok_or((
+            StatusCode::UNAUTHORIZED,
+            "Missing or invalid Authorization header",
+        ))?;
 
         let claims = decode_jwt(token, &state.jwt_secret)
             .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired token"))?;

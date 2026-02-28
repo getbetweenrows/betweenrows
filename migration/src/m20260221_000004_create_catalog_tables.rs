@@ -18,8 +18,16 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(DiscoveredSchema::DataSourceId).uuid().not_null())
-                    .col(ColumnDef::new(DiscoveredSchema::SchemaName).string().not_null())
+                    .col(
+                        ColumnDef::new(DiscoveredSchema::DataSourceId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(DiscoveredSchema::SchemaName)
+                            .string()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(DiscoveredSchema::IsSelected)
                             .boolean()
@@ -66,9 +74,21 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(DiscoveredTable::DiscoveredSchemaId).uuid().not_null())
-                    .col(ColumnDef::new(DiscoveredTable::TableName).string().not_null())
-                    .col(ColumnDef::new(DiscoveredTable::TableType).string().not_null())
+                    .col(
+                        ColumnDef::new(DiscoveredTable::DiscoveredSchemaId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(DiscoveredTable::TableName)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(DiscoveredTable::TableType)
+                            .string()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(DiscoveredTable::IsSelected)
                             .boolean()
@@ -115,17 +135,37 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(DiscoveredColumn::DiscoveredTableId).uuid().not_null())
-                    .col(ColumnDef::new(DiscoveredColumn::ColumnName).string().not_null())
-                    .col(ColumnDef::new(DiscoveredColumn::OrdinalPosition).integer().not_null())
-                    .col(ColumnDef::new(DiscoveredColumn::DataType).string().not_null())
+                    .col(
+                        ColumnDef::new(DiscoveredColumn::DiscoveredTableId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(DiscoveredColumn::ColumnName)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(DiscoveredColumn::OrdinalPosition)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(DiscoveredColumn::DataType)
+                            .string()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(DiscoveredColumn::IsNullable)
                             .boolean()
                             .not_null()
                             .default(true),
                     )
-                    .col(ColumnDef::new(DiscoveredColumn::ColumnDefault).text().null())
+                    .col(
+                        ColumnDef::new(DiscoveredColumn::ColumnDefault)
+                            .text()
+                            .null(),
+                    )
                     .col(ColumnDef::new(DiscoveredColumn::ArrowType).string().null())
                     .col(
                         ColumnDef::new(DiscoveredColumn::DiscoveredAt)

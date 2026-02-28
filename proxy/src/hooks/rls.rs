@@ -1,13 +1,13 @@
-use async_trait::async_trait;
-use datafusion::sql::sqlparser::ast::{ObjectNamePart, Statement, TableFactor, Visit, Visitor};
-use datafusion::prelude::SessionContext;
-use datafusion::logical_expr::LogicalPlan;
-use pgwire::api::ClientInfo;
-use pgwire::api::results::{Response, QueryResponse};
-use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
-use futures::stream::StreamExt;
-use std::ops::ControlFlow;
 use crate::arrow_conversion::{build_field_info, encode_batch_optimized};
+use async_trait::async_trait;
+use datafusion::logical_expr::LogicalPlan;
+use datafusion::prelude::SessionContext;
+use datafusion::sql::sqlparser::ast::{ObjectNamePart, Statement, TableFactor, Visit, Visitor};
+use futures::stream::StreamExt;
+use pgwire::api::ClientInfo;
+use pgwire::api::results::{QueryResponse, Response};
+use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
+use std::ops::ControlFlow;
 
 use super::QueryHook;
 
@@ -22,10 +22,7 @@ struct SystemTableVisitor {
 impl Visitor for SystemTableVisitor {
     type Break = ();
 
-    fn pre_visit_table_factor(
-        &mut self,
-        table_factor: &TableFactor,
-    ) -> ControlFlow<Self::Break> {
+    fn pre_visit_table_factor(&mut self, table_factor: &TableFactor) -> ControlFlow<Self::Break> {
         if let TableFactor::Table { name, .. } = table_factor {
             // A table is "system" only if it carries an explicit system-schema qualifier.
             // After sql_rewrite::rewrite_statement runs, bare `pg_class` becomes
@@ -50,18 +47,20 @@ impl Visitor for SystemTableVisitor {
     }
 }
 
-
 /// Returns `true` if the statement references only system catalog tables
 /// (or has no table references at all). Uses AST inspection — immune to
 /// bypass via string literals such as `WHERE name = 'pg_catalog'`.
 fn is_system_only_statement(statement: &Statement) -> bool {
-    let mut visitor = SystemTableVisitor { has_user_table: false };
+    let mut visitor = SystemTableVisitor {
+        has_user_table: false,
+    };
     let _ = statement.visit(&mut visitor);
     !visitor.has_user_table
 }
 
 /// RLSHook implements Row-Level Security by injecting tenant filters.
 /// The tenant is read from client metadata (set during authentication).
+#[derive(Default)]
 pub struct RLSHook;
 
 impl RLSHook {
@@ -71,9 +70,13 @@ impl RLSHook {
 
     /// Apply tenant filter to LogicalPlan.
     /// Uses DataFusion's TreeNode API to inject a Filter below every user TableScan.
-    fn apply_tenant_filter(&self, plan: LogicalPlan, tenant: &str) -> datafusion::error::Result<LogicalPlan> {
+    fn apply_tenant_filter(
+        &self,
+        plan: LogicalPlan,
+        tenant: &str,
+    ) -> datafusion::error::Result<LogicalPlan> {
         use datafusion::common::tree_node::{Transformed, TreeNode};
-        use datafusion::logical_expr::{col, lit, LogicalPlanBuilder};
+        use datafusion::logical_expr::{LogicalPlanBuilder, col, lit};
 
         let tenant = tenant.to_owned();
         let transformed = plan.transform_up(|node| {
@@ -137,8 +140,13 @@ impl QueryHook for RLSHook {
         tracing::debug!(tenant = %tenant, "RLS hook processing query");
 
         // Convert AST directly to LogicalPlan
-        let df_statement = datafusion::sql::parser::Statement::Statement(Box::new(statement.clone()));
-        let logical_plan = match session_context.state().statement_to_plan(df_statement).await {
+        let df_statement =
+            datafusion::sql::parser::Statement::Statement(Box::new(statement.clone()));
+        let logical_plan = match session_context
+            .state()
+            .statement_to_plan(df_statement)
+            .await
+        {
             Ok(plan) => plan,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to create logical plan");
@@ -213,23 +221,26 @@ impl QueryHook for RLSHook {
             tracing::info!(batches = batch_count, rows = total_rows, elapsed = ?query_start.elapsed(), "RLS query completed");
         };
 
-        Some(Ok(Response::Query(QueryResponse::new(fields, encoded_stream))))
+        Some(Ok(Response::Query(QueryResponse::new(
+            fields,
+            encoded_stream,
+        ))))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::logical_expr::{LogicalPlanBuilder, col};
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::catalog::default_table_source::DefaultTableSource;
     use datafusion::datasource::empty::EmptyTable;
+    use datafusion::logical_expr::{LogicalPlanBuilder, col};
     use datafusion::sql::sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
     use std::sync::Arc;
 
     fn parse_statement(sql: &str) -> Statement {
-        let mut statements = Parser::parse_sql(&PostgreSqlDialect {}, sql)
-            .expect("Failed to parse SQL");
+        let mut statements =
+            Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("Failed to parse SQL");
         assert_eq!(statements.len(), 1);
         crate::sql_rewrite::rewrite_statement(&mut statements[0]);
         statements.remove(0)
@@ -308,21 +319,27 @@ mod tests {
             .build()
             .expect("Failed to build plan");
 
-        let filtered = hook.apply_tenant_filter(plan, "foo")
+        let filtered = hook
+            .apply_tenant_filter(plan, "foo")
             .expect("Failed to apply tenant filter");
 
         let plan_str = format!("{:?}", filtered);
-        assert!(plan_str.contains("Filter") && plan_str.contains("tenant"),
-                "Expected filter to be injected, got: {}", plan_str);
+        assert!(
+            plan_str.contains("Filter") && plan_str.contains("tenant"),
+            "Expected filter to be injected, got: {}",
+            plan_str
+        );
     }
 
     #[test]
     fn test_apply_tenant_filter_skips_system_table() {
         let hook = RLSHook::new();
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("relname", DataType::Utf8, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "relname",
+            DataType::Utf8,
+            false,
+        )]));
 
         let table = Arc::new(EmptyTable::new(schema));
         let table_source = Arc::new(DefaultTableSource::new(table));
@@ -332,13 +349,16 @@ mod tests {
             .build()
             .expect("Failed to build plan");
 
-        let filtered = hook.apply_tenant_filter(plan.clone(), "foo")
+        let filtered = hook
+            .apply_tenant_filter(plan.clone(), "foo")
             .expect("Failed to apply tenant filter");
 
         let original_str = format!("{:?}", plan);
         let filtered_str = format!("{:?}", filtered);
-        assert_eq!(original_str, filtered_str,
-                "Expected system table scan to remain unchanged");
+        assert_eq!(
+            original_str, filtered_str,
+            "Expected system table scan to remain unchanged"
+        );
     }
 
     #[test]
@@ -361,14 +381,21 @@ mod tests {
             .build()
             .expect("Failed to build plan");
 
-        let filtered = hook.apply_tenant_filter(plan, "foo")
+        let filtered = hook
+            .apply_tenant_filter(plan, "foo")
             .expect("Failed to apply tenant filter");
 
         let plan_str = format!("{:?}", filtered);
-        assert!(plan_str.contains("Projection"),
-                "Expected projection to be preserved, got: {}", plan_str);
-        assert!(plan_str.contains("Filter"),
-                "Expected filter to be injected below projection, got: {}", plan_str);
+        assert!(
+            plan_str.contains("Projection"),
+            "Expected projection to be preserved, got: {}",
+            plan_str
+        );
+        assert!(
+            plan_str.contains("Filter"),
+            "Expected filter to be injected below projection, got: {}",
+            plan_str
+        );
     }
 
     #[test]
@@ -385,19 +412,29 @@ mod tests {
 
         let plan = LogicalPlanBuilder::scan("performer", table_source, None)
             .expect("Failed to build scan")
-            .aggregate(vec![] as Vec<datafusion::logical_expr::Expr>, vec![datafusion::functions_aggregate::expr_fn::count(col("id"))])
+            .aggregate(
+                vec![] as Vec<datafusion::logical_expr::Expr>,
+                vec![datafusion::functions_aggregate::expr_fn::count(col("id"))],
+            )
             .expect("Failed to add aggregate")
             .build()
             .expect("Failed to build plan");
 
-        let filtered = hook.apply_tenant_filter(plan, "foo")
+        let filtered = hook
+            .apply_tenant_filter(plan, "foo")
             .expect("Failed to apply tenant filter");
 
         let plan_str = format!("{:?}", filtered);
-        assert!(plan_str.contains("Aggregate"),
-                "Expected aggregate to be preserved, got: {}", plan_str);
-        assert!(plan_str.contains("Filter"),
-                "Expected filter to be injected below aggregate, got: {}", plan_str);
+        assert!(
+            plan_str.contains("Aggregate"),
+            "Expected aggregate to be preserved, got: {}",
+            plan_str
+        );
+        assert!(
+            plan_str.contains("Filter"),
+            "Expected filter to be injected below aggregate, got: {}",
+            plan_str
+        );
     }
 
     #[test]
@@ -419,13 +456,20 @@ mod tests {
             .build()
             .expect("Failed to build plan");
 
-        let filtered = hook.apply_tenant_filter(plan, "test")
+        let filtered = hook
+            .apply_tenant_filter(plan, "test")
             .expect("Failed to apply tenant filter");
 
         let plan_str = format!("{:?}", filtered);
-        assert!(plan_str.contains("Sort"),
-                "Expected sort to be preserved, got: {}", plan_str);
-        assert!(plan_str.contains("Filter"),
-                "Expected filter to be injected, got: {}", plan_str);
+        assert!(
+            plan_str.contains("Sort"),
+            "Expected sort to be preserved, got: {}",
+            plan_str
+        );
+        assert!(
+            plan_str.contains("Filter"),
+            "Expected filter to be injected, got: {}",
+            plan_str
+        );
     }
 }

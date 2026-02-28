@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use datafusion::sql::sqlparser::ast::Statement;
 use datafusion::prelude::SessionContext;
+use datafusion::sql::sqlparser::ast::Statement;
 use pgwire::api::ClientInfo;
 use pgwire::api::results::Response;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
@@ -9,6 +9,7 @@ use super::QueryHook;
 
 /// Rejects any non-read SQL statement at the wire protocol level,
 /// before DataFusion or RLS processing.
+#[derive(Default)]
 pub struct ReadOnlyHook;
 
 impl ReadOnlyHook {

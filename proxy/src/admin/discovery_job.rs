@@ -119,6 +119,12 @@ pub struct JobStore {
     active_by_ds: HashMap<Uuid, String>,
 }
 
+impl Default for JobStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl JobStore {
     pub fn new() -> Self {
         Self {
@@ -132,7 +138,8 @@ impl JobStore {
     pub fn try_register(&mut self, job: DiscoveryJob) -> Result<&DiscoveryJob, String> {
         // Check for an existing running job
         if let Some(existing_id) = self.active_by_ds.get(&job.datasource_id) {
-            let is_running = self.jobs
+            let is_running = self
+                .jobs
                 .get(existing_id.as_str())
                 .map(|j| j.status == JobStatus::Running)
                 .unwrap_or(false);
@@ -180,14 +187,14 @@ impl JobStore {
 
     /// Cancel a job (returns false if not found or not running).
     pub fn cancel(&mut self, job_id: &str) -> bool {
-        if let Some(job) = self.jobs.get_mut(job_id) {
-            if job.status == JobStatus::Running {
-                job.cancel.cancel();
-                job.status = JobStatus::Failed;
-                job.error = Some("cancelled".to_string());
-                self.active_by_ds.remove(&job.datasource_id);
-                return true;
-            }
+        if let Some(job) = self.jobs.get_mut(job_id)
+            && job.status == JobStatus::Running
+        {
+            job.cancel.cancel();
+            job.status = JobStatus::Failed;
+            job.error = Some("cancelled".to_string());
+            self.active_by_ds.remove(&job.datasource_id);
+            return true;
         }
         false
     }

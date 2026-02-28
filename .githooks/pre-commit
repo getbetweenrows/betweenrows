@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "→ cargo fmt --check"
+cargo fmt --check
+
+echo "→ cargo clippy -p proxy"
+cargo clippy -p proxy -- -D warnings

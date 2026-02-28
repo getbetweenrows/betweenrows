@@ -13,13 +13,13 @@ use uuid::Uuid;
 use crate::entity::{data_source, proxy_user, user_data_source};
 
 use super::{
+    AdminState, ApiErr,
     datasource_types::{self, DataSourceTypeResponse},
     dto::{
         CreateDataSourceRequest, DataSourceResponse, ListDataSourcesQuery, PaginatedResponse,
         SetDataSourceUsersRequest, TestConnectionResponse, UpdateDataSourceRequest, UserResponse,
     },
     jwt::AdminClaims,
-    AdminState, ApiErr,
 };
 
 // ---------- helper: build DataSourceResponse from model ----------
@@ -69,10 +69,10 @@ pub async fn list_datasources(
 
     let mut query = data_source::Entity::find();
 
-    if let Some(ref search) = params.search {
-        if !search.is_empty() {
-            query = query.filter(data_source::Column::Name.contains(search.as_str()));
-        }
+    if let Some(ref search) = params.search
+        && !search.is_empty()
+    {
+        query = query.filter(data_source::Column::Name.contains(search.as_str()));
     }
 
     let paginator = query
@@ -106,14 +106,12 @@ pub async fn create_datasource(
     Json(body): Json<CreateDataSourceRequest>,
 ) -> Result<(StatusCode, Json<DataSourceResponse>), ApiErr> {
     // Validate and split config using type registry
-    let (config_json, secure_json) =
-        datasource_types::split_config(&body.ds_type, body.config).map_err(|e| {
-            ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string())
-        })?;
+    let (config_json, secure_json) = datasource_types::split_config(&body.ds_type, body.config)
+        .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
 
     // Encrypt secrets
-    let secure_str = crate::crypto::encrypt_json(&secure_json, &state.master_key)
-        .map_err(ApiErr::internal)?;
+    let secure_str =
+        crate::crypto::encrypt_json(&secure_json, &state.master_key).map_err(ApiErr::internal)?;
 
     let config_str = serde_json::to_string(&config_json).map_err(ApiErr::internal)?;
 
@@ -211,9 +209,13 @@ pub async fn update_datasource(
                 .map_err(ApiErr::internal)?
         };
 
-        let (new_config, new_secure) =
-            datasource_types::merge_config(&model.ds_type, existing_config, existing_secure, config_input)
-                .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+        let (new_config, new_secure) = datasource_types::merge_config(
+            &model.ds_type,
+            existing_config,
+            existing_secure,
+            config_input,
+        )
+        .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
 
         let new_secure_str = crate::crypto::encrypt_json(&new_secure, &state.master_key)
             .map_err(ApiErr::internal)?;
@@ -426,8 +428,7 @@ mod tests {
             "sslmode": "require"
         });
         let secure = serde_json::json!({"password": "secret"});
-        let secure_enc =
-            crate::crypto::encrypt_json(&secure, master_key).unwrap();
+        let secure_enc = crate::crypto::encrypt_json(&secure, master_key).unwrap();
         let now = Utc::now().naive_utc();
         data_source::ActiveModel {
             id: Set(Uuid::now_v7()),
@@ -459,11 +460,9 @@ mod tests {
             "sslmode": "require"
         });
 
-        let (config, secure) =
-            datasource_types::split_config("postgres", config_input).unwrap();
+        let (config, secure) = datasource_types::split_config("postgres", config_input).unwrap();
 
-        let secure_enc =
-            crate::crypto::encrypt_json(&secure, &master_key).unwrap();
+        let secure_enc = crate::crypto::encrypt_json(&secure, &master_key).unwrap();
         let now = Utc::now().naive_utc();
 
         let model = data_source::ActiveModel {
@@ -483,8 +482,7 @@ mod tests {
         .unwrap();
 
         // Password must NOT be in config column
-        let stored_config: serde_json::Value =
-            serde_json::from_str(&model.config).unwrap();
+        let stored_config: serde_json::Value = serde_json::from_str(&model.config).unwrap();
         assert!(
             stored_config.get("password").is_none(),
             "Password must not be in config"

@@ -2,24 +2,22 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::{
-        sse::{Event, KeepAlive, Sse},
         Json,
+        sse::{Event, KeepAlive, Sse},
     },
 };
 use chrono::Utc;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
 use std::convert::Infallible;
 use std::time::Duration;
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
 use crate::admin::discovery_job::{DiscoveryEvent, DiscoveryJob, DiscoveryRequest};
-use crate::admin::{AdminState, ApiErr};
 use crate::admin::dto::*;
 use crate::admin::jwt::AdminClaims;
+use crate::admin::{AdminState, ApiErr};
 use crate::discovery;
 use crate::engine::DataSourceConfig;
 use crate::entity::{data_source, discovered_column, discovered_schema, discovered_table};
@@ -118,7 +116,9 @@ async fn run_discovery_job(
         }
         Err(e) => {
             let msg = e.to_string();
-            send(DiscoveryEvent::Error { message: msg.clone() });
+            send(DiscoveryEvent::Error {
+                message: msg.clone(),
+            });
             let mut store = state.job_store.lock().await;
             store.fail(&job_id, msg);
         }
@@ -231,10 +231,8 @@ async fn run_inner(
 
             send(progress("querying", "Querying columns…"));
 
-            let pairs: Vec<(String, String)> = tables
-                .into_iter()
-                .map(|t| (t.schema, t.table))
-                .collect();
+            let pairs: Vec<(String, String)> =
+                tables.into_iter().map(|t| (t.schema, t.table)).collect();
 
             let discovered = provider.discover_columns(&pairs, cancel).await?;
 
@@ -373,7 +371,10 @@ async fn run_inner(
 
             // Run column discovery for selected tables
             if !tables_needing_columns.is_empty() {
-                send(progress("connecting", "Connecting to upstream database for column discovery…"));
+                send(progress(
+                    "connecting",
+                    "Connecting to upstream database for column discovery…",
+                ));
 
                 let provider = discovery::create_provider(&ds.ds_type, cfg)?;
 
@@ -382,7 +383,10 @@ async fn run_inner(
                     .map(|(s, t, _)| (s.clone(), t.clone()))
                     .collect();
 
-                send(progress("querying", &format!("Discovering columns for {} tables…", pairs.len())));
+                send(progress(
+                    "querying",
+                    &format!("Discovering columns for {} tables…", pairs.len()),
+                ));
 
                 match provider.discover_columns(&pairs, cancel).await {
                     Ok(columns) => {
@@ -403,7 +407,8 @@ async fn run_inner(
                                     .await?;
 
                                 if let Some(existing) = existing {
-                                    let mut active: discovered_column::ActiveModel = existing.into();
+                                    let mut active: discovered_column::ActiveModel =
+                                        existing.into();
                                     active.ordinal_position = Set(col.ordinal_position);
                                     active.data_type = Set(col.data_type);
                                     active.is_nullable = Set(col.is_nullable);
@@ -458,8 +463,10 @@ async fn run_inner(
                 .all(&state.db)
                 .await?;
 
-            let selected_schema_names: Vec<String> =
-                existing_schemas.iter().map(|s| s.schema_name.clone()).collect();
+            let selected_schema_names: Vec<String> = existing_schemas
+                .iter()
+                .map(|s| s.schema_name.clone())
+                .collect();
 
             send(progress("querying", "Querying live schemas…"));
             let live_schemas = provider.discover_schemas(cancel).await?;
@@ -467,20 +474,24 @@ async fn run_inner(
                 live_schemas.into_iter().map(|s| s.schema_name).collect();
 
             send(progress("querying", "Querying live tables…"));
-            let live_tables = provider.discover_tables(&selected_schema_names, cancel).await?;
+            let live_tables = provider
+                .discover_tables(&selected_schema_names, cancel)
+                .await?;
             let live_table_set: std::collections::HashSet<(String, String)> = live_tables
                 .iter()
                 .map(|t| (t.schema_name.clone(), t.table_name.clone()))
                 .collect();
 
             // Load existing selected tables
-            let existing_tables_by_schema: Vec<(discovered_schema::Model, Vec<discovered_table::Model>)> =
-                discovered_schema::Entity::find()
-                    .filter(discovered_schema::Column::DataSourceId.eq(datasource_id))
-                    .filter(discovered_schema::Column::IsSelected.eq(true))
-                    .find_with_related(discovered_table::Entity)
-                    .all(&state.db)
-                    .await?;
+            let existing_tables_by_schema: Vec<(
+                discovered_schema::Model,
+                Vec<discovered_table::Model>,
+            )> = discovered_schema::Entity::find()
+                .filter(discovered_schema::Column::DataSourceId.eq(datasource_id))
+                .filter(discovered_schema::Column::IsSelected.eq(true))
+                .find_with_related(discovered_table::Entity)
+                .all(&state.db)
+                .await?;
 
             let mut added_schemas = Vec::new();
             let mut removed_schemas = Vec::new();
@@ -500,7 +511,8 @@ async fn run_inner(
                     if table.is_selected {
                         let key = (schema.schema_name.clone(), table.table_name.clone());
                         if !live_table_set.contains(&key) {
-                            removed_tables.push(format!("{}.{}", schema.schema_name, table.table_name));
+                            removed_tables
+                                .push(format!("{}.{}", schema.schema_name, table.table_name));
                         } else {
                             selected_table_pairs.push(key);
                         }
@@ -510,9 +522,15 @@ async fn run_inner(
 
             // Detect new tables
             for live_table in &live_tables {
-                let key = (live_table.schema_name.clone(), live_table.table_name.clone());
+                let key = (
+                    live_table.schema_name.clone(),
+                    live_table.table_name.clone(),
+                );
                 if !selected_table_pairs.contains(&key) {
-                    added_tables.push(format!("{}.{}", live_table.schema_name, live_table.table_name));
+                    added_tables.push(format!(
+                        "{}.{}",
+                        live_table.schema_name, live_table.table_name
+                    ));
                 }
             }
 
@@ -526,9 +544,17 @@ async fn run_inner(
 
             // Discover columns for selected tables
             if !selected_table_pairs.is_empty() {
-                send(progress("querying", &format!("Querying columns for {} tables…", selected_table_pairs.len())));
+                send(progress(
+                    "querying",
+                    &format!(
+                        "Querying columns for {} tables…",
+                        selected_table_pairs.len()
+                    ),
+                ));
 
-                let live_columns = provider.discover_columns(&selected_table_pairs, cancel).await?;
+                let live_columns = provider
+                    .discover_columns(&selected_table_pairs, cancel)
+                    .await?;
                 let now = Utc::now().naive_utc();
 
                 for (schema, tables) in &existing_tables_by_schema {
@@ -537,18 +563,25 @@ async fn run_inner(
                             continue;
                         }
 
-                        let existing_cols: Vec<discovered_column::Model> = discovered_column::Entity::find()
-                            .filter(discovered_column::Column::DiscoveredTableId.eq(table.id))
-                            .all(&state.db)
-                            .await?;
+                        let existing_cols: Vec<discovered_column::Model> =
+                            discovered_column::Entity::find()
+                                .filter(discovered_column::Column::DiscoveredTableId.eq(table.id))
+                                .all(&state.db)
+                                .await?;
 
-                        let existing_col_map: std::collections::HashMap<String, &discovered_column::Model> =
-                            existing_cols.iter().map(|c| (c.column_name.clone(), c)).collect();
+                        let existing_col_map: std::collections::HashMap<
+                            String,
+                            &discovered_column::Model,
+                        > = existing_cols
+                            .iter()
+                            .map(|c| (c.column_name.clone(), c))
+                            .collect();
 
                         let live_cols_for_table: Vec<_> = live_columns
                             .iter()
                             .filter(|c| {
-                                c.schema_name == schema.schema_name && c.table_name == table.table_name
+                                c.schema_name == schema.schema_name
+                                    && c.table_name == table.table_name
                             })
                             .collect();
 
@@ -629,8 +662,7 @@ fn progress(phase: &str, detail: &str) -> DiscoveryEvent {
 
 /// Namespace UUID for catalog fingerprints (UUID v5).
 const CATALOG_NS: Uuid = Uuid::from_bytes([
-    0x8a, 0x1b, 0x9c, 0x4e, 0x3d, 0x7f, 0x5a, 0x21,
-    0xb6, 0x0e, 0xf4, 0x12, 0x7c, 0x8d, 0x9e, 0x03,
+    0x8a, 0x1b, 0x9c, 0x4e, 0x3d, 0x7f, 0x5a, 0x21, 0xb6, 0x0e, 0xf4, 0x12, 0x7c, 0x8d, 0x9e, 0x03,
 ]);
 
 fn catalog_schema_uuid(datasource_id: Uuid, schema_name: &str) -> Uuid {
@@ -672,16 +704,15 @@ pub async fn discovery_events(
         }
     };
 
-    let stream = BroadcastStream::new(rx)
-        .filter_map(|result| {
-            match result {
-                Ok(event) => {
-                    let sse_event = event.to_sse_event().ok()?;
-                    Some(Ok(sse_event))
-                }
-                Err(_) => None, // lagged — skip
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        match result {
+            Ok(event) => {
+                let sse_event = event.to_sse_event().ok()?;
+                Some(Ok(sse_event))
             }
-        });
+            Err(_) => None, // lagged — skip
+        }
+    });
 
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
@@ -713,7 +744,9 @@ pub async fn discovery_status(
     Path((_ds_id, job_id)): Path<(Uuid, String)>,
 ) -> Result<Json<JobStatusResponse>, ApiErr> {
     let store = state.job_store.lock().await;
-    let job = store.get(&job_id).ok_or_else(|| ApiErr::not_found("Job not found"))?;
+    let job = store
+        .get(&job_id)
+        .ok_or_else(|| ApiErr::not_found("Job not found"))?;
 
     Ok(Json(JobStatusResponse {
         job_id: job.id.clone(),
@@ -788,5 +821,7 @@ pub async fn get_catalog(
         });
     }
 
-    Ok(Json(CatalogResponse { schemas: schema_responses }))
+    Ok(Json(CatalogResponse {
+        schemas: schema_responses,
+    }))
 }

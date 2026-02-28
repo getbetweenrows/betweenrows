@@ -6,8 +6,8 @@ use datafusion::arrow::datatypes::{DataType as ArrowDataType, IntervalUnit, Time
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::arrow::util::display::{ArrayFormatter, FormatOptions};
 use pg_interval::Interval as PgInterval;
-use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo};
 use pgwire::api::Type;
+use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo};
 use pgwire::error::{PgWireError, PgWireResult};
 use rust_decimal::Decimal;
 use std::sync::Arc;
@@ -23,8 +23,8 @@ pub fn arrow_type_to_pgwire(arrow_type: &ArrowDataType) -> Type {
         ArrowDataType::Int32 => Type::INT4,
         ArrowDataType::Int64 => Type::INT8,
         ArrowDataType::UInt8 => Type::INT2,
-        ArrowDataType::UInt16 => Type::INT4,  // u16 max (65535) exceeds i16 max (32767)
-        ArrowDataType::UInt32 => Type::INT8,  // u32 max (4294967295) exceeds i32 max
+        ArrowDataType::UInt16 => Type::INT4, // u16 max (65535) exceeds i16 max (32767)
+        ArrowDataType::UInt32 => Type::INT8, // u32 max (4294967295) exceeds i32 max
         ArrowDataType::UInt64 => Type::INT8,
         ArrowDataType::Float32 => Type::FLOAT4,
         ArrowDataType::Float64 => Type::FLOAT8,
@@ -183,8 +183,9 @@ impl ColumnEncoder for UInt64Encoder {
             encoder.encode_field(&None::<i64>)
         } else {
             let v = self.array.value(row_idx);
-            let signed = i64::try_from(v)
-                .map_err(|_| PgWireError::ApiError(format!("UInt64 value {v} overflows INT8").into()))?;
+            let signed = i64::try_from(v).map_err(|_| {
+                PgWireError::ApiError(format!("UInt64 value {v} overflows INT8").into())
+            })?;
             encoder.encode_field(&Some(signed))
         }
     }
@@ -302,11 +303,19 @@ impl ColumnEncoder for Date32Encoder {
         } else {
             let days = self.array.value(row_idx);
             let date = NaiveDate::from_ymd_opt(1970, 1, 1)
-                .and_then(|epoch| epoch.checked_add_days(chrono::Days::new(days.unsigned_abs() as u64))
-                    .filter(|_| days >= 0)
-                    .or_else(|| NaiveDate::from_ymd_opt(1970, 1, 1)
-                        .and_then(|epoch| epoch.checked_sub_days(chrono::Days::new((-days) as u64)))))
-                .ok_or_else(|| PgWireError::ApiError(format!("Invalid Date32 value: {days}").into()))?;
+                .and_then(|epoch| {
+                    epoch
+                        .checked_add_days(chrono::Days::new(days.unsigned_abs() as u64))
+                        .filter(|_| days >= 0)
+                        .or_else(|| {
+                            NaiveDate::from_ymd_opt(1970, 1, 1).and_then(|epoch| {
+                                epoch.checked_sub_days(chrono::Days::new((-days) as u64))
+                            })
+                        })
+                })
+                .ok_or_else(|| {
+                    PgWireError::ApiError(format!("Invalid Date32 value: {days}").into())
+                })?;
             encoder.encode_field(&Some(date))
         }
     }
@@ -347,8 +356,9 @@ impl ColumnEncoder for TimestampEncoder {
             }
         } else {
             let micros = self.array.value(row_idx);
-            let ndt = micros_to_naive(micros)
-                .ok_or_else(|| PgWireError::ApiError(format!("Invalid timestamp micros: {micros}").into()))?;
+            let ndt = micros_to_naive(micros).ok_or_else(|| {
+                PgWireError::ApiError(format!("Invalid timestamp micros: {micros}").into())
+            })?;
             if self.has_tz {
                 encoder.encode_field(&Some(DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc)))
             } else {
@@ -372,8 +382,9 @@ impl ColumnEncoder for TimestampMillisEncoder {
             }
         } else {
             let ms = self.array.value(row_idx);
-            let ndt = millis_to_naive(ms)
-                .ok_or_else(|| PgWireError::ApiError(format!("Invalid timestamp millis: {ms}").into()))?;
+            let ndt = millis_to_naive(ms).ok_or_else(|| {
+                PgWireError::ApiError(format!("Invalid timestamp millis: {ms}").into())
+            })?;
             if self.has_tz {
                 encoder.encode_field(&Some(DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc)))
             } else {
@@ -397,8 +408,9 @@ impl ColumnEncoder for TimestampSecondsEncoder {
             }
         } else {
             let s = self.array.value(row_idx);
-            let ndt = seconds_to_naive(s)
-                .ok_or_else(|| PgWireError::ApiError(format!("Invalid timestamp seconds: {s}").into()))?;
+            let ndt = seconds_to_naive(s).ok_or_else(|| {
+                PgWireError::ApiError(format!("Invalid timestamp seconds: {s}").into())
+            })?;
             if self.has_tz {
                 encoder.encode_field(&Some(DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc)))
             } else {
@@ -422,8 +434,9 @@ impl ColumnEncoder for TimestampNanosEncoder {
             }
         } else {
             let ns = self.array.value(row_idx);
-            let ndt = nanos_to_naive(ns)
-                .ok_or_else(|| PgWireError::ApiError(format!("Invalid timestamp nanos: {ns}").into()))?;
+            let ndt = nanos_to_naive(ns).ok_or_else(|| {
+                PgWireError::ApiError(format!("Invalid timestamp nanos: {ns}").into())
+            })?;
             if self.has_tz {
                 encoder.encode_field(&Some(DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc)))
             } else {
@@ -520,124 +533,208 @@ fn create_column_encoder(
 ) -> PgWireResult<Box<dyn ColumnEncoder>> {
     match column.data_type() {
         ArrowDataType::Int8 => {
-            let array = column.as_any().downcast_ref::<Int8Array>()
-                .ok_or_else(|| downcast_err("Int8Array"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<Int8Array>()
+                .ok_or_else(|| downcast_err("Int8Array"))?
+                .clone();
             Ok(Box::new(Int8Encoder { array }))
         }
         ArrowDataType::Int16 => {
-            let array = column.as_any().downcast_ref::<Int16Array>()
-                .ok_or_else(|| downcast_err("Int16Array"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .ok_or_else(|| downcast_err("Int16Array"))?
+                .clone();
             Ok(Box::new(Int16Encoder { array }))
         }
         ArrowDataType::Int32 => {
-            let array = column.as_any().downcast_ref::<Int32Array>()
-                .ok_or_else(|| downcast_err("Int32Array"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .ok_or_else(|| downcast_err("Int32Array"))?
+                .clone();
             Ok(Box::new(Int32Encoder { array }))
         }
         ArrowDataType::Int64 => {
-            let array = column.as_any().downcast_ref::<Int64Array>()
-                .ok_or_else(|| downcast_err("Int64Array"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| downcast_err("Int64Array"))?
+                .clone();
             Ok(Box::new(Int64Encoder { array }))
         }
         ArrowDataType::UInt8 => {
-            let array = column.as_any().downcast_ref::<UInt8Array>()
-                .ok_or_else(|| downcast_err("UInt8Array"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<UInt8Array>()
+                .ok_or_else(|| downcast_err("UInt8Array"))?
+                .clone();
             Ok(Box::new(UInt8Encoder { array }))
         }
         ArrowDataType::UInt16 => {
-            let array = column.as_any().downcast_ref::<UInt16Array>()
-                .ok_or_else(|| downcast_err("UInt16Array"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<UInt16Array>()
+                .ok_or_else(|| downcast_err("UInt16Array"))?
+                .clone();
             Ok(Box::new(UInt16Encoder { array }))
         }
         ArrowDataType::UInt32 => {
-            let array = column.as_any().downcast_ref::<UInt32Array>()
-                .ok_or_else(|| downcast_err("UInt32Array"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .ok_or_else(|| downcast_err("UInt32Array"))?
+                .clone();
             Ok(Box::new(UInt32Encoder { array }))
         }
         ArrowDataType::UInt64 => {
-            let array = column.as_any().downcast_ref::<UInt64Array>()
-                .ok_or_else(|| downcast_err("UInt64Array"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .ok_or_else(|| downcast_err("UInt64Array"))?
+                .clone();
             Ok(Box::new(UInt64Encoder { array }))
         }
         ArrowDataType::Float32 => {
-            let array = column.as_any().downcast_ref::<Float32Array>()
-                .ok_or_else(|| downcast_err("Float32Array"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| downcast_err("Float32Array"))?
+                .clone();
             Ok(Box::new(Float32Encoder { array }))
         }
         ArrowDataType::Float64 => {
-            let array = column.as_any().downcast_ref::<Float64Array>()
-                .ok_or_else(|| downcast_err("Float64Array"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .ok_or_else(|| downcast_err("Float64Array"))?
+                .clone();
             Ok(Box::new(Float64Encoder { array }))
         }
         ArrowDataType::Boolean => {
-            let array = column.as_any().downcast_ref::<BooleanArray>()
-                .ok_or_else(|| downcast_err("BooleanArray"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .ok_or_else(|| downcast_err("BooleanArray"))?
+                .clone();
             Ok(Box::new(BooleanEncoder { array }))
         }
         ArrowDataType::Utf8 => {
-            let array = column.as_any().downcast_ref::<StringArray>()
-                .ok_or_else(|| downcast_err("StringArray"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| downcast_err("StringArray"))?
+                .clone();
             Ok(Box::new(Utf8Encoder { array }))
         }
         ArrowDataType::LargeUtf8 => {
-            let array = column.as_any().downcast_ref::<LargeStringArray>()
-                .ok_or_else(|| downcast_err("LargeStringArray"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .ok_or_else(|| downcast_err("LargeStringArray"))?
+                .clone();
             Ok(Box::new(LargeUtf8Encoder { array }))
         }
         ArrowDataType::Binary => {
-            let array = column.as_any().downcast_ref::<BinaryArray>()
-                .ok_or_else(|| downcast_err("BinaryArray"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| downcast_err("BinaryArray"))?
+                .clone();
             Ok(Box::new(BinaryEncoder { array }))
         }
         ArrowDataType::LargeBinary => {
-            let array = column.as_any().downcast_ref::<LargeBinaryArray>()
-                .ok_or_else(|| downcast_err("LargeBinaryArray"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .ok_or_else(|| downcast_err("LargeBinaryArray"))?
+                .clone();
             Ok(Box::new(LargeBinaryEncoder { array }))
         }
         ArrowDataType::Date32 => {
-            let array = column.as_any().downcast_ref::<Date32Array>()
-                .ok_or_else(|| downcast_err("Date32Array"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .ok_or_else(|| downcast_err("Date32Array"))?
+                .clone();
             Ok(Box::new(Date32Encoder { array }))
         }
         ArrowDataType::Timestamp(TimeUnit::Microsecond, tz) => {
-            let array = column.as_any().downcast_ref::<TimestampMicrosecondArray>()
-                .ok_or_else(|| downcast_err("TimestampMicrosecondArray"))?.clone();
-            Ok(Box::new(TimestampEncoder { array, has_tz: tz.is_some() }))
+            let array = column
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .ok_or_else(|| downcast_err("TimestampMicrosecondArray"))?
+                .clone();
+            Ok(Box::new(TimestampEncoder {
+                array,
+                has_tz: tz.is_some(),
+            }))
         }
         ArrowDataType::Timestamp(TimeUnit::Millisecond, tz) => {
-            let array = column.as_any().downcast_ref::<TimestampMillisecondArray>()
-                .ok_or_else(|| downcast_err("TimestampMillisecondArray"))?.clone();
-            Ok(Box::new(TimestampMillisEncoder { array, has_tz: tz.is_some() }))
+            let array = column
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .ok_or_else(|| downcast_err("TimestampMillisecondArray"))?
+                .clone();
+            Ok(Box::new(TimestampMillisEncoder {
+                array,
+                has_tz: tz.is_some(),
+            }))
         }
         ArrowDataType::Timestamp(TimeUnit::Second, tz) => {
-            let array = column.as_any().downcast_ref::<TimestampSecondArray>()
-                .ok_or_else(|| downcast_err("TimestampSecondArray"))?.clone();
-            Ok(Box::new(TimestampSecondsEncoder { array, has_tz: tz.is_some() }))
+            let array = column
+                .as_any()
+                .downcast_ref::<TimestampSecondArray>()
+                .ok_or_else(|| downcast_err("TimestampSecondArray"))?
+                .clone();
+            Ok(Box::new(TimestampSecondsEncoder {
+                array,
+                has_tz: tz.is_some(),
+            }))
         }
         ArrowDataType::Timestamp(TimeUnit::Nanosecond, tz) => {
-            let array = column.as_any().downcast_ref::<TimestampNanosecondArray>()
-                .ok_or_else(|| downcast_err("TimestampNanosecondArray"))?.clone();
-            Ok(Box::new(TimestampNanosEncoder { array, has_tz: tz.is_some() }))
+            let array = column
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .ok_or_else(|| downcast_err("TimestampNanosecondArray"))?
+                .clone();
+            Ok(Box::new(TimestampNanosEncoder {
+                array,
+                has_tz: tz.is_some(),
+            }))
         }
         ArrowDataType::Decimal128(_, scale) => {
             let scale = *scale as u32;
-            let array = column.as_any().downcast_ref::<Decimal128Array>()
-                .ok_or_else(|| downcast_err("Decimal128Array"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<Decimal128Array>()
+                .ok_or_else(|| downcast_err("Decimal128Array"))?
+                .clone();
             Ok(Box::new(Decimal128Encoder { array, scale }))
         }
         ArrowDataType::Interval(IntervalUnit::YearMonth) => {
-            let array = column.as_any().downcast_ref::<IntervalYearMonthArray>()
-                .ok_or_else(|| downcast_err("IntervalYearMonthArray"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<IntervalYearMonthArray>()
+                .ok_or_else(|| downcast_err("IntervalYearMonthArray"))?
+                .clone();
             Ok(Box::new(IntervalYearMonthEncoder { array }))
         }
         ArrowDataType::Interval(IntervalUnit::DayTime) => {
-            let array = column.as_any().downcast_ref::<IntervalDayTimeArray>()
-                .ok_or_else(|| downcast_err("IntervalDayTimeArray"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<IntervalDayTimeArray>()
+                .ok_or_else(|| downcast_err("IntervalDayTimeArray"))?
+                .clone();
             Ok(Box::new(IntervalDayTimeEncoder { array }))
         }
         ArrowDataType::Interval(IntervalUnit::MonthDayNano) => {
-            let array = column.as_any().downcast_ref::<IntervalMonthDayNanoArray>()
-                .ok_or_else(|| downcast_err("IntervalMonthDayNanoArray"))?.clone();
+            let array = column
+                .as_any()
+                .downcast_ref::<IntervalMonthDayNanoArray>()
+                .ok_or_else(|| downcast_err("IntervalMonthDayNanoArray"))?
+                .clone();
             Ok(Box::new(IntervalMonthDayNanoEncoder { array }))
         }
         _ => {
@@ -707,12 +804,14 @@ pub fn encode_batch_optimized(
 mod tests {
     use super::*;
     use arrow::array::{
-        BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float64Array,
-        Int32Array, IntervalDayTimeArray, IntervalMonthDayNanoArray,
-        IntervalYearMonthArray, StringArray, TimestampMicrosecondArray,
-        UInt16Array, UInt32Array, UInt64Array,
+        BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int32Array,
+        IntervalDayTimeArray, IntervalMonthDayNanoArray, IntervalYearMonthArray, StringArray,
+        TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array,
     };
-    use arrow::datatypes::{DataType as ArrowDataType, Field, IntervalDayTime, IntervalMonthDayNano, IntervalUnit, Schema, TimeUnit};
+    use arrow::datatypes::{
+        DataType as ArrowDataType, Field, IntervalDayTime, IntervalMonthDayNano, IntervalUnit,
+        Schema, TimeUnit,
+    };
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
@@ -739,7 +838,10 @@ mod tests {
             Type::TIMESTAMP
         );
         assert_eq!(
-            arrow_type_to_pgwire(&ArrowDataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))),
+            arrow_type_to_pgwire(&ArrowDataType::Timestamp(
+                TimeUnit::Microsecond,
+                Some("UTC".into())
+            )),
             Type::TIMESTAMPTZ
         );
         assert_eq!(
@@ -750,9 +852,15 @@ mod tests {
 
     #[test]
     fn test_type_mapping_numeric_and_binary() {
-        assert_eq!(arrow_type_to_pgwire(&ArrowDataType::Decimal128(10, 2)), Type::NUMERIC);
+        assert_eq!(
+            arrow_type_to_pgwire(&ArrowDataType::Decimal128(10, 2)),
+            Type::NUMERIC
+        );
         assert_eq!(arrow_type_to_pgwire(&ArrowDataType::Binary), Type::BYTEA);
-        assert_eq!(arrow_type_to_pgwire(&ArrowDataType::LargeBinary), Type::BYTEA);
+        assert_eq!(
+            arrow_type_to_pgwire(&ArrowDataType::LargeBinary),
+            Type::BYTEA
+        );
     }
 
     #[test]
@@ -765,7 +873,10 @@ mod tests {
 
     // ── Encoding tests ────────────────────────────────────────────────────────
 
-    fn encode(schema: Arc<Schema>, columns: Vec<Arc<dyn Array>>) -> Vec<pgwire::messages::data::DataRow> {
+    fn encode(
+        schema: Arc<Schema>,
+        columns: Vec<Arc<dyn Array>>,
+    ) -> Vec<pgwire::messages::data::DataRow> {
         let batch = RecordBatch::try_new(schema.clone(), columns).expect("RecordBatch::try_new");
         let fields = build_field_info(&schema);
         encode_batch_optimized(batch, fields).expect("encode_batch_optimized")
@@ -779,12 +890,15 @@ mod tests {
             Field::new("score", ArrowDataType::Float64, false),
             Field::new("active", ArrowDataType::Boolean, false),
         ]));
-        let rows = encode(schema, vec![
-            Arc::new(Int32Array::from(vec![1, 2, 3])),
-            Arc::new(StringArray::from(vec!["a", "b", "c"])),
-            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
-            Arc::new(BooleanArray::from(vec![true, false, true])),
-        ]);
+        let rows = encode(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(BooleanArray::from(vec![true, false, true])),
+            ],
+        );
         assert_eq!(rows.len(), 3);
     }
 
@@ -794,46 +908,72 @@ mod tests {
             Field::new("id", ArrowDataType::Int32, true),
             Field::new("name", ArrowDataType::Utf8, true),
         ]));
-        let rows = encode(schema, vec![
-            Arc::new(Int32Array::from(vec![Some(1), None, Some(3)])),
-            Arc::new(StringArray::from(vec![Some("x"), None, Some("z")])),
-        ]);
+        let rows = encode(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![Some(1), None, Some(3)])),
+                Arc::new(StringArray::from(vec![Some("x"), None, Some("z")])),
+            ],
+        );
         assert_eq!(rows.len(), 3);
     }
 
     #[test]
     fn test_encode_empty_batch() {
-        let schema = Arc::new(Schema::new(vec![Field::new("id", ArrowDataType::Int32, false)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "id",
+            ArrowDataType::Int32,
+            false,
+        )]));
         let rows = encode(schema, vec![Arc::new(Int32Array::from(Vec::<i32>::new()))]);
         assert_eq!(rows.len(), 0);
     }
 
     #[test]
     fn test_encode_date32() {
-        let schema = Arc::new(Schema::new(vec![Field::new("d", ArrowDataType::Date32, true)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "d",
+            ArrowDataType::Date32,
+            true,
+        )]));
         // 0 = 1970-01-01, 1 = 1970-01-02, negative = before epoch
-        let rows = encode(schema, vec![
-            Arc::new(Date32Array::from(vec![Some(0), Some(1), Some(18628), None])),
-        ]);
+        let rows = encode(
+            schema,
+            vec![Arc::new(Date32Array::from(vec![
+                Some(0),
+                Some(1),
+                Some(18628),
+                None,
+            ]))],
+        );
         assert_eq!(rows.len(), 4);
     }
 
     #[test]
     fn test_encode_timestamp_micros_no_tz() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("ts", ArrowDataType::Timestamp(TimeUnit::Microsecond, None), true),
-        ]));
-        let rows = encode(schema, vec![
-            Arc::new(TimestampMicrosecondArray::from(vec![Some(0), Some(1_000_000), None])),
-        ]);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            ArrowDataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        )]));
+        let rows = encode(
+            schema,
+            vec![Arc::new(TimestampMicrosecondArray::from(vec![
+                Some(0),
+                Some(1_000_000),
+                None,
+            ]))],
+        );
         assert_eq!(rows.len(), 3);
     }
 
     #[test]
     fn test_encode_timestamp_micros_with_tz() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("ts", ArrowDataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())), true),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            ArrowDataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            true,
+        )]));
         // Array must carry the same timezone metadata as the schema field.
         let array = TimestampMicrosecondArray::from(vec![Some(0), Some(1_000_000), None])
             .with_timezone("UTC");
@@ -844,9 +984,11 @@ mod tests {
     #[test]
     fn test_encode_decimal128() {
         // Decimal128(10, 2): value 12345 means 123.45
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("price", ArrowDataType::Decimal128(10, 2), true),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "price",
+            ArrowDataType::Decimal128(10, 2),
+            true,
+        )]));
         let array = Decimal128Array::from(vec![Some(12345i128), Some(-99), None])
             .with_precision_and_scale(10, 2)
             .unwrap();
@@ -856,27 +998,34 @@ mod tests {
 
     #[test]
     fn test_encode_binary() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("data", ArrowDataType::Binary, true),
-        ]));
-        let rows = encode(schema, vec![
-            Arc::new(BinaryArray::from_opt_vec(vec![
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "data",
+            ArrowDataType::Binary,
+            true,
+        )]));
+        let rows = encode(
+            schema,
+            vec![Arc::new(BinaryArray::from_opt_vec(vec![
                 Some(b"hello".as_ref()),
                 None,
                 Some(b"\xDE\xAD\xBE\xEF".as_ref()),
-            ])),
-        ]);
+            ]))],
+        );
         assert_eq!(rows.len(), 3);
     }
 
     #[test]
     fn test_encode_uint64_overflow_returns_error() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("big", ArrowDataType::UInt64, false),
-        ]));
-        let batch = RecordBatch::try_new(schema.clone(), vec![
-            Arc::new(UInt64Array::from(vec![u64::MAX])),
-        ]).expect("RecordBatch::try_new");
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "big",
+            ArrowDataType::UInt64,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(UInt64Array::from(vec![u64::MAX]))],
+        )
+        .expect("RecordBatch::try_new");
         let fields = build_field_info(&schema);
         let result = encode_batch_optimized(batch, fields);
         assert!(result.is_err(), "Expected overflow error for u64::MAX");
@@ -884,52 +1033,75 @@ mod tests {
 
     #[test]
     fn test_encode_interval_year_month() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("iv", ArrowDataType::Interval(IntervalUnit::YearMonth), true),
-        ]));
-        let rows = encode(schema, vec![
-            Arc::new(IntervalYearMonthArray::from(vec![Some(12), None, Some(-1)])),
-        ]);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "iv",
+            ArrowDataType::Interval(IntervalUnit::YearMonth),
+            true,
+        )]));
+        let rows = encode(
+            schema,
+            vec![Arc::new(IntervalYearMonthArray::from(vec![
+                Some(12),
+                None,
+                Some(-1),
+            ]))],
+        );
         assert_eq!(rows.len(), 3);
     }
 
     #[test]
     fn test_encode_interval_day_time() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("iv", ArrowDataType::Interval(IntervalUnit::DayTime), true),
-        ]));
-        let rows = encode(schema, vec![
-            Arc::new(IntervalDayTimeArray::from(vec![
-                Some(IntervalDayTime { days: 1, milliseconds: 5000 }),
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "iv",
+            ArrowDataType::Interval(IntervalUnit::DayTime),
+            true,
+        )]));
+        let rows = encode(
+            schema,
+            vec![Arc::new(IntervalDayTimeArray::from(vec![
+                Some(IntervalDayTime {
+                    days: 1,
+                    milliseconds: 5000,
+                }),
                 None,
-            ])),
-        ]);
+            ]))],
+        );
         assert_eq!(rows.len(), 2);
     }
 
     #[test]
     fn test_encode_interval_month_day_nano() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("iv", ArrowDataType::Interval(IntervalUnit::MonthDayNano), true),
-        ]));
-        let rows = encode(schema, vec![
-            Arc::new(IntervalMonthDayNanoArray::from(vec![
-                Some(IntervalMonthDayNano { months: 1, days: 2, nanoseconds: 3_000_000_000 }),
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "iv",
+            ArrowDataType::Interval(IntervalUnit::MonthDayNano),
+            true,
+        )]));
+        let rows = encode(
+            schema,
+            vec![Arc::new(IntervalMonthDayNanoArray::from(vec![
+                Some(IntervalMonthDayNano {
+                    months: 1,
+                    days: 2,
+                    nanoseconds: 3_000_000_000,
+                }),
                 None,
-            ])),
-        ]);
+            ]))],
+        );
         assert_eq!(rows.len(), 2);
     }
 
     #[test]
     fn test_encode_uint32() {
         // u32::MAX (4294967295) must not truncate — widened to INT8
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("v", ArrowDataType::UInt32, false),
-        ]));
-        let rows = encode(schema, vec![
-            Arc::new(UInt32Array::from(vec![0u32, u32::MAX])),
-        ]);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "v",
+            ArrowDataType::UInt32,
+            false,
+        )]));
+        let rows = encode(
+            schema,
+            vec![Arc::new(UInt32Array::from(vec![0u32, u32::MAX]))],
+        );
         assert_eq!(rows.len(), 2);
     }
 
@@ -937,12 +1109,20 @@ mod tests {
     fn test_encode_uint16_above_i16_max() {
         // Value 50000 exceeds i16::MAX (32767) and would be silently truncated
         // if mapped to INT2. With the fix it is encoded as INT4 (i32).
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("v", ArrowDataType::UInt16, false),
-        ]));
-        let rows = encode(schema, vec![
-            Arc::new(UInt16Array::from(vec![0u16, 32767u16, 50000u16, u16::MAX])),
-        ]);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "v",
+            ArrowDataType::UInt16,
+            false,
+        )]));
+        let rows = encode(
+            schema,
+            vec![Arc::new(UInt16Array::from(vec![
+                0u16,
+                32767u16,
+                50000u16,
+                u16::MAX,
+            ]))],
+        );
         assert_eq!(rows.len(), 4);
         assert_eq!(arrow_type_to_pgwire(&ArrowDataType::UInt16), Type::INT4);
     }

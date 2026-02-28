@@ -12,12 +12,12 @@ use uuid::Uuid;
 use crate::{auth::Auth, entity::proxy_user};
 
 use super::{
+    AdminState, ApiErr,
     dto::{
         ChangePasswordRequest, CreateUserRequest, ListUsersQuery, PaginatedResponse,
         UpdateUserRequest, UserResponse,
     },
     jwt::AdminClaims,
-    AdminState, ApiErr,
 };
 
 pub async fn list_users(
@@ -30,10 +30,10 @@ pub async fn list_users(
 
     let mut query = proxy_user::Entity::find();
 
-    if let Some(ref search) = params.search {
-        if !search.is_empty() {
-            query = query.filter(proxy_user::Column::Username.contains(search.as_str()));
-        }
+    if let Some(ref search) = params.search
+        && !search.is_empty()
+    {
+        query = query.filter(proxy_user::Column::Username.contains(search.as_str()));
     }
 
     let paginator = query

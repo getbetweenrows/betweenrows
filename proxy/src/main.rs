@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use migration::{Migrator, MigratorTrait};
-use proxy::admin::{admin_router, AdminState};
+use pgwire::tokio::process_socket;
+use proxy::admin::{AdminState, admin_router};
 use proxy::auth::Auth;
 use proxy::engine::EngineCache;
 use proxy::handler::ProxyHandler;
@@ -8,7 +9,6 @@ use rand_core::RngCore;
 use sea_orm::Database;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use pgwire::tokio::process_socket;
 
 #[derive(Parser)]
 #[command(name = "proxy", about = "QueryProxy — PostgreSQL wire protocol proxy")]
@@ -48,8 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Init structured logging (respects RUST_LOG; defaults to info)
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -90,14 +89,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Strips query params and replaces inline password: `scheme://user:pass@host` → `scheme://user:****@host`.
 fn redact_db_url(url: &str) -> String {
     let base = url.split('?').next().unwrap_or(url);
-    if let Some(at) = base.rfind('@') {
-        if let Some(scheme_end) = base.find("://") {
-            let userinfo = &base[scheme_end + 3..at];
-            if let Some(colon) = userinfo.find(':') {
-                let user = &userinfo[..colon];
-                let rest = &base[at..];
-                return format!("{}://{}:****{}", &base[..scheme_end], user, rest);
-            }
+    if let Some(at) = base.rfind('@')
+        && let Some(scheme_end) = base.find("://")
+    {
+        let userinfo = &base[scheme_end + 3..at];
+        if let Some(colon) = userinfo.find(':') {
+            let user = &userinfo[..colon];
+            let rest = &base[at..];
+            return format!("{}://{}:****{}", &base[..scheme_end], user, rest);
         }
     }
     base.to_string()
@@ -107,19 +106,17 @@ fn redact_db_url(url: &str) -> String {
 /// If unset, generate a random key and warn (tokens will not survive restarts).
 fn parse_or_generate_encryption_key() -> [u8; 32] {
     match std::env::var("BR_ENCRYPTION_KEY") {
-        Ok(hex) => {
-            match parse_hex_key(&hex) {
-                Ok(key) => key,
-                Err(e) => {
-                    eprintln!(
-                        "FATAL: BR_ENCRYPTION_KEY is invalid: {}. \
+        Ok(hex) => match parse_hex_key(&hex) {
+            Ok(key) => key,
+            Err(e) => {
+                eprintln!(
+                    "FATAL: BR_ENCRYPTION_KEY is invalid: {}. \
                          Fix the value or unset it to use a random key.",
-                        e
-                    );
-                    std::process::exit(1);
-                }
+                    e
+                );
+                std::process::exit(1);
             }
-        }
+        },
         Err(_) => {
             tracing::warn!(
                 "BR_ENCRYPTION_KEY not set — using a random key. \
@@ -140,8 +137,8 @@ fn parse_hex_key(hex: &str) -> Result<[u8; 32], String> {
     }
     let mut key = [0u8; 32];
     for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-        let byte_str = std::str::from_utf8(chunk)
-            .map_err(|_| "invalid UTF-8 in hex string".to_string())?;
+        let byte_str =
+            std::str::from_utf8(chunk).map_err(|_| "invalid UTF-8 in hex string".to_string())?;
         key[i] = u8::from_str_radix(byte_str, 16)
             .map_err(|_| format!("invalid hex character in ENCRYPTION_KEY at byte {}", i))?;
     }
@@ -161,8 +158,7 @@ async fn serve(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Auto-seed default admin if no users exist
     if auth.count_users().await? == 0 {
-        let admin_user = std::env::var("BR_ADMIN_USER")
-            .unwrap_or_else(|_| "admin".to_string());
+        let admin_user = std::env::var("BR_ADMIN_USER").unwrap_or_else(|_| "admin".to_string());
         let admin_pass = match std::env::var("BR_ADMIN_PASSWORD") {
             Ok(p) if !p.is_empty() => p,
             _ => {
@@ -173,15 +169,16 @@ async fn serve(
                 std::process::exit(1);
             }
         };
-        let admin_tenant = std::env::var("BR_ADMIN_TENANT")
-            .unwrap_or_else(|_| "default".to_string());
+        let admin_tenant =
+            std::env::var("BR_ADMIN_TENANT").unwrap_or_else(|_| "default".to_string());
 
         tracing::warn!(
             username = %admin_user,
             tenant = %admin_tenant,
             "No users found — seeding default admin."
         );
-        auth.create_user(&admin_user, &admin_pass, &admin_tenant, true).await?;
+        auth.create_user(&admin_user, &admin_pass, &admin_tenant, true)
+            .await?;
     }
 
     // ── Engine cache ──────────────────────────────────────────────────────────
@@ -203,8 +200,8 @@ async fn serve(
         .and_then(|v| v.parse().ok())
         .unwrap_or(24);
 
-    let admin_bind_addr = std::env::var("BR_ADMIN_BIND_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:5435".to_string());
+    let admin_bind_addr =
+        std::env::var("BR_ADMIN_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:5435".to_string());
 
     let admin_state = AdminState {
         auth: auth.clone(),
@@ -230,8 +227,8 @@ async fn serve(
     // ── pgwire proxy ──────────────────────────────────────────────────────────
     let handler = Arc::new(ProxyHandler::new(auth, engine_cache));
 
-    let bind_addr = std::env::var("BR_PROXY_BIND_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:5434".to_string());
+    let bind_addr =
+        std::env::var("BR_PROXY_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:5434".to_string());
     let listener = TcpListener::bind(&bind_addr).await?;
     tracing::info!(addr = %bind_addr, "Proxy online");
 
@@ -258,7 +255,8 @@ async fn handle_user_action(
             tenant,
             admin,
         } => {
-            auth.create_user(&username, &password, &tenant, admin).await?;
+            auth.create_user(&username, &password, &tenant, admin)
+                .await?;
             tracing::info!(username = %username, tenant = %tenant, is_admin = admin, "Created user");
         }
     }

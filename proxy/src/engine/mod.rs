@@ -1,26 +1,27 @@
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::catalog::{CatalogProvider, SchemaProvider};
-use datafusion::prelude::{SessionContext, SessionConfig};
+use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion::sql::TableReference;
 use datafusion::sql::unparser::dialect::PostgreSqlDialect;
+use datafusion_pg_catalog::pg_catalog::{context::PgCatalogContextProvider, setup_pg_catalog};
 use datafusion_table_providers::{
+    UnsupportedTypeAction,
     postgres::DynPostgresConnectionPool,
     sql::{
-        db_connection_pool::postgrespool::PostgresConnectionPool,
-        sql_provider_datafusion::SqlTable,
+        db_connection_pool::postgrespool::PostgresConnectionPool, sql_provider_datafusion::SqlTable,
     },
     util::secrets::to_secret_map,
-    UnsupportedTypeAction,
 };
-use datafusion_pg_catalog::pg_catalog::{setup_pg_catalog, context::PgCatalogContextProvider};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use std::any::Any;
-use uuid::Uuid;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as AsyncRwLock;
+use uuid::Uuid;
 
-use crate::entity::{data_source, discovered_column, discovered_schema, discovered_table, user_data_source};
+use crate::entity::{
+    data_source, discovered_column, discovered_schema, discovered_table, user_data_source,
+};
 
 // ---------- helpers ----------
 
@@ -107,8 +108,8 @@ impl DataSourceConfig {
             return Err(format!("Unsupported data source type: {}", model.ds_type).into());
         }
 
-        let config: serde_json::Value = serde_json::from_str(&model.config)
-            .map_err(|e| format!("Invalid config JSON: {e}"))?;
+        let config: serde_json::Value =
+            serde_json::from_str(&model.config).map_err(|e| format!("Invalid config JSON: {e}"))?;
 
         let secure: serde_json::Value = if model.secure_config.is_empty() {
             serde_json::json!({})
@@ -122,9 +123,7 @@ impl DataSourceConfig {
                 .as_str()
                 .ok_or("missing host in config")?
                 .to_string(),
-            port: config["port"]
-                .as_u64()
-                .ok_or("missing port in config")? as u16,
+            port: config["port"].as_u64().ok_or("missing port in config")? as u16,
             database: config["database"]
                 .as_str()
                 .ok_or("missing database in config")?
@@ -254,18 +253,16 @@ fn parse_arrow_type(s: &str) -> Option<DataType> {
         "Binary" => Some(DataType::Binary),
         "Time64(Nanosecond)" => Some(DataType::Time64(TimeUnit::Nanosecond)),
         // Timestamps — Nanosecond (library-native) and Microsecond (backward compat)
-        "Timestamp(Nanosecond,None)" => {
-            Some(DataType::Timestamp(TimeUnit::Nanosecond, None))
-        }
-        "Timestamp(Microsecond,None)" => {
-            Some(DataType::Timestamp(TimeUnit::Microsecond, None))
-        }
-        s if s.starts_with("Timestamp(Nanosecond,Some(") => {
-            Some(DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())))
-        }
-        s if s.starts_with("Timestamp(Microsecond,Some(") => {
-            Some(DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())))
-        }
+        "Timestamp(Nanosecond,None)" => Some(DataType::Timestamp(TimeUnit::Nanosecond, None)),
+        "Timestamp(Microsecond,None)" => Some(DataType::Timestamp(TimeUnit::Microsecond, None)),
+        s if s.starts_with("Timestamp(Nanosecond,Some(") => Some(DataType::Timestamp(
+            TimeUnit::Nanosecond,
+            Some("UTC".into()),
+        )),
+        s if s.starts_with("Timestamp(Microsecond,Some(") => Some(DataType::Timestamp(
+            TimeUnit::Microsecond,
+            Some("UTC".into()),
+        )),
         // Generic Decimal128(p,s) parser
         s if s.starts_with("Decimal128(") && s.ends_with(')') => {
             let inner = &s[11..s.len() - 1];
@@ -296,9 +293,7 @@ pub fn arrow_type_to_string(dt: &DataType) -> String {
         DataType::Binary => "Binary".to_string(),
         DataType::Time64(TimeUnit::Nanosecond) => "Time64(Nanosecond)".to_string(),
         DataType::Decimal128(p, s) => format!("Decimal128({p},{s})"),
-        DataType::Timestamp(TimeUnit::Nanosecond, None) => {
-            "Timestamp(Nanosecond,None)".to_string()
-        }
+        DataType::Timestamp(TimeUnit::Nanosecond, None) => "Timestamp(Nanosecond,None)".to_string(),
         DataType::Timestamp(TimeUnit::Nanosecond, Some(tz)) => {
             format!("Timestamp(Nanosecond,Some(\"{tz}\"))")
         }
@@ -321,7 +316,10 @@ pub fn build_arrow_schema(columns: &[discovered_column::Model]) -> SchemaRef {
         .filter_map(|col| {
             let arrow_type_str = col.arrow_type.as_deref()?;
             let data_type = parse_arrow_type(arrow_type_str)?;
-            Some((col.ordinal_position, Field::new(&col.column_name, data_type, col.is_nullable)))
+            Some((
+                col.ordinal_position,
+                Field::new(&col.column_name, data_type, col.is_nullable),
+            ))
         })
         .collect();
     sorted.sort_by_key(|(pos, _)| *pos);
@@ -368,9 +366,7 @@ impl SchemaProvider for VirtualSchemaProvider {
 
         // Initialise pool on first call (lazy — no upstream connection until needed)
         let pool = self.pool.get().await.map_err(|e| {
-            datafusion::error::DataFusionError::External(
-                Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))
-            )
+            datafusion::error::DataFusionError::External(Box::new(std::io::Error::other(e)))
         })?;
 
         let table = SqlTable::new_with_schema(
@@ -412,7 +408,9 @@ impl CatalogProvider for VirtualCatalogProvider {
     }
 
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
-        self.schemas.get(name).map(|s| s.clone() as Arc<dyn SchemaProvider>)
+        self.schemas
+            .get(name)
+            .map(|s| s.clone() as Arc<dyn SchemaProvider>)
     }
 
     fn register_schema(
@@ -453,7 +451,9 @@ async fn create_session_context_from_catalog(
         );
     }
 
-    let virtual_catalog = VirtualCatalogProvider { schemas: schema_providers };
+    let virtual_catalog = VirtualCatalogProvider {
+        schemas: schema_providers,
+    };
     let catalog = ExtensibleCatalogProvider::new(virtual_catalog);
 
     let config = SessionConfig::new()
@@ -632,7 +632,9 @@ impl EngineCache {
 
             catalog_schemas.insert(
                 schema.schema_name.clone(),
-                VirtualCatalogSchema { tables: catalog_tables },
+                VirtualCatalogSchema {
+                    tables: catalog_tables,
+                },
             );
         }
 
@@ -663,7 +665,9 @@ impl EngineCache {
         if let Some(lazy_pool) = pool {
             match lazy_pool.get().await {
                 Ok(_) => tracing::debug!(datasource = %name, "Pool warmed up"),
-                Err(e) => tracing::debug!(datasource = %name, error = %e, "Pool warmup failed (non-fatal)"),
+                Err(e) => {
+                    tracing::debug!(datasource = %name, error = %e, "Pool warmup failed (non-fatal)")
+                }
             }
         }
     }
@@ -722,7 +726,11 @@ mod tests {
             name: &str,
             schema: Arc<dyn SchemaProvider>,
         ) -> DFResult<Option<Arc<dyn SchemaProvider>>> {
-            Ok(self.schemas.write().unwrap().insert(name.to_string(), schema))
+            Ok(self
+                .schemas
+                .write()
+                .unwrap()
+                .insert(name.to_string(), schema))
         }
     }
 
@@ -734,7 +742,9 @@ mod tests {
 
     impl MockSchemaProvider {
         fn new(name: &str) -> Self {
-            Self { name: name.to_string() }
+            Self {
+                name: name.to_string(),
+            }
         }
     }
 
@@ -788,7 +798,7 @@ mod tests {
             _schema: Arc<dyn SchemaProvider>,
         ) -> DFResult<Option<Arc<dyn SchemaProvider>>> {
             Err(datafusion::error::DataFusionError::NotImplemented(
-                "MockInnerCatalogProvider does not support register_schema".to_string()
+                "MockInnerCatalogProvider does not support register_schema".to_string(),
             ))
         }
     }
@@ -799,31 +809,46 @@ mod tests {
         let catalog = ExtensibleCatalogProvider::new(MockInnerCatalogProvider::new(inner));
 
         let schema = Arc::new(MockSchemaProvider::new("test_schema")) as Arc<dyn SchemaProvider>;
-        catalog.register_schema("test_schema", schema).expect("Failed to register schema");
+        catalog
+            .register_schema("test_schema", schema)
+            .expect("Failed to register schema");
 
         let names = catalog.schema_names();
-        assert!(names.contains(&"test_schema".to_string()),
-                "Expected test_schema to appear in schema_names, got: {:?}", names);
+        assert!(
+            names.contains(&"test_schema".to_string()),
+            "Expected test_schema to appear in schema_names, got: {:?}",
+            names
+        );
     }
 
     #[test]
     fn test_schema_lookup_extra_first() {
         let inner = MockCatalogProvider::new();
 
-        let inner_schema = Arc::new(MockSchemaProvider::new("inner_version")) as Arc<dyn SchemaProvider>;
-        inner.register_schema("shared", inner_schema.clone()).expect("Failed to register inner schema");
+        let inner_schema =
+            Arc::new(MockSchemaProvider::new("inner_version")) as Arc<dyn SchemaProvider>;
+        inner
+            .register_schema("shared", inner_schema.clone())
+            .expect("Failed to register inner schema");
 
         let catalog = ExtensibleCatalogProvider::new(MockInnerCatalogProvider::new(inner));
 
-        let extra_schema = Arc::new(MockSchemaProvider::new("extra_version")) as Arc<dyn SchemaProvider>;
-        catalog.register_schema("shared", extra_schema.clone()).expect("Failed to register extra schema");
+        let extra_schema =
+            Arc::new(MockSchemaProvider::new("extra_version")) as Arc<dyn SchemaProvider>;
+        catalog
+            .register_schema("shared", extra_schema.clone())
+            .expect("Failed to register extra schema");
 
         let retrieved = catalog.schema("shared").expect("Failed to retrieve schema");
-        let as_mock = retrieved.as_any().downcast_ref::<MockSchemaProvider>()
+        let as_mock = retrieved
+            .as_any()
+            .downcast_ref::<MockSchemaProvider>()
             .expect("Failed to downcast to MockSchemaProvider");
 
-        assert_eq!(as_mock.name, "extra_version",
-                "Expected extra schema to take priority over inner schema");
+        assert_eq!(
+            as_mock.name, "extra_version",
+            "Expected extra schema to take priority over inner schema"
+        );
     }
 
     #[test]
@@ -834,19 +859,25 @@ mod tests {
         let schema1 = Arc::new(MockSchemaProvider::new("version1")) as Arc<dyn SchemaProvider>;
         let schema2 = Arc::new(MockSchemaProvider::new("version2")) as Arc<dyn SchemaProvider>;
 
-        let result1 = catalog.register_schema("my_schema", schema1)
+        let result1 = catalog
+            .register_schema("my_schema", schema1)
             .expect("Failed to register schema");
         assert!(result1.is_none(), "Expected None on first registration");
 
-        let result2 = catalog.register_schema("my_schema", schema2)
+        let result2 = catalog
+            .register_schema("my_schema", schema2)
             .expect("Failed to register schema");
         assert!(result2.is_some(), "Expected Some on second registration");
 
         let prev_schema = result2.unwrap();
-        let as_mock = prev_schema.as_any().downcast_ref::<MockSchemaProvider>()
+        let as_mock = prev_schema
+            .as_any()
+            .downcast_ref::<MockSchemaProvider>()
             .expect("Failed to downcast to MockSchemaProvider");
-        assert_eq!(as_mock.name, "version1",
-                "Expected previous schema to be returned");
+        assert_eq!(
+            as_mock.name, "version1",
+            "Expected previous schema to be returned"
+        );
     }
 
     #[test]
@@ -868,7 +899,8 @@ mod tests {
                 "database": "mydb",
                 "username": "alice",
                 "sslmode": "require"
-            }).to_string(),
+            })
+            .to_string(),
             secure_config: encrypted,
             is_active: true,
             last_sync_at: None,
@@ -906,15 +938,30 @@ mod tests {
         // Keys the pool actually reads
         assert!(params.contains_key("host"), "missing 'host'");
         assert!(params.contains_key("user"), "missing 'user'");
-        assert!(params.contains_key("db"), "missing 'db' (pool reads 'db', not 'dbname')");
-        assert!(params.contains_key("pass"), "missing 'pass' (pool reads 'pass', not 'password')");
+        assert!(
+            params.contains_key("db"),
+            "missing 'db' (pool reads 'db', not 'dbname')"
+        );
+        assert!(
+            params.contains_key("pass"),
+            "missing 'pass' (pool reads 'pass', not 'password')"
+        );
         assert!(params.contains_key("port"), "missing 'port'");
         assert!(params.contains_key("sslmode"), "missing 'sslmode'");
 
         // Regression guard: these keys are silently ignored by the pool
-        assert!(!params.contains_key("dbname"), "'dbname' is ignored by the pool — use 'db'");
-        assert!(!params.contains_key("password"), "'password' is ignored by the pool — use 'pass'");
-        assert!(!params.contains_key("username"), "'username' is ignored by the pool — use 'user'");
+        assert!(
+            !params.contains_key("dbname"),
+            "'dbname' is ignored by the pool — use 'db'"
+        );
+        assert!(
+            !params.contains_key("password"),
+            "'password' is ignored by the pool — use 'pass'"
+        );
+        assert!(
+            !params.contains_key("username"),
+            "'username' is ignored by the pool — use 'user'"
+        );
 
         // Values should be correctly mapped
         assert_eq!(params["host"], "db.example.com");
@@ -956,9 +1003,18 @@ mod tests {
         assert!(matches!(parse_arrow_type("Int32"), Some(DataType::Int32)));
         assert!(matches!(parse_arrow_type("Int64"), Some(DataType::Int64)));
         assert!(matches!(parse_arrow_type("UInt32"), Some(DataType::UInt32)));
-        assert!(matches!(parse_arrow_type("Float32"), Some(DataType::Float32)));
-        assert!(matches!(parse_arrow_type("Float64"), Some(DataType::Float64)));
-        assert!(matches!(parse_arrow_type("Boolean"), Some(DataType::Boolean)));
+        assert!(matches!(
+            parse_arrow_type("Float32"),
+            Some(DataType::Float32)
+        ));
+        assert!(matches!(
+            parse_arrow_type("Float64"),
+            Some(DataType::Float64)
+        ));
+        assert!(matches!(
+            parse_arrow_type("Boolean"),
+            Some(DataType::Boolean)
+        ));
         assert!(matches!(parse_arrow_type("Utf8"), Some(DataType::Utf8)));
         assert!(matches!(parse_arrow_type("Date32"), Some(DataType::Date32)));
         assert!(matches!(parse_arrow_type("Binary"), Some(DataType::Binary)));
@@ -1030,14 +1086,17 @@ mod tests {
             let stored = arrow_type_to_string(dt);
             let recovered = parse_arrow_type(&stored)
                 .unwrap_or_else(|| panic!("parse_arrow_type({stored:?}) returned None for {dt:?}"));
-            assert_eq!(dt, &recovered, "Round-trip failed for {dt:?}: stored as {stored:?}");
+            assert_eq!(
+                dt, &recovered,
+                "Round-trip failed for {dt:?}: stored as {stored:?}"
+            );
         }
     }
 
     #[test]
     fn test_build_arrow_schema() {
-        use chrono::Utc;
         use crate::entity::discovered_column;
+        use chrono::Utc;
 
         let now = Utc::now().naive_utc();
         let table_id = Uuid::new_v4();

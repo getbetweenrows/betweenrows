@@ -1,27 +1,29 @@
+use crate::arrow_conversion::{build_field_info, encode_batch_optimized};
+use crate::auth::Auth;
+use crate::engine::EngineCache;
+use crate::hooks::{QueryHook, read_only::ReadOnlyHook, rls::RLSHook};
 use async_trait::async_trait;
+use datafusion::prelude::SessionContext;
+use datafusion::sql::sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
+use futures::Sink;
 use futures::sink::SinkExt;
 use futures::stream::StreamExt;
-use futures::Sink;
 use pgwire::api::auth::{
-    finish_authentication, protocol_negotiation, save_startup_parameters_to_metadata,
-    DefaultServerParameterProvider, StartupHandler,
+    DefaultServerParameterProvider, StartupHandler, finish_authentication, protocol_negotiation,
+    save_startup_parameters_to_metadata,
 };
-use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::portal::Portal;
+use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
+use pgwire::api::results::{
+    DescribePortalResponse, DescribeStatementResponse, QueryResponse, Response, Tag,
+};
 use pgwire::api::stmt::{NoopQueryParser, StoredStatement};
-use pgwire::api::results::{DescribePortalResponse, DescribeStatementResponse, QueryResponse, Response, Tag};
 use pgwire::api::{ClientInfo, PgWireConnectionState, PgWireServerHandlers};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use std::fmt::Debug;
 use std::sync::Arc;
-use datafusion::prelude::SessionContext;
-use datafusion::sql::sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
-use crate::auth::Auth;
-use crate::engine::EngineCache;
-use crate::hooks::{QueryHook, read_only::ReadOnlyHook, rls::RLSHook};
-use crate::arrow_conversion::{build_field_info, encode_batch_optimized};
 
 pub struct ProxyHandler {
     engine_cache: Arc<EngineCache>,
@@ -32,10 +34,8 @@ pub struct ProxyHandler {
 
 impl ProxyHandler {
     pub fn new(auth: Arc<Auth>, engine_cache: Arc<EngineCache>) -> Self {
-        let hooks: Vec<Arc<dyn QueryHook>> = vec![
-            Arc::new(ReadOnlyHook::new()),
-            Arc::new(RLSHook::new()),
-        ];
+        let hooks: Vec<Arc<dyn QueryHook>> =
+            vec![Arc::new(ReadOnlyHook::new()), Arc::new(RLSHook::new())];
 
         tracing::info!(hook_count = hooks.len(), "Initialized query hooks");
 
@@ -62,15 +62,17 @@ impl ProxyHandler {
             return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
                 "ERROR".to_owned(),
                 "08000".to_owned(),
-                "No data source selected — specify a database name in your connection string".to_owned(),
+                "No data source selected — specify a database name in your connection string"
+                    .to_owned(),
             ))));
         }
 
         let start = std::time::Instant::now();
-        let ctx = self.engine_cache
+        let ctx = self
+            .engine_cache
             .get_context(&datasource)
             .await
-            .map_err(|e| PgWireError::ApiError(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))))?;
+            .map_err(|e| PgWireError::ApiError(Box::new(std::io::Error::other(e.to_string()))))?;
         tracing::debug!(datasource = %datasource, elapsed = ?start.elapsed(), "SessionContext ready");
         Ok(ctx)
     }
@@ -126,11 +128,7 @@ impl StartupHandler for ProxyHandler {
             }
             PgWireFrontendMessage::PasswordMessageFamily(pwd) => {
                 let pwd = pwd.into_password()?;
-                let username = client
-                    .metadata()
-                    .get("user")
-                    .cloned()
-                    .unwrap_or_default();
+                let username = client.metadata().get("user").cloned().unwrap_or_default();
 
                 match self.auth.authenticate(&username, &pwd.password).await {
                     Ok(user) => {
@@ -167,12 +165,12 @@ impl StartupHandler for ProxyHandler {
                             })?;
 
                         // Check user is assigned to this data source
-                        let has_access = self.engine_cache
+                        let has_access = self
+                            .engine_cache
                             .check_access(user.id, &datasource_name)
                             .await
                             .map_err(|e| {
-                                PgWireError::ApiError(Box::new(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
+                                PgWireError::ApiError(Box::new(std::io::Error::other(
                                     e.to_string(),
                                 )))
                             })?;
@@ -198,11 +196,8 @@ impl StartupHandler for ProxyHandler {
                             "Authenticated user"
                         );
 
-                        finish_authentication(
-                            client,
-                            &DefaultServerParameterProvider::default(),
-                        )
-                        .await?;
+                        finish_authentication(client, &DefaultServerParameterProvider::default())
+                            .await?;
 
                         // Pre-warm SessionContext + pool in the background so the
                         // first user query doesn't pay the catalog-load latency.
@@ -227,11 +222,7 @@ impl StartupHandler for ProxyHandler {
 
 #[async_trait]
 impl SimpleQueryHandler for ProxyHandler {
-    async fn do_query<C>(
-        &self,
-        client: &mut C,
-        query: &str
-    ) -> PgWireResult<Vec<Response>>
+    async fn do_query<C>(&self, client: &mut C, query: &str) -> PgWireResult<Vec<Response>>
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
@@ -240,11 +231,10 @@ impl SimpleQueryHandler for ProxyHandler {
         let ctx = self.get_ctx(client).await?;
 
         // Parse SQL to Statement
-        let statements = Parser::parse_sql(&PostgreSqlDialect {}, query)
-            .map_err(|e| {
-                tracing::error!(error = %e, "SQL parse error");
-                PgWireError::ApiError(Box::new(e))
-            })?;
+        let statements = Parser::parse_sql(&PostgreSqlDialect {}, query).map_err(|e| {
+            tracing::error!(error = %e, "SQL parse error");
+            PgWireError::ApiError(Box::new(e))
+        })?;
 
         let mut responses = Vec::new();
 
@@ -255,7 +245,10 @@ impl SimpleQueryHandler for ProxyHandler {
             // Execute hook pipeline
             let mut hook_response = None;
             for hook in &self.hooks {
-                if let Some(response) = hook.handle_query(&statement, &ctx, client as &(dyn ClientInfo + Sync)).await {
+                if let Some(response) = hook
+                    .handle_query(&statement, &ctx, client as &(dyn ClientInfo + Sync))
+                    .await
+                {
                     hook_response = Some(response);
                     break;
                 }
@@ -274,7 +267,10 @@ impl SimpleQueryHandler for ProxyHandler {
                     PgWireError::ApiError(Box::new(e))
                 })?;
 
-                let is_select = matches!(statement, datafusion::sql::sqlparser::ast::Statement::Query(_));
+                let is_select = matches!(
+                    statement,
+                    datafusion::sql::sqlparser::ast::Statement::Query(_)
+                );
 
                 if is_select {
                     let stream_start = std::time::Instant::now();
@@ -362,11 +358,10 @@ impl ExtendedQueryHandler for ProxyHandler {
 
         let ctx = self.get_ctx(client).await?;
 
-        let statements = Parser::parse_sql(&PostgreSqlDialect {}, query)
-            .map_err(|e| {
-                tracing::error!(error = %e, "SQL parse error");
-                PgWireError::ApiError(Box::new(e))
-            })?;
+        let statements = Parser::parse_sql(&PostgreSqlDialect {}, query).map_err(|e| {
+            tracing::error!(error = %e, "SQL parse error");
+            PgWireError::ApiError(Box::new(e))
+        })?;
 
         if statements.is_empty() {
             return Ok(Response::Execution(Tag::new("OK")));
@@ -377,7 +372,10 @@ impl ExtendedQueryHandler for ProxyHandler {
 
         let mut hook_response = None;
         for hook in &self.hooks {
-            if let Some(response) = hook.handle_query(&statement, &ctx, client as &(dyn ClientInfo + Sync)).await {
+            if let Some(response) = hook
+                .handle_query(&statement, &ctx, client as &(dyn ClientInfo + Sync))
+                .await
+            {
                 hook_response = Some(response);
                 break;
             }
@@ -397,7 +395,10 @@ impl ExtendedQueryHandler for ProxyHandler {
             PgWireError::ApiError(Box::new(e))
         })?;
 
-        let is_select = matches!(statement, datafusion::sql::sqlparser::ast::Statement::Query(_));
+        let is_select = matches!(
+            statement,
+            datafusion::sql::sqlparser::ast::Statement::Query(_)
+        );
 
         if is_select {
             let stream_start = std::time::Instant::now();
@@ -476,20 +477,28 @@ impl ExtendedQueryHandler for ProxyHandler {
         crate::sql_rewrite::rewrite_statement(&mut statement);
 
         for hook in &self.hooks {
-            if let Some(response) = hook.handle_query(&statement, &ctx, client as &(dyn ClientInfo + Sync)).await {
+            if let Some(response) = hook
+                .handle_query(&statement, &ctx, client as &(dyn ClientInfo + Sync))
+                .await
+            {
                 response?;
             }
         }
 
         let sql = statement.to_string();
-        let df = ctx.sql(&sql).await
+        let df = ctx
+            .sql(&sql)
+            .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
         let schema = df.schema();
         let fields = build_field_info(schema.inner());
         let param_types = vec![];
 
-        Ok(DescribeStatementResponse::new(param_types, (*fields).clone()))
+        Ok(DescribeStatementResponse::new(
+            param_types,
+            (*fields).clone(),
+        ))
     }
 
     async fn do_describe_portal<C>(
@@ -514,13 +523,18 @@ impl ExtendedQueryHandler for ProxyHandler {
         crate::sql_rewrite::rewrite_statement(&mut statement);
 
         for hook in &self.hooks {
-            if let Some(response) = hook.handle_query(&statement, &ctx, client as &(dyn ClientInfo + Sync)).await {
+            if let Some(response) = hook
+                .handle_query(&statement, &ctx, client as &(dyn ClientInfo + Sync))
+                .await
+            {
                 response?;
             }
         }
 
         let sql = statement.to_string();
-        let df = ctx.sql(&sql).await
+        let df = ctx
+            .sql(&sql)
+            .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
         let schema = df.schema();

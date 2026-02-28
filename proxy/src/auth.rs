@@ -3,7 +3,10 @@ use chrono::Utc;
 use password_hash::SaltString;
 use pgwire::error::{PgWireError, PgWireResult};
 use rand_core::OsRng;
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
+    Set,
+};
 use uuid::Uuid;
 
 use crate::entity::proxy_user;
@@ -81,7 +84,11 @@ impl Auth {
 
     /// Verify username/password against the admin store.
     /// Returns the user model on success, or `InvalidPassword` on failure.
-    pub async fn authenticate(&self, username: &str, password: &str) -> PgWireResult<proxy_user::Model> {
+    pub async fn authenticate(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> PgWireResult<proxy_user::Model> {
         let user = proxy_user::Entity::find()
             .filter(proxy_user::Column::Username.eq(username))
             .one(&self.db)
@@ -93,12 +100,8 @@ impl Auth {
             return Err(PgWireError::InvalidPassword(username.to_owned()));
         }
 
-        let hash = PasswordHash::new(&user.password_hash).map_err(|e| {
-            PgWireError::ApiError(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )))
-        })?;
+        let hash = PasswordHash::new(&user.password_hash)
+            .map_err(|e| PgWireError::ApiError(Box::new(std::io::Error::other(e.to_string()))))?;
 
         Argon2::default()
             .verify_password(password.as_bytes(), &hash)
@@ -152,9 +155,7 @@ impl Auth {
         let salt = SaltString::generate(&mut OsRng);
         let hash = Argon2::default()
             .hash_password(password.as_bytes(), &salt)
-            .map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-            })?
+            .map_err(|e| std::io::Error::other(e.to_string()))?
             .to_string();
         Ok(hash)
     }
@@ -177,7 +178,11 @@ mod tests {
     #[tokio::test]
     async fn test_hash_produces_argon2_format() {
         let hash = Auth::hash_password("hunter2").unwrap();
-        assert!(hash.starts_with("$argon2"), "Expected Argon2 PHC string, got: {}", hash);
+        assert!(
+            hash.starts_with("$argon2"),
+            "Expected Argon2 PHC string, got: {}",
+            hash
+        );
     }
 
     #[tokio::test]
@@ -185,7 +190,10 @@ mod tests {
         // Two hashes of the same password must differ (random salt)
         let h1 = Auth::hash_password("same").unwrap();
         let h2 = Auth::hash_password("same").unwrap();
-        assert_ne!(h1, h2, "Same password hashed twice should produce different hashes");
+        assert_ne!(
+            h1, h2,
+            "Same password hashed twice should produce different hashes"
+        );
     }
 
     #[tokio::test]
@@ -208,7 +216,9 @@ mod tests {
     #[tokio::test]
     async fn test_create_user_increments_count() {
         let auth = setup().await;
-        auth.create_user("alice", "pw1", "acme", false).await.unwrap();
+        auth.create_user("alice", "pw1", "acme", false)
+            .await
+            .unwrap();
         assert_eq!(auth.count_users().await.unwrap(), 1);
         auth.create_user("bob", "pw2", "acme", true).await.unwrap();
         assert_eq!(auth.count_users().await.unwrap(), 2);
@@ -217,7 +227,9 @@ mod tests {
     #[tokio::test]
     async fn test_create_user_stores_hash_not_plaintext() {
         let auth = setup().await;
-        auth.create_user("alice", "supersecret", "acme", false).await.unwrap();
+        auth.create_user("alice", "supersecret", "acme", false)
+            .await
+            .unwrap();
 
         let row = proxy_user::Entity::find()
             .filter(proxy_user::Column::Username.eq("alice"))
@@ -226,14 +238,22 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_ne!(row.password_hash, "supersecret", "Plaintext must never be stored");
-        assert!(row.password_hash.starts_with("$argon2"), "Must be Argon2 PHC string");
+        assert_ne!(
+            row.password_hash, "supersecret",
+            "Plaintext must never be stored"
+        );
+        assert!(
+            row.password_hash.starts_with("$argon2"),
+            "Must be Argon2 PHC string"
+        );
     }
 
     #[tokio::test]
     async fn test_create_user_stores_correct_fields() {
         let auth = setup().await;
-        auth.create_user("charlie", "pw", "widgets-inc", true).await.unwrap();
+        auth.create_user("charlie", "pw", "widgets-inc", true)
+            .await
+            .unwrap();
 
         let row = proxy_user::Entity::find()
             .filter(proxy_user::Column::Username.eq("charlie"))
@@ -253,7 +273,9 @@ mod tests {
     #[tokio::test]
     async fn test_create_user_duplicate_username_errors() {
         let auth = setup().await;
-        auth.create_user("alice", "pw", "acme", false).await.unwrap();
+        auth.create_user("alice", "pw", "acme", false)
+            .await
+            .unwrap();
         let result = auth.create_user("alice", "other", "other", false).await;
         assert!(result.is_err(), "Duplicate username must fail");
     }
@@ -263,7 +285,9 @@ mod tests {
     #[tokio::test]
     async fn test_authenticate_success_returns_model() {
         let auth = setup().await;
-        auth.create_user("alice", "correct", "acme", false).await.unwrap();
+        auth.create_user("alice", "correct", "acme", false)
+            .await
+            .unwrap();
 
         let user = auth.authenticate("alice", "correct").await.unwrap();
         assert_eq!(user.username, "alice");
@@ -274,7 +298,9 @@ mod tests {
     #[tokio::test]
     async fn test_authenticate_updates_last_login_at() {
         let auth = setup().await;
-        auth.create_user("alice", "pw", "acme", false).await.unwrap();
+        auth.create_user("alice", "pw", "acme", false)
+            .await
+            .unwrap();
 
         // Before auth: last_login_at is None
         let before = proxy_user::Entity::find()
@@ -294,18 +320,24 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(after.last_login_at.is_some(), "last_login_at should be set after successful auth");
+        assert!(
+            after.last_login_at.is_some(),
+            "last_login_at should be set after successful auth"
+        );
     }
 
     #[tokio::test]
     async fn test_authenticate_wrong_password_rejected() {
         let auth = setup().await;
-        auth.create_user("alice", "correct", "acme", false).await.unwrap();
+        auth.create_user("alice", "correct", "acme", false)
+            .await
+            .unwrap();
 
         let err = auth.authenticate("alice", "wrong").await.unwrap_err();
         assert!(
             matches!(err, PgWireError::InvalidPassword(ref u) if u == "alice"),
-            "Expected InvalidPassword(alice), got {:?}", err
+            "Expected InvalidPassword(alice), got {:?}",
+            err
         );
     }
 
@@ -320,7 +352,9 @@ mod tests {
     #[tokio::test]
     async fn test_authenticate_inactive_user_rejected() {
         let auth = setup().await;
-        auth.create_user("alice", "pw", "acme", false).await.unwrap();
+        auth.create_user("alice", "pw", "acme", false)
+            .await
+            .unwrap();
 
         // Deactivate the user
         let row = proxy_user::Entity::find()

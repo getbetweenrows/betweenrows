@@ -9,7 +9,7 @@
 //!
 //! Run with: `cargo test -- --ignored`
 
-use tokio_postgres::{NoTls, Error};
+use tokio_postgres::{Error, NoTls};
 
 /// Connect to the running proxy
 async fn connect() -> Result<tokio_postgres::Client, Error> {
@@ -62,8 +62,10 @@ async fn test_version_query() {
     let version: String = row.get(0);
     assert!(!version.is_empty(), "Version string should not be empty");
     // DataFusion returns its own version, not Postgres version
-    assert!(version.to_lowercase().contains("datafusion"),
-            "Version string should contain 'datafusion'");
+    assert!(
+        version.to_lowercase().contains("datafusion"),
+        "Version string should contain 'datafusion'"
+    );
 }
 
 #[tokio::test]
@@ -73,7 +75,10 @@ async fn test_system_catalog_query() {
 
     // Query information_schema (tests pg_catalog federation)
     let rows = client
-        .query("SELECT table_name FROM information_schema.tables LIMIT 5", &[])
+        .query(
+            "SELECT table_name FROM information_schema.tables LIMIT 5",
+            &[],
+        )
         .await
         .expect("Failed to query information_schema");
 
@@ -145,7 +150,9 @@ async fn test_invalid_sql_returns_error() {
     let client = connect().await.expect("Failed to connect to proxy");
 
     // Malformed SQL should return an error, not crash
-    let result = client.query("SELECT * FROM nonexistent_table_xyz", &[]).await;
+    let result = client
+        .query("SELECT * FROM nonexistent_table_xyz", &[])
+        .await;
 
     assert!(result.is_err(), "Invalid SQL should return an error");
 }

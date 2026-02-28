@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use datafusion::sql::sqlparser::ast::Statement;
 use datafusion::prelude::SessionContext;
+use datafusion::sql::sqlparser::ast::Statement;
 use pgwire::api::ClientInfo;
 use pgwire::api::results::Response;
 use pgwire::error::PgWireResult;

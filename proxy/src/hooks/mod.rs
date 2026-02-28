@@ -5,6 +5,7 @@ use pgwire::api::ClientInfo;
 use pgwire::api::results::Response;
 use pgwire::error::PgWireResult;
 
+pub mod read_only;
 pub mod rls;
 
 /// QueryHook trait for intercepting and transforming queries

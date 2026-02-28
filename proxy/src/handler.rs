@@ -20,7 +20,7 @@ use datafusion::prelude::SessionContext;
 use datafusion::sql::sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 use crate::auth::Auth;
 use crate::engine::EngineCache;
-use crate::hooks::{QueryHook, rls::RLSHook};
+use crate::hooks::{QueryHook, read_only::ReadOnlyHook, rls::RLSHook};
 use crate::arrow_conversion::{build_field_info, encode_batch_optimized};
 
 pub struct ProxyHandler {
@@ -33,6 +33,7 @@ pub struct ProxyHandler {
 impl ProxyHandler {
     pub fn new(auth: Arc<Auth>, engine_cache: Arc<EngineCache>) -> Self {
         let hooks: Vec<Arc<dyn QueryHook>> = vec![
+            Arc::new(ReadOnlyHook::new()),
             Arc::new(RLSHook::new()),
         ];
 
@@ -474,6 +475,12 @@ impl ExtendedQueryHandler for ProxyHandler {
         let mut statement = statements.into_iter().next().unwrap();
         crate::sql_rewrite::rewrite_statement(&mut statement);
 
+        for hook in &self.hooks {
+            if let Some(response) = hook.handle_query(&statement, &ctx, client as &(dyn ClientInfo + Sync)).await {
+                response?;
+            }
+        }
+
         let sql = statement.to_string();
         let df = ctx.sql(&sql).await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
@@ -505,6 +512,12 @@ impl ExtendedQueryHandler for ProxyHandler {
 
         let mut statement = statements.into_iter().next().unwrap();
         crate::sql_rewrite::rewrite_statement(&mut statement);
+
+        for hook in &self.hooks {
+            if let Some(response) = hook.handle_query(&statement, &ctx, client as &(dyn ClientInfo + Sync)).await {
+                response?;
+            }
+        }
 
         let sql = statement.to_string();
         let df = ctx.sql(&sql).await

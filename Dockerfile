@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy workspace manifests and lockfile for dependency caching
 COPY Cargo.toml Cargo.lock ./
 COPY proxy/Cargo.toml proxy/Cargo.toml
+COPY migration/ migration/
 
 # Create a dummy binary so `cargo build` can cache dependencies
 RUN mkdir -p proxy/src && echo 'fn main() {}' > proxy/src/main.rs \

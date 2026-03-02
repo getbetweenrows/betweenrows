@@ -254,9 +254,7 @@ async fn run_inner(
                 for table in tables {
                     let existing_cols: Vec<discovered_column::Model> =
                         discovered_column::Entity::find()
-                            .filter(
-                                discovered_column::Column::DiscoveredTableId.eq(table.id),
-                            )
+                            .filter(discovered_column::Column::DiscoveredTableId.eq(table.id))
                             .all(&state.db)
                             .await?;
                     for col in existing_cols {

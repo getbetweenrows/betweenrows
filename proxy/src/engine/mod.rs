@@ -1173,7 +1173,11 @@ mod tests {
             },
         ];
         let schema2 = build_arrow_schema(&columns_with_deselected);
-        assert_eq!(schema2.fields().len(), 1, "deselected column should be excluded");
+        assert_eq!(
+            schema2.fields().len(),
+            1,
+            "deselected column should be excluded"
+        );
         assert!(schema2.field_with_name("id").is_ok());
         assert!(schema2.field_with_name("secret").is_err());
 

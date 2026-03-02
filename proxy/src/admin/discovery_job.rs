@@ -56,6 +56,13 @@ pub struct SaveTableSelection {
     pub table_name: String,
     pub table_type: String,
     pub is_selected: bool,
+    pub columns: Option<Vec<SaveColumnSelection>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SaveColumnSelection {
+    pub column_name: String,
+    pub is_selected: bool,
 }
 
 // ---------- job status ----------

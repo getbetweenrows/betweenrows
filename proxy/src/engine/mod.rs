@@ -314,6 +314,9 @@ pub fn build_arrow_schema(columns: &[discovered_column::Model]) -> SchemaRef {
     let mut sorted: Vec<(i32, Field)> = columns
         .iter()
         .filter_map(|col| {
+            if !col.is_selected {
+                return None;
+            }
             let arrow_type_str = col.arrow_type.as_deref()?;
             let data_type = parse_arrow_type(arrow_type_str)?;
             Some((
@@ -1110,6 +1113,7 @@ mod tests {
                 is_nullable: false,
                 column_default: None,
                 arrow_type: Some("Int32".to_string()),
+                is_selected: true,
                 discovered_at: now,
             },
             discovered_column::Model {
@@ -1121,6 +1125,7 @@ mod tests {
                 is_nullable: true,
                 column_default: None,
                 arrow_type: Some("Utf8".to_string()),
+                is_selected: true,
                 discovered_at: now,
             },
             discovered_column::Model {
@@ -1132,12 +1137,45 @@ mod tests {
                 is_nullable: true,
                 column_default: None,
                 arrow_type: None, // unsupported — should be skipped
+                is_selected: true,
                 discovered_at: now,
             },
         ];
 
         let schema = build_arrow_schema(&columns);
         assert_eq!(schema.fields().len(), 2, "jsonb column should be skipped");
+
+        // Also verify that deselected columns are excluded
+        let columns_with_deselected = vec![
+            discovered_column::Model {
+                id: Uuid::new_v4(),
+                discovered_table_id: table_id,
+                column_name: "id".to_string(),
+                ordinal_position: 1,
+                data_type: "integer".to_string(),
+                is_nullable: false,
+                column_default: None,
+                arrow_type: Some("Int32".to_string()),
+                is_selected: true,
+                discovered_at: now,
+            },
+            discovered_column::Model {
+                id: Uuid::new_v4(),
+                discovered_table_id: table_id,
+                column_name: "secret".to_string(),
+                ordinal_position: 2,
+                data_type: "text".to_string(),
+                is_nullable: true,
+                column_default: None,
+                arrow_type: Some("Utf8".to_string()),
+                is_selected: false, // deselected — should be excluded
+                discovered_at: now,
+            },
+        ];
+        let schema2 = build_arrow_schema(&columns_with_deselected);
+        assert_eq!(schema2.fields().len(), 1, "deselected column should be excluded");
+        assert!(schema2.field_with_name("id").is_ok());
+        assert!(schema2.field_with_name("secret").is_err());
 
         let id_field = schema.field_with_name("id").unwrap();
         assert_eq!(*id_field.data_type(), DataType::Int32);

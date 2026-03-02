@@ -236,17 +236,68 @@ async fn run_inner(
 
             let discovered = provider.discover_columns(&pairs, cancel).await?;
 
+            // Load existing column rows to populate is_already_selected.
+            // Build a set of (table_id, column_name) → is_selected from stored catalog.
+            let existing_schemas: Vec<(discovered_schema::Model, Vec<discovered_table::Model>)> =
+                discovered_schema::Entity::find()
+                    .filter(discovered_schema::Column::DataSourceId.eq(datasource_id))
+                    .find_with_related(discovered_table::Entity)
+                    .all(&state.db)
+                    .await?;
+
+            // Build map: (schema_name, table_name, column_name) → is_selected
+            let mut col_selected: std::collections::HashMap<(String, String, String), bool> =
+                std::collections::HashMap::new();
+            let mut any_existing = false;
+
+            for (schema, tables) in &existing_schemas {
+                for table in tables {
+                    let existing_cols: Vec<discovered_column::Model> =
+                        discovered_column::Entity::find()
+                            .filter(
+                                discovered_column::Column::DiscoveredTableId.eq(table.id),
+                            )
+                            .all(&state.db)
+                            .await?;
+                    for col in existing_cols {
+                        any_existing = true;
+                        col_selected.insert(
+                            (
+                                schema.schema_name.clone(),
+                                table.table_name.clone(),
+                                col.column_name.clone(),
+                            ),
+                            col.is_selected,
+                        );
+                    }
+                }
+            }
+
             let response: Vec<DiscoveredColumnResponse> = discovered
                 .into_iter()
-                .map(|c| DiscoveredColumnResponse {
-                    schema_name: c.schema_name,
-                    table_name: c.table_name,
-                    column_name: c.column_name,
-                    ordinal_position: c.ordinal_position,
-                    data_type: c.data_type,
-                    is_nullable: c.is_nullable,
-                    column_default: c.column_default,
-                    arrow_type: c.arrow_type,
+                .map(|c| {
+                    let key = (
+                        c.schema_name.clone(),
+                        c.table_name.clone(),
+                        c.column_name.clone(),
+                    );
+                    // If there are existing selections, use stored value; otherwise pre-select all.
+                    let is_already_selected = if any_existing {
+                        col_selected.get(&key).copied().unwrap_or(true)
+                    } else {
+                        c.arrow_type.is_some()
+                    };
+                    DiscoveredColumnResponse {
+                        schema_name: c.schema_name,
+                        table_name: c.table_name,
+                        column_name: c.column_name,
+                        ordinal_position: c.ordinal_position,
+                        data_type: c.data_type,
+                        is_nullable: c.is_nullable,
+                        column_default: c.column_default,
+                        arrow_type: c.arrow_type,
+                        is_already_selected,
+                    }
                 })
                 .collect();
 
@@ -369,6 +420,27 @@ async fn run_inner(
 
             txn.commit().await?;
 
+            // Build a map: (schema_name, table_name, column_name) → is_selected
+            // from the client's column selections. Absent = default true.
+            let mut col_is_selected_map: std::collections::HashMap<(String, String, String), bool> =
+                std::collections::HashMap::new();
+            for schema_sel in &schemas {
+                for table_sel in &schema_sel.tables {
+                    if let Some(ref col_sels) = table_sel.columns {
+                        for col_sel in col_sels {
+                            col_is_selected_map.insert(
+                                (
+                                    schema_sel.schema_name.clone(),
+                                    table_sel.table_name.clone(),
+                                    col_sel.column_name.clone(),
+                                ),
+                                col_sel.is_selected,
+                            );
+                        }
+                    }
+                }
+            }
+
             // Run column discovery for selected tables
             if !tables_needing_columns.is_empty() {
                 send(progress(
@@ -402,6 +474,14 @@ async fn run_inner(
                             if let Some(&table_id) = table_id_map.get(&key) {
                                 let col_uuid = catalog_column_uuid(table_id, &col.column_name);
 
+                                let sel_key = (
+                                    col.schema_name.clone(),
+                                    col.table_name.clone(),
+                                    col.column_name.clone(),
+                                );
+                                let is_selected =
+                                    col_is_selected_map.get(&sel_key).copied().unwrap_or(true);
+
                                 let existing = discovered_column::Entity::find_by_id(col_uuid)
                                     .one(&state.db)
                                     .await?;
@@ -414,6 +494,7 @@ async fn run_inner(
                                     active.is_nullable = Set(col.is_nullable);
                                     active.column_default = Set(col.column_default);
                                     active.arrow_type = Set(col.arrow_type);
+                                    active.is_selected = Set(is_selected);
                                     active.discovered_at = Set(now2);
                                     active.update(&state.db).await?;
                                 } else {
@@ -426,6 +507,7 @@ async fn run_inner(
                                         is_nullable: Set(col.is_nullable),
                                         column_default: Set(col.column_default),
                                         arrow_type: Set(col.arrow_type),
+                                        is_selected: Set(is_selected),
                                         discovered_at: Set(now2),
                                     }
                                     .insert(&state.db)
@@ -615,6 +697,7 @@ async fn run_inner(
                                     is_nullable: Set(live_col.is_nullable),
                                     column_default: Set(live_col.column_default.clone()),
                                     arrow_type: Set(live_col.arrow_type.clone()),
+                                    is_selected: Set(true),
                                     discovered_at: Set(now),
                                 };
                                 new_col.insert(&state.db).await?;
@@ -801,6 +884,7 @@ pub async fn get_catalog(
                     is_nullable: c.is_nullable,
                     column_default: c.column_default,
                     arrow_type: c.arrow_type,
+                    is_selected: c.is_selected,
                 })
                 .collect();
 

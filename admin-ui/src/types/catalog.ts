@@ -21,6 +21,7 @@ export interface DiscoveredColumnResponse {
   is_nullable: boolean
   column_default: string | null
   arrow_type: string | null
+  is_already_selected: boolean
 }
 
 // ---------- Stored catalog types ----------
@@ -33,6 +34,7 @@ export interface CatalogColumnResponse {
   is_nullable: boolean
   column_default: string | null
   arrow_type: string | null
+  is_selected: boolean
 }
 
 export interface CatalogTableResponse {
@@ -56,10 +58,16 @@ export interface CatalogResponse {
 
 // ---------- Save catalog request types ----------
 
+export interface SaveCatalogColumnSelection {
+  column_name: string
+  is_selected: boolean
+}
+
 export interface SaveCatalogTableSelection {
   table_name: string
   table_type: string
   is_selected: boolean
+  columns?: SaveCatalogColumnSelection[]
 }
 
 export interface SaveCatalogSchemaSelection {
@@ -82,10 +90,16 @@ export interface TableRef {
   table: string
 }
 
+export interface CatalogColumnSelection {
+  column_name: string
+  is_selected: boolean
+}
+
 export interface CatalogTableSelection {
   table_name: string
   table_type: string
   is_selected: boolean
+  columns?: CatalogColumnSelection[]
 }
 
 export interface CatalogSchemaSelection {

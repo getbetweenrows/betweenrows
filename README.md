@@ -14,15 +14,51 @@ persistent volume for the SQLite database, and starts both services:
 | Admin UI + REST API | `:80` / `:443` | `:5435` | HTTP/S |
 | pgwire (PostgreSQL) | `:5432` (IPv6) | `:5434` | raw TCP |
 
-After deploying, the Admin UI is available at `https://<app-name>.fly.dev`.
+After deploying:
 
-### Set required secrets (after deploy)
+| Endpoint | URL / address |
+|----------|---------------|
+| Admin UI | `https://<app-name>.fly.dev` |
+| Admin REST API | `https://<app-name>.fly.dev/api/...` |
+| PostgreSQL proxy | `<app-name>.fly.dev:5432` |
+
+**Order of operations matters** — follow these steps in sequence.
+
+### 1. Create the app and volume (one-time)
+
+```sh
+fly launch --no-deploy --copy-config --name <your-app-name>
+fly volumes create betweenrows_data --size 1 --region <region>
+```
+
+### 2. Set secrets before first deploy
+
+The app will crash-loop on startup without `BR_ADMIN_PASSWORD`. Set secrets **before** deploying:
 
 ```sh
 fly secrets set \
   BR_ENCRYPTION_KEY=$(openssl rand -hex 32) \
   BR_ADMIN_JWT_SECRET=$(openssl rand -hex 32) \
   BR_ADMIN_PASSWORD=<strong-password>
+```
+
+### 3. Allocate IP addresses (one-time)
+
+Without IP addresses the app is unreachable from most networks. Shared IPv4 is free:
+
+```sh
+flyctl ips allocate-v4 --shared
+flyctl ips allocate-v6
+```
+
+### 4. Make the GHCR package public
+
+CI/CD deploys via `flyctl deploy --image ghcr.io/getbetweenrows/betweenrows:latest` require the package to be public. In GitHub: **Packages → betweenrows → Package settings → Change visibility → Public**.
+
+### 5. Deploy
+
+```sh
+fly deploy --image ghcr.io/getbetweenrows/betweenrows:latest --app <your-app-name>
 ```
 
 ## Upgrading
@@ -46,6 +82,20 @@ The pgwire port is accessible for free via **IPv6** (most modern clients resolve
 ```sh
 psql "postgresql://admin:<password>@<app-name>.fly.dev:5432/<datasource-name>"
 ```
+
+**macOS: if the connection times out**, check whether IPv6 is configured:
+
+```sh
+ifconfig | grep "inet6" | grep -v "::1" | grep -v "fe80"
+```
+
+If that returns nothing, your machine has no routable IPv6 address. Re-enable it:
+
+```sh
+sudo networksetup -setv6automatic Wi-Fi
+```
+
+Then confirm it's working with `ping6 google.com` and retry the connection.
 
 For **IPv4-only** environments (no IPv6 support), tunnel via WireGuard:
 
@@ -328,8 +378,8 @@ Before a data source is queryable via pgwire, a catalog must be saved. The UI wi
 
 1. **Discover schemas** — submit `discover_schemas`, watch SSE, select which schemas to include
 2. **Discover tables** — submit `discover_tables` with selected schemas, select tables
-3. **Discover columns** — submit `discover_columns` with selected tables, review column types
-4. **Save** — submit `save_catalog` — persists selections to DB, invalidates engine cache
+3. **Discover columns** — submit `discover_columns` with selected tables; choose which columns to expose via a two-panel UI (scrollable table sidebar + column detail panel); unsupported Arrow types (e.g. JSONB, regclass) are shown greyed-out and cannot be selected
+4. **Save** — submit `save_catalog` — persists schema/table/column selections to DB, invalidates engine cache
 
 To detect schema drift after upstream changes, submit `sync_catalog`. The result is stored in `data_source.last_sync_result` and shown in the UI as a green/blue/amber panel.
 

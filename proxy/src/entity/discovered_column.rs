@@ -14,6 +14,7 @@ pub struct Model {
     pub column_default: Option<String>,
     /// Mapped DataFusion/Arrow type string (e.g. "Utf8", "Int32"). None = unsupported type.
     pub arrow_type: Option<String>,
+    pub is_selected: bool,
     pub discovered_at: DateTime,
 }
 

@@ -181,6 +181,13 @@ pub struct CatalogTableSelection {
     pub table_name: String,
     pub table_type: String,
     pub is_selected: bool,
+    pub columns: Option<Vec<CatalogColumnSelection>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct CatalogColumnSelection {
+    pub column_name: String,
+    pub is_selected: bool,
 }
 
 // ---------- catalog discovery responses ----------
@@ -209,6 +216,7 @@ pub struct DiscoveredColumnResponse {
     pub is_nullable: bool,
     pub column_default: Option<String>,
     pub arrow_type: Option<String>,
+    pub is_already_selected: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -242,6 +250,7 @@ pub struct CatalogColumnResponse {
     pub is_nullable: bool,
     pub column_default: Option<String>,
     pub arrow_type: Option<String>,
+    pub is_selected: bool,
 }
 
 // ---------- discovery job responses ----------

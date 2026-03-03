@@ -22,8 +22,11 @@ image = 'ghcr.io/getbetweenrows/betweenrows:latest'
 
 # ── Admin REST API + bundled UI (HTTP/HTTPS on 80/443) ────────────────────────
 [[services]]
-  protocol      = 'tcp'
-  internal_port = 5435
+  protocol             = 'tcp'
+  internal_port        = 5435
+  auto_stop_machines   = 'stop'
+  auto_start_machines  = true
+  min_machines_running = 0
 
   [[services.ports]]
     port        = 80
@@ -47,10 +50,13 @@ image = 'ghcr.io/getbetweenrows/betweenrows:latest'
     grace_period = '30s'
 
 # ── pgwire / PostgreSQL wire protocol (raw TCP on port 5432) ─────────────────
-# Free via Fly's IPv6 address. IPv4 clients use `fly proxy 5432:5434`.
+# Free via Fly's IPv6 address. IPv4 clients uses `fly proxy 5432:5434`.
 [[services]]
-  protocol      = 'tcp'
-  internal_port = 5434
+  protocol             = 'tcp'
+  internal_port        = 5434
+  auto_stop_machines   = 'stop'
+  auto_start_machines  = true
+  min_machines_running = 0
 
   [[services.ports]]
     port     = 5432

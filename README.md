@@ -155,6 +155,7 @@ betweenrows/
 │       └── types/                    TypeScript interfaces
 └── proxy/src/
     ├── main.rs                       entry point: CLI, DB init, EngineCache, servers
+    ├── server.rs                     process_socket_with_idle_timeout (idle + startup timeouts)
     ├── handler.rs                    pgwire StartupHandler + query handlers
     ├── auth.rs                       Argon2 auth, user creation
     ├── crypto.rs                     AES-256-GCM encrypt/decrypt
@@ -210,6 +211,7 @@ cargo run -p proxy -- user create --username alice --password secret --tenant ac
 | `BR_ADMIN_USER` | `admin` | Auto-seed username |
 | `BR_ADMIN_PASSWORD` | *(required on first boot)* | Auto-seed password. **Must be set** when no users exist in DB. |
 | `BR_ADMIN_TENANT` | `default` | Auto-seed tenant |
+| `BR_IDLE_TIMEOUT_SECS` | `900` (15 min) | Close pgwire connections that receive no messages for this many seconds. Enables Fly.io `auto_stop_machines` to work correctly with GUI clients (e.g. TablePlus) that hold idle connections indefinitely. Set to `0` to disable (not recommended on Fly.io). |
 | `BR_CORS_ALLOWED_ORIGINS` | *(empty, same-origin only)* | Comma-separated list of allowed CORS origins for the Admin API |
 | `RUST_LOG` | `info` | Log filter (standard Rust/tracing convention) |
 
@@ -224,6 +226,19 @@ psql "postgresql://<user>:<password>@127.0.0.1:5434/<datasource-name>"
 Data sources are configured via the Admin UI (`/datasources`) or REST API — not via env vars.
 
 ## Performance
+
+### Idle Connection Timeout
+
+pgwire 0.38 has no built-in idle timeout — `socket.next().await` blocks indefinitely after authentication. This prevents Fly.io `auto_stop_machines` from ever triggering when a GUI client like TablePlus is open, because the VM only stops when it has zero connections.
+
+`proxy/src/server.rs` replaces pgwire's `process_socket` with a custom message loop (`process_socket_with_idle_timeout`) that adds a `tokio::select!` branch racing each `socket.next()` against a `sleep(idle_timeout)`. The timer resets after every received message — a running query does not count as idle.
+
+Default timeout is 15 minutes (`BR_IDLE_TIMEOUT_SECS=900`). TCP keepalive (60 s time, 10 s interval) is also set on each accepted socket to detect dead connections from crashed clients or network failures.
+
+When idle timeout fires, a log line is emitted at `INFO` level:
+```
+Idle connection timed out after 900s
+```
 
 ### Arrow Type Alignment (query time)
 
@@ -406,6 +421,6 @@ Catalog entity IDs (schemas, tables, columns) are deterministic UUID v5 fingerpr
 
 ```bash
 cargo build -p proxy          # compile
-cargo test -p proxy           # run tests (84 unit tests)
+cargo test -p proxy           # run tests (101 unit tests)
 cd admin-ui && npm run build  # production UI bundle
 ```

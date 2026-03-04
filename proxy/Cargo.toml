@@ -41,6 +41,9 @@ rand_core = { version = "0.6", features = ["std"] }
 aes-gcm = "0.10"
 base64 = "0.22"
 
+# TCP socket options (keepalive)
+socket2 = { version = "0.5", features = ["all"] }
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

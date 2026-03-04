@@ -11,4 +11,5 @@ pub mod engine;
 pub mod entity;
 pub mod handler;
 pub mod hooks;
+pub mod server;
 pub mod sql_rewrite;

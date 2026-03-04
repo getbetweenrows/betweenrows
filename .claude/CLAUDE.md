@@ -9,6 +9,7 @@ QueryProxy is a Rust PostgreSQL wire protocol proxy. See `README.md` for full de
 Key versions: pgwire 0.38, DataFusion 51, axum 0.8, SeaORM 1, tokio-postgres 0.7, argon2 0.5, aes-gcm 0.10, jsonwebtoken 9. Admin UI: React 19, Vite 6, Tailwind 4, TanStack Query 5, react-router-dom 7.
 
 ## Key Files
+- `proxy/src/server.rs` — `process_socket_with_idle_timeout()` (replaces pgwire's `process_socket`; adds idle + startup timeouts)
 - `proxy/src/admin/mod.rs` — `AdminState`, `ApiErr`, `admin_router()`
 - `proxy/src/admin/jwt.rs` — `AdminClaims` / `AuthClaims` extractors
 - `proxy/src/admin/datasource_types.rs` — `split_config`, `merge_config`, `get_type_defs`
@@ -51,6 +52,7 @@ Always get Arrow types from the library's `get_schema()` during discovery — th
 - Cache invalidation: `engine_cache.invalidate(name)` after catalog operations (keeps shared pool). `engine_cache.invalidate_all(name)` after datasource edit/delete (removes pool too). Never swap these — see README § Performance.
 - Discovery jobs: one active job per datasource enforced by `JobStore.active_by_ds`; cancellation via `CancellationToken` passed through all `DiscoveryProvider` methods
 - Catalog UUID v5 key format: `"{parent_uuid}:{child_name}"` — same natural key → same ID → re-discovery is a safe upsert
+- Idle timeout: `process_socket_with_idle_timeout` in `server.rs` replaces `pgwire::tokio::process_socket`. Env var `BR_IDLE_TIMEOUT_SECS` (default 900). Tests use `tokio::time::pause()` + `advance()` — do not add real `sleep()` calls in server tests.
 
 ## Pre-commit Hook
 A `.githooks/pre-commit` script runs `cargo fmt --check` and `cargo clippy -p proxy -- -D warnings`. Enable it once per clone:

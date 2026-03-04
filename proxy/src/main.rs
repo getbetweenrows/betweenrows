@@ -1,13 +1,15 @@
 use clap::{Parser, Subcommand};
 use migration::{Migrator, MigratorTrait};
-use pgwire::tokio::process_socket;
 use proxy::admin::{AdminState, admin_router};
 use proxy::auth::Auth;
 use proxy::engine::EngineCache;
 use proxy::handler::ProxyHandler;
+use proxy::server::process_socket_with_idle_timeout;
 use rand_core::RngCore;
 use sea_orm::Database;
+use socket2::{SockRef, TcpKeepalive};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 
 #[derive(Parser)]
@@ -229,15 +231,36 @@ async fn serve(
 
     let bind_addr =
         std::env::var("BR_PROXY_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:5434".to_string());
+
+    let idle_timeout_secs: u64 = std::env::var("BR_IDLE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(900);
+    let idle_timeout = Duration::from_secs(idle_timeout_secs);
+    tracing::info!(
+        secs = idle_timeout_secs,
+        "Idle connection timeout configured"
+    );
+
+    let keepalive = TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(10));
+
     let listener = TcpListener::bind(&bind_addr).await?;
     tracing::info!(addr = %bind_addr, "Proxy online");
 
     loop {
         let (incoming_socket, _) = listener.accept().await?;
-        let handler_clone = handler.clone();
 
+        if let Err(e) = SockRef::from(&incoming_socket).set_tcp_keepalive(&keepalive) {
+            tracing::warn!(error = %e, "Failed to set TCP keepalive");
+        }
+
+        let handler_clone = handler.clone();
         tokio::spawn(async move {
-            if let Err(e) = process_socket(incoming_socket, None, handler_clone).await {
+            if let Err(e) =
+                process_socket_with_idle_timeout(incoming_socket, handler_clone, idle_timeout).await
+            {
                 tracing::error!(error = %e, "Connection error");
             }
         });

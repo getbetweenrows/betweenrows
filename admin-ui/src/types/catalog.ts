@@ -2,6 +2,7 @@
 
 export interface DiscoveredSchemaResponse {
   schema_name: string
+  schema_alias: string | null
   is_already_selected: boolean
 }
 
@@ -48,6 +49,7 @@ export interface CatalogTableResponse {
 export interface CatalogSchemaResponse {
   id: string
   schema_name: string
+  schema_alias: string | null
   is_selected: boolean
   tables: CatalogTableResponse[]
 }
@@ -104,6 +106,7 @@ export interface CatalogTableSelection {
 
 export interface CatalogSchemaSelection {
   schema_name: string
+  schema_alias?: string | null
   is_selected: boolean
   tables: CatalogTableSelection[]
 }

@@ -14,13 +14,45 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
-use crate::admin::discovery_job::{DiscoveryEvent, DiscoveryJob, DiscoveryRequest};
+use crate::admin::discovery_job::{
+    DiscoveryEvent, DiscoveryJob, DiscoveryRequest, SaveSchemaSelection,
+};
 use crate::admin::dto::*;
 use crate::admin::jwt::AdminClaims;
 use crate::admin::{AdminState, ApiErr};
 use crate::discovery;
 use crate::engine::DataSourceConfig;
 use crate::entity::{data_source, discovered_column, discovered_schema, discovered_table};
+
+/// Return the effective (user-visible) name for a schema selection.
+///
+/// If `schema_alias` is `Some` and non-empty it is used verbatim; otherwise
+/// the raw `schema_name` is returned. This is the value stored as the
+/// DataFusion catalog key and used as the search-path name.
+fn effective_schema_name<'a>(schema_name: &'a str, schema_alias: Option<&'a str>) -> &'a str {
+    schema_alias
+        .filter(|a| !a.is_empty())
+        .unwrap_or(schema_name)
+}
+
+/// Validate that no two schema selections share the same effective name.
+///
+/// Aliases (when non-empty) take precedence over the raw schema name. Returns
+/// `Err` with a human-readable message on the first collision detected.
+fn validate_alias_uniqueness(schemas: &[SaveSchemaSelection]) -> Result<(), String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for s in schemas {
+        let effective =
+            effective_schema_name(&s.schema_name, s.schema_alias.as_deref()).to_string();
+        if !seen.insert(effective.clone()) {
+            return Err(format!(
+                "Duplicate effective schema name '{}': each schema must have a unique name or alias",
+                effective
+            ));
+        }
+    }
+    Ok(())
+}
 
 // ---------- POST /datasources/{id}/discover — submit a job ----------
 
@@ -159,14 +191,20 @@ async fn run_inner(
                 .all(&state.db)
                 .await?;
 
-            let selected_names: std::collections::HashSet<String> =
-                existing.into_iter().map(|s| s.schema_name).collect();
+            let existing_map: std::collections::HashMap<String, Option<String>> = existing
+                .into_iter()
+                .map(|s| (s.schema_name, s.schema_alias))
+                .collect();
 
             let response: Vec<DiscoveredSchemaResponse> = discovered
                 .into_iter()
-                .map(|s| DiscoveredSchemaResponse {
-                    is_already_selected: selected_names.contains(&s.schema_name),
-                    schema_name: s.schema_name,
+                .map(|s| {
+                    let alias = existing_map.get(&s.schema_name).and_then(|a| a.clone());
+                    DiscoveredSchemaResponse {
+                        is_already_selected: existing_map.contains_key(&s.schema_name),
+                        schema_alias: alias,
+                        schema_name: s.schema_name,
+                    }
                 })
                 .collect();
 
@@ -305,6 +343,10 @@ async fn run_inner(
         DiscoveryRequest::SaveCatalog { schemas } => {
             send(progress("saving", "Saving catalog selections…"));
 
+            // Validate alias uniqueness: no two schemas may share the same effective name.
+            validate_alias_uniqueness(&schemas)
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+
             // Discover columns for selected tables
             let ds = data_source::Entity::find_by_id(datasource_id)
                 .one(&state.db)
@@ -326,8 +368,16 @@ async fn run_inner(
                     .one(&txn)
                     .await?;
 
+                // Normalize empty alias to None
+                let alias = schema_sel
+                    .schema_alias
+                    .as_deref()
+                    .filter(|a| !a.is_empty())
+                    .map(|a| a.to_string());
+
                 if let Some(existing) = existing_schema {
                     let mut active: discovered_schema::ActiveModel = existing.into();
+                    active.schema_alias = Set(alias);
                     active.is_selected = Set(schema_sel.is_selected);
                     active.discovered_at = Set(now);
                     active.update(&txn).await?;
@@ -336,6 +386,7 @@ async fn run_inner(
                         id: Set(schema_uuid),
                         data_source_id: Set(datasource_id),
                         schema_name: Set(schema_sel.schema_name.clone()),
+                        schema_alias: Set(alias),
                         is_selected: Set(schema_sel.is_selected),
                         discovered_at: Set(now),
                     }
@@ -898,6 +949,7 @@ pub async fn get_catalog(
         schema_responses.push(CatalogSchemaResponse {
             id: schema.id,
             schema_name: schema.schema_name,
+            schema_alias: schema.schema_alias,
             is_selected: schema.is_selected,
             tables: table_responses,
         });
@@ -906,4 +958,105 @@ pub async fn get_catalog(
     Ok(Json(CatalogResponse {
         schemas: schema_responses,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::admin::discovery_job::SaveSchemaSelection;
+
+    fn make_schema(name: &str, alias: Option<&str>) -> SaveSchemaSelection {
+        SaveSchemaSelection {
+            schema_name: name.to_string(),
+            schema_alias: alias.map(|s| s.to_string()),
+            is_selected: true,
+            tables: vec![],
+        }
+    }
+
+    // --- effective_schema_name ---
+
+    #[test]
+    fn test_effective_name_no_alias() {
+        assert_eq!(effective_schema_name("public", None), "public");
+    }
+
+    #[test]
+    fn test_effective_name_with_alias() {
+        assert_eq!(effective_schema_name("public", Some("main")), "main");
+    }
+
+    #[test]
+    fn test_effective_name_empty_alias_falls_back() {
+        assert_eq!(effective_schema_name("public", Some("")), "public");
+    }
+
+    // --- validate_alias_uniqueness ---
+
+    #[test]
+    fn test_unique_names_no_aliases_passes() {
+        let schemas = vec![make_schema("public", None), make_schema("analytics", None)];
+        assert!(validate_alias_uniqueness(&schemas).is_ok());
+    }
+
+    #[test]
+    fn test_distinct_aliases_passes() {
+        let schemas = vec![
+            make_schema("public", Some("main")),
+            make_schema("analytics", Some("stats")),
+        ];
+        assert!(validate_alias_uniqueness(&schemas).is_ok());
+    }
+
+    #[test]
+    fn test_empty_alias_uses_schema_name_no_collision() {
+        // "" alias → falls back to "public"; "analytics" is distinct → OK
+        let schemas = vec![
+            make_schema("public", Some("")),
+            make_schema("analytics", None),
+        ];
+        assert!(validate_alias_uniqueness(&schemas).is_ok());
+    }
+
+    #[test]
+    fn test_alias_collides_with_other_schema_name() {
+        // "public" aliased to "analytics" collides with the bare "analytics" schema
+        let schemas = vec![
+            make_schema("public", Some("analytics")),
+            make_schema("analytics", None),
+        ];
+        let err = validate_alias_uniqueness(&schemas).unwrap_err();
+        assert!(
+            err.contains("analytics"),
+            "Expected 'analytics' in error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_two_aliases_collide() {
+        let schemas = vec![
+            make_schema("public", Some("common")),
+            make_schema("analytics", Some("common")),
+        ];
+        let err = validate_alias_uniqueness(&schemas).unwrap_err();
+        assert!(err.contains("common"), "Expected 'common' in error: {err}");
+    }
+
+    #[test]
+    fn test_duplicate_schema_names_collide() {
+        let schemas = vec![make_schema("public", None), make_schema("public", None)];
+        let err = validate_alias_uniqueness(&schemas).unwrap_err();
+        assert!(err.contains("public"), "Expected 'public' in error: {err}");
+    }
+
+    #[test]
+    fn test_single_schema_always_passes() {
+        let schemas = vec![make_schema("public", Some("main"))];
+        assert!(validate_alias_uniqueness(&schemas).is_ok());
+    }
+
+    #[test]
+    fn test_empty_list_passes() {
+        assert!(validate_alias_uniqueness(&[]).is_ok());
+    }
 }

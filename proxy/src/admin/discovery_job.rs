@@ -47,6 +47,10 @@ pub struct TableRef {
 #[derive(Debug, Deserialize, Clone)]
 pub struct SaveSchemaSelection {
     pub schema_name: String,
+    /// Optional alias to use as the user-visible schema name in DataFusion.
+    /// Empty string is normalised to `None` by the save handler.
+    #[serde(default)]
+    pub schema_alias: Option<String>,
     pub is_selected: bool,
     pub tables: Vec<SaveTableSelection>,
 }

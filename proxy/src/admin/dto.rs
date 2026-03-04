@@ -172,6 +172,10 @@ pub struct SaveCatalogRequest {
 #[derive(Debug, Deserialize, Clone)]
 pub struct CatalogSchemaSelection {
     pub schema_name: String,
+    /// User-provided alias exposed in DataFusion as the schema's search-path name.
+    /// Empty string is treated as "no alias" (equivalent to `None`).
+    #[serde(default)]
+    pub schema_alias: Option<String>,
     pub is_selected: bool,
     pub tables: Vec<CatalogTableSelection>,
 }
@@ -195,6 +199,8 @@ pub struct CatalogColumnSelection {
 #[derive(Debug, Serialize)]
 pub struct DiscoveredSchemaResponse {
     pub schema_name: String,
+    /// Stored alias for this schema, if one was saved during a previous discovery run.
+    pub schema_alias: Option<String>,
     pub is_already_selected: bool,
 }
 
@@ -228,6 +234,9 @@ pub struct CatalogResponse {
 pub struct CatalogSchemaResponse {
     pub id: Uuid,
     pub schema_name: String,
+    /// Alias under which this schema is exposed in DataFusion and to end users.
+    /// `None` means the raw `schema_name` is used directly.
+    pub schema_alias: Option<String>,
     pub is_selected: bool,
     pub tables: Vec<CatalogTableResponse>,
 }

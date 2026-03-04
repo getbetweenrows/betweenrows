@@ -8,6 +8,9 @@ pub struct Model {
     pub id: Uuid,
     pub data_source_id: Uuid,
     pub schema_name: String,
+    /// Optional user-visible alias. When set, DataFusion exposes this schema
+    /// under `schema_alias` instead of `schema_name`. `None` means no alias.
+    pub schema_alias: Option<String>,
     pub is_selected: bool,
     pub discovered_at: DateTime,
 }

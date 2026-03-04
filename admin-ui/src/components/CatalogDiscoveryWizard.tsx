@@ -23,6 +23,8 @@ export function CatalogDiscoveryWizard({ datasourceId }: Props) {
 
   const [step, setStep] = useState<WizardStep>('idle')
   const [selectedSchemas, setSelectedSchemas] = useState<Set<string>>(new Set())
+  // schema_name → alias (empty string means no alias)
+  const [schemaAliases, setSchemaAliases] = useState<Record<string, string>>({})
   const [discoveredSchemas, setDiscoveredSchemas] = useState<DiscoveredSchemaResponse[]>([])
   const [discoveredTables, setDiscoveredTables] = useState<DiscoveredTableResponse[]>([])
   const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set())
@@ -94,6 +96,12 @@ export function CatalogDiscoveryWizard({ datasourceId }: Props) {
       )
       setDiscoveredSchemas(data)
       setSelectedSchemas(new Set(data.filter((s) => s.is_already_selected).map((s) => s.schema_name)))
+      // Pre-populate aliases from stored values
+      const initialAliases: Record<string, string> = {}
+      for (const s of data) {
+        if (s.schema_alias) initialAliases[s.schema_name] = s.schema_alias
+      }
+      setSchemaAliases(initialAliases)
       setSchemaSearch('')
       setStep('schemas')
     } catch (e: unknown) {
@@ -196,6 +204,7 @@ export function CatalogDiscoveryWizard({ datasourceId }: Props) {
 
     const schemas: CatalogSchemaSelection[] = discoveredSchemas.map((schema) => ({
       schema_name: schema.schema_name,
+      schema_alias: schemaAliases[schema.schema_name] || null,
       is_selected: selectedSchemas.has(schema.schema_name),
       tables: discoveredTables
         .filter((t) => t.schema_name === schema.schema_name)
@@ -230,6 +239,7 @@ export function CatalogDiscoveryWizard({ datasourceId }: Props) {
       setDiscoveredTables([])
       setDiscoveredColumns([])
       setSelectedSchemas(new Set())
+      setSchemaAliases({})
       setSelectedTables(new Set())
       setSelectedColumns(new Set())
       setActiveTable(null)
@@ -508,23 +518,37 @@ export function CatalogDiscoveryWizard({ datasourceId }: Props) {
 
           <div className="space-y-1 mb-4">
             {filteredSchemas.map((schema) => (
-              <label
+              <div
                 key={schema.schema_name}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-50 cursor-pointer"
+                className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-50"
               >
                 <input
                   type="checkbox"
                   checked={selectedSchemas.has(schema.schema_name)}
                   onChange={() => toggleSchema(schema.schema_name)}
-                  className="rounded border-gray-300 text-indigo-600"
+                  className="rounded border-gray-300 text-indigo-600 flex-shrink-0"
                 />
-                <span className="text-sm font-mono text-gray-900">{schema.schema_name}</span>
+                <span className="text-sm font-mono text-gray-900 w-36 flex-shrink-0 truncate">
+                  {schema.schema_name}
+                </span>
                 {schema.is_already_selected && (
-                  <span className="text-xs text-green-600 bg-green-50 px-1.5 py-0.5 rounded">
-                    selected
+                  <span className="text-xs text-green-600 bg-green-50 px-1.5 py-0.5 rounded flex-shrink-0">
+                    saved
                   </span>
                 )}
-              </label>
+                <input
+                  type="text"
+                  value={schemaAliases[schema.schema_name] ?? ''}
+                  onChange={(e) =>
+                    setSchemaAliases((prev) => ({
+                      ...prev,
+                      [schema.schema_name]: e.target.value,
+                    }))
+                  }
+                  placeholder="alias (optional)"
+                  className="ml-auto w-36 px-2 py-0.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500 font-mono"
+                />
+              </div>
             ))}
             {filteredSchemas.length === 0 && (
               <p className="text-xs text-gray-400 px-3">No schemas match your search.</p>

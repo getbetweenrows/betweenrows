@@ -5,6 +5,7 @@ mod m20260220_000002_create_data_sources;
 mod m20260220_000003_create_user_data_sources;
 mod m20260221_000004_create_catalog_tables;
 mod m20260301_000005_add_column_is_selected;
+mod m20260303_000006_add_schema_alias;
 
 pub struct Migrator;
 
@@ -17,6 +18,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260220_000003_create_user_data_sources::Migration),
             Box::new(m20260221_000004_create_catalog_tables::Migration),
             Box::new(m20260301_000005_add_column_is_selected::Migration),
+            Box::new(m20260303_000006_add_schema_alias::Migration),
         ]
     }
 }

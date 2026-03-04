@@ -174,6 +174,8 @@ struct VirtualCatalogTable {
 
 /// A schema in the virtual catalog, containing pre-selected tables.
 struct VirtualCatalogSchema {
+    /// The real upstream schema name, used in TableReference for SQL sent to upstream.
+    schema_name: String,
     tables: HashMap<String, VirtualCatalogTable>,
 }
 
@@ -427,17 +429,38 @@ impl CatalogProvider for VirtualCatalogProvider {
     }
 }
 
+/// Choose the DataFusion default schema name for a virtual catalog.
+///
+/// Walks the catalog map looking for the schema whose real upstream name is
+/// `"public"` and returns that entry's key (which may be an alias). If no
+/// `"public"` schema is present, the first key in iteration order is used.
+/// Returns the literal string `"public"` when the map is empty.
+fn select_default_schema(catalog_schemas: &HashMap<String, VirtualCatalogSchema>) -> String {
+    catalog_schemas
+        .iter()
+        .find(|(_, vs)| vs.schema_name == "public")
+        .map(|(alias, _)| alias.clone())
+        .or_else(|| catalog_schemas.keys().next().cloned())
+        .unwrap_or_else(|| "public".to_string())
+}
+
 /// Build a SessionContext from local catalog metadata using a shared LazyPool.
 ///
 /// Pool creation is deferred until the first user-table query, so pg_catalog /
 /// information_schema queries complete instantly without an upstream connection.
+///
+/// `default_schema` is the alias (or real name when no alias) of the schema to
+/// use as the default search path (replaces the hard-coded `"public"`).
 async fn create_session_context_from_catalog(
     catalog_schemas: HashMap<String, VirtualCatalogSchema>,
     lazy_pool: Arc<LazyPool>,
+    default_schema: &str,
 ) -> Result<SessionContext, Box<dyn std::error::Error + Send + Sync>> {
-    // Build VirtualSchemaProviders — all share the same lazy pool
+    // Build VirtualSchemaProviders — all share the same lazy pool.
+    // The HashMap key is the alias (user-facing); schema_name inside the
+    // provider is the real upstream name used in TableReference.
     let mut schema_providers: HashMap<String, Arc<VirtualSchemaProvider>> = HashMap::new();
-    for (schema_name, catalog_schema) in catalog_schemas {
+    for (alias_name, catalog_schema) in catalog_schemas {
         let tables: HashMap<String, SchemaRef> = catalog_schema
             .tables
             .into_values()
@@ -445,9 +468,9 @@ async fn create_session_context_from_catalog(
             .collect();
 
         schema_providers.insert(
-            schema_name.clone(),
+            alias_name,
             Arc::new(VirtualSchemaProvider {
-                schema_name,
+                schema_name: catalog_schema.schema_name,
                 tables,
                 pool: Arc::clone(&lazy_pool),
             }),
@@ -461,7 +484,7 @@ async fn create_session_context_from_catalog(
 
     let config = SessionConfig::new()
         .with_information_schema(true)
-        .with_default_catalog_and_schema("postgres", "public");
+        .with_default_catalog_and_schema("postgres", default_schema);
 
     let ctx = SessionContext::new_with_config(config);
     ctx.register_catalog("postgres", Arc::new(catalog));
@@ -633,15 +656,26 @@ impl EngineCache {
                 );
             }
 
+            // Use alias as the user-facing catalog key; keep real name for upstream queries.
+            let effective_name = schema
+                .schema_alias
+                .clone()
+                .unwrap_or_else(|| schema.schema_name.clone());
+
             catalog_schemas.insert(
-                schema.schema_name.clone(),
+                effective_name,
                 VirtualCatalogSchema {
+                    schema_name: schema.schema_name,
                     tables: catalog_tables,
                 },
             );
         }
 
-        let ctx = create_session_context_from_catalog(catalog_schemas, lazy_pool).await?;
+        // Determine default search path: prefer alias for "public", else first schema.
+        let default_schema = select_default_schema(&catalog_schemas);
+
+        let ctx = create_session_context_from_catalog(catalog_schemas, lazy_pool, &default_schema)
+            .await?;
         let ctx = Arc::new(ctx);
         map.insert(name.to_string(), ctx.clone());
         Ok(ctx)
@@ -1188,5 +1222,60 @@ mod tests {
         let name_field = schema.field_with_name("name").unwrap();
         assert_eq!(*name_field.data_type(), DataType::Utf8);
         assert!(name_field.is_nullable());
+    }
+
+    // --- select_default_schema ---
+
+    fn make_virtual_schema(real_name: &str) -> VirtualCatalogSchema {
+        VirtualCatalogSchema {
+            schema_name: real_name.to_string(),
+            tables: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_select_default_schema_public_no_alias() {
+        let mut map = HashMap::new();
+        map.insert("public".to_string(), make_virtual_schema("public"));
+        assert_eq!(select_default_schema(&map), "public");
+    }
+
+    #[test]
+    fn test_select_default_schema_public_with_alias() {
+        // "public" schema is exposed under the alias "main"
+        let mut map = HashMap::new();
+        map.insert("main".to_string(), make_virtual_schema("public"));
+        assert_eq!(select_default_schema(&map), "main");
+    }
+
+    #[test]
+    fn test_select_default_schema_no_public_uses_first_key() {
+        let mut map = HashMap::new();
+        map.insert("analytics".to_string(), make_virtual_schema("analytics"));
+        // Only one schema present — must be returned
+        assert_eq!(select_default_schema(&map), "analytics");
+    }
+
+    #[test]
+    fn test_select_default_schema_prefers_public_over_first() {
+        // "public" is not the first key in insertion order; it should still win.
+        let mut map = HashMap::new();
+        map.insert("analytics".to_string(), make_virtual_schema("analytics"));
+        map.insert("public".to_string(), make_virtual_schema("public"));
+        assert_eq!(select_default_schema(&map), "public");
+    }
+
+    #[test]
+    fn test_select_default_schema_aliased_public_over_first() {
+        let mut map = HashMap::new();
+        map.insert("analytics".to_string(), make_virtual_schema("analytics"));
+        map.insert("main".to_string(), make_virtual_schema("public"));
+        assert_eq!(select_default_schema(&map), "main");
+    }
+
+    #[test]
+    fn test_select_default_schema_empty_map_returns_literal_public() {
+        let map: HashMap<String, VirtualCatalogSchema> = HashMap::new();
+        assert_eq!(select_default_schema(&map), "public");
     }
 }

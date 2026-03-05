@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-03-04
+
+### Fixed
+- TypeScript errors in test files (`as unknown as` casts, unused imports) that
+  were silently ignored by Vitest/esbuild but caught by `tsc` during Docker build
+
+### Infrastructure
+- Add `typecheck` script (`tsc --noEmit`) to `admin-ui` and run it in the
+  pre-commit hook before tests, so type errors are caught locally before CI
+
 ## [0.2.1] - 2026-03-04
 
 ### Added

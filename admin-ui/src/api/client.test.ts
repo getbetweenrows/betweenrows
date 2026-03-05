@@ -45,7 +45,7 @@ describe('api/client – request interceptor', () => {
     })
     testClient.defaults.adapter = mockAdapter
     await testClient.get('/test')
-    expect(capturedConfig?.headers?.Authorization).toBeUndefined()
+    expect((capturedConfig as { headers: { Authorization?: string } } | null)?.headers?.Authorization).toBeUndefined()
   })
 })
 

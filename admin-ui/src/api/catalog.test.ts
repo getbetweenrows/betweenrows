@@ -18,7 +18,7 @@ import { client } from './client'
 import { fetchEventSource } from '@microsoft/fetch-event-source'
 import { submitAndStream, cancelDiscovery, getDiscoveryStatus, getCatalog } from './catalog'
 
-const mockClient = client as {
+const mockClient = client as unknown as {
   post: ReturnType<typeof vi.fn>
   get: ReturnType<typeof vi.fn>
   delete: ReturnType<typeof vi.fn>

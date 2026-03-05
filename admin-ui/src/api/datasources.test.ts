@@ -23,7 +23,7 @@ import {
   setDataSourceUsers,
 } from './datasources'
 
-const mockClient = client as {
+const mockClient = client as unknown as {
   post: ReturnType<typeof vi.fn>
   get: ReturnType<typeof vi.fn>
   put: ReturnType<typeof vi.fn>

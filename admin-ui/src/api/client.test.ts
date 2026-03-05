@@ -13,7 +13,7 @@ describe('api/client – request interceptor', () => {
   it('attaches Bearer token when localStorage has one', async () => {
     localStorage.setItem('token', 'my-jwt')
     // Re-import to run the module with the token already set
-    const { client } = await import('./client')
+    await import('./client')
     // Inspect the interceptor by checking what an outgoing request config looks like
     // via axios adapter mock
     const mockAdapter = vi.fn().mockResolvedValue({ data: {}, status: 200, headers: {}, config: {} })
@@ -24,7 +24,7 @@ describe('api/client – request interceptor', () => {
     testClient.interceptors.request.use((config) => {
       const token = localStorage.getItem('token')
       if (token) config.headers.Authorization = `Bearer ${token}`
-      capturedConfig = config as Record<string, unknown>
+      capturedConfig = config as unknown as Record<string, unknown>
       return config
     })
     testClient.defaults.adapter = mockAdapter
@@ -34,13 +34,13 @@ describe('api/client – request interceptor', () => {
 
   it('omits Authorization header when no token', async () => {
     // No token in localStorage
-    let capturedConfig: { headers: Record<string, unknown> } | null = null
+    let capturedConfig: { headers: { Authorization?: string } } | null = null
     const testClient = axios.create({ baseURL: '/api/v1' })
     const mockAdapter = vi.fn().mockResolvedValue({ data: {}, status: 200, headers: {}, config: {} })
     testClient.interceptors.request.use((config) => {
       const token = localStorage.getItem('token')
       if (token) config.headers.Authorization = `Bearer ${token}`
-      capturedConfig = config as { headers: Record<string, unknown> }
+      capturedConfig = config as unknown as { headers: { Authorization?: string } }
       return config
     })
     testClient.defaults.adapter = mockAdapter

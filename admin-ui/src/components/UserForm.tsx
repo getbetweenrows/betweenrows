@@ -1,5 +1,8 @@
 import { type FormEvent, useState } from 'react'
 import type { CreateUserPayload, UpdateUserPayload } from '../types/user'
+import { PasswordInput } from './PasswordInput'
+import { PasswordStrengthIndicator } from './PasswordStrengthIndicator'
+import { validatePassword } from '../utils/passwordValidation'
 
 type Mode = 'create' | 'edit'
 
@@ -27,10 +30,16 @@ export function UserForm({ mode, initialValues = {}, onSubmit, onCancel, loading
   const [isActive, setIsActive] = useState(initialValues.is_active ?? true)
   const [email, setEmail] = useState(initialValues.email ?? '')
   const [displayName, setDisplayName] = useState(initialValues.display_name ?? '')
+  const [localError, setLocalError] = useState<string | null>(null)
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
+    setLocalError(null)
     if (mode === 'create') {
+      if (!validatePassword(password).valid) {
+        setLocalError('Password does not meet the requirements below.')
+        return
+      }
       await onSubmit({
         username,
         password,
@@ -68,13 +77,15 @@ export function UserForm({ mode, initialValues = {}, onSubmit, onCancel, loading
       {/* Password (create only) */}
       {mode === 'create' && (
         <Field label="Password" required>
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-            className={inputCls}
-          />
+          <>
+            <PasswordInput
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              className={inputCls}
+            />
+            <PasswordStrengthIndicator password={password} />
+          </>
         </Field>
       )}
 
@@ -130,7 +141,9 @@ export function UserForm({ mode, initialValues = {}, onSubmit, onCancel, loading
         )}
       </div>
 
-      {error && <p className="text-sm text-red-600">{error}</p>}
+      {(error || localError) && (
+        <p className="text-sm text-red-600">{error ?? localError}</p>
+      )}
 
       <div className="flex gap-3 pt-2">
         <button

@@ -157,6 +157,12 @@ export function DataSourcesListPage() {
                         {testingId === ds.id ? 'Testing…' : 'Test'}
                       </button>
                       <button
+                        onClick={() => navigate(`/datasources/${ds.id}/catalog`)}
+                        className="text-indigo-600 hover:text-indigo-800 text-xs font-medium"
+                      >
+                        Catalog
+                      </button>
+                      <button
                         onClick={() => navigate(`/datasources/${ds.id}/edit`)}
                         className="text-blue-600 hover:text-blue-800 text-xs font-medium"
                       >

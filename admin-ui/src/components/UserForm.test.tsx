@@ -41,7 +41,7 @@ describe('UserForm – create mode', () => {
     // create mode textboxes: [0]=username, [1]=tenant, [2]=email, [3]=displayName
     const textboxes = screen.getAllByRole('textbox')
     await user.type(textboxes[0], 'alice')   // username
-    await user.type(getPasswordInput(container), 'secret') // password
+    await user.type(getPasswordInput(container), 'Test@123!') // password
     await user.type(textboxes[1], 'acme')   // tenant
 
     // Submit via button
@@ -50,7 +50,7 @@ describe('UserForm – create mode', () => {
     expect(onSubmit).toHaveBeenCalledWith(
       expect.objectContaining({
         username: 'alice',
-        password: 'secret',
+        password: 'Test@123!',
         tenant: 'acme',
         is_admin: false,
       }),

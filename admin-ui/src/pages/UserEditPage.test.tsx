@@ -89,12 +89,12 @@ describe('UserEditPage', () => {
 
     // The password change input is the last password field in the page
     const pwInputs = container.querySelectorAll('input[type="password"]')
-    await user.type(pwInputs[pwInputs.length - 1] as HTMLInputElement, 'newpassword')
+    await user.type(pwInputs[pwInputs.length - 1] as HTMLInputElement, 'NewPass1!')
     await user.click(screen.getByRole('button', { name: /^change$/i }))
 
     await waitFor(() => expect(mockChangePassword).toHaveBeenCalled())
     expect(mockChangePassword.mock.calls[0][0]).toBe('u-1')
-    expect(mockChangePassword.mock.calls[0][1]).toBe('newpassword')
+    expect(mockChangePassword.mock.calls[0][1]).toBe('NewPass1!')
     await waitFor(() => expect(screen.getByText(/password updated/i)).toBeInTheDocument())
   })
 })

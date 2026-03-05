@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getDataSourceTypes, testDataSource } from '../api/datasources'
 import type { DataSourceType, FieldDef } from '../types/datasource'
+import { PasswordInput } from './PasswordInput'
 
 interface DataSourceFormProps {
   /** If provided, the form is in edit mode for this id. */
@@ -292,14 +293,22 @@ function DynamicField({
           rows={3}
           className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
         />
+      ) : field.is_secret ? (
+        <PasswordInput
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          required={field.required && !(field.is_secret && isEdit)}
+          autoComplete="new-password"
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
       ) : (
         <input
           type={inputType}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
-          required={field.required && !(field.is_secret && isEdit)}
-          autoComplete={field.is_secret ? 'new-password' : undefined}
+          required={field.required}
           className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
       )}

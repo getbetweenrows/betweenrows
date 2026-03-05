@@ -55,11 +55,46 @@ pub async fn list_users(
     }))
 }
 
+fn validate_password(password: &str) -> Result<(), ApiErr> {
+    if password.len() < 8 {
+        return Err(ApiErr::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Password must be at least 8 characters",
+        ));
+    }
+    if !password.chars().any(|c| c.is_uppercase()) {
+        return Err(ApiErr::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Password must contain at least one uppercase letter",
+        ));
+    }
+    if !password.chars().any(|c| c.is_lowercase()) {
+        return Err(ApiErr::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Password must contain at least one lowercase letter",
+        ));
+    }
+    if !password.chars().any(|c| c.is_ascii_digit()) {
+        return Err(ApiErr::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Password must contain at least one digit",
+        ));
+    }
+    if !password.chars().any(|c| !c.is_alphanumeric()) {
+        return Err(ApiErr::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Password must contain at least one special character",
+        ));
+    }
+    Ok(())
+}
+
 pub async fn create_user(
     AdminClaims(_): AdminClaims,
     State(state): State<AdminState>,
     Json(body): Json<CreateUserRequest>,
 ) -> Result<(StatusCode, Json<UserResponse>), ApiErr> {
+    validate_password(&body.password)?;
     let password_hash = Auth::hash_password(&body.password).map_err(ApiErr::internal)?;
 
     let now = Utc::now().naive_utc();
@@ -158,6 +193,8 @@ pub async fn change_password(
     Path(id): Path<Uuid>,
     Json(body): Json<ChangePasswordRequest>,
 ) -> Result<Json<UserResponse>, ApiErr> {
+    validate_password(&body.password)?;
+
     let user = proxy_user::Entity::find_by_id(id)
         .one(&state.db)
         .await

@@ -38,6 +38,8 @@ export function CatalogDiscoveryWizard({ datasourceId }: Props) {
   const [progress, setProgress] = useState<string | null>(null)
   const [activeJobId, setActiveJobId] = useState<string | null>(null)
   const [isWorking, setIsWorking] = useState(false)
+  const [showCatalog, setShowCatalog] = useState(false)
+  const [catalogViewTable, setCatalogViewTable] = useState<string | null>(null)
 
   // AbortController ref for cancelling in-flight SSE streams
   const abortRef = useRef<AbortController | null>(null)
@@ -485,7 +487,160 @@ export function CatalogDiscoveryWizard({ datasourceId }: Props) {
                 Re-sync
               </button>
             )}
+
+            {catalog && catalog.schemas.length > 0 && (
+              <button
+                onClick={() => setShowCatalog((v) => !v)}
+                className="px-3 py-1.5 text-sm border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+              >
+                {showCatalog ? 'Hide Catalog ▲' : 'Browse Catalog ▼'}
+              </button>
+            )}
           </div>
+
+          {/* Catalog browser */}
+          {showCatalog && catalog && (
+            <div className="mt-4 border border-gray-200 rounded-lg overflow-hidden">
+              <div className="flex min-h-[300px] max-h-[60vh]">
+                {/* Left panel: table list */}
+                <div className="w-56 flex-shrink-0 border-r border-gray-200 overflow-y-auto">
+                  {catalog.schemas.map((schema) => (
+                    <div key={schema.id}>
+                      <div className="px-2 py-1.5 bg-gray-50 border-b border-gray-100 flex items-center gap-1.5">
+                        <span className="text-xs font-medium text-gray-600 font-mono truncate">
+                          {schema.schema_name}
+                        </span>
+                        {schema.schema_alias && (
+                          <span className="text-xs text-indigo-500 truncate">
+                            ({schema.schema_alias})
+                          </span>
+                        )}
+                        {!schema.is_selected && (
+                          <span className="ml-auto text-xs text-gray-400 shrink-0">off</span>
+                        )}
+                      </div>
+                      {schema.tables.map((table) => {
+                        const key = `${schema.schema_name}.${table.table_name}`
+                        const isActive = catalogViewTable === key
+                        return (
+                          <div
+                            key={table.id}
+                            onClick={() => setCatalogViewTable(key)}
+                            className={`flex items-center gap-1.5 px-2 py-1.5 cursor-pointer border-l-2 ${
+                              isActive
+                                ? 'bg-indigo-50 border-indigo-500'
+                                : 'border-transparent hover:bg-gray-50'
+                            } ${!table.is_selected ? 'opacity-50' : ''}`}
+                          >
+                            <span className="text-xs font-mono text-gray-800 truncate flex-1">
+                              {table.table_name}
+                            </span>
+                            <span
+                              className={`text-xs px-1 py-0.5 rounded font-medium shrink-0 ${tableTypeBadgeColor(table.table_type)}`}
+                            >
+                              {tableTypeLabel(table.table_type)}
+                            </span>
+                            {table.is_selected && (
+                              <span className="text-xs text-green-600 shrink-0">✓</span>
+                            )}
+                          </div>
+                        )
+                      })}
+                      {schema.tables.length === 0 && (
+                        <div className="px-2 py-1.5 text-xs text-gray-400 italic">No tables</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {/* Right panel: column detail */}
+                <div className="flex-1 overflow-y-auto">
+                  {catalogViewTable ? (
+                    (() => {
+                      const [schemaName, ...rest] = catalogViewTable.split('.')
+                      const tableName = rest.join('.')
+                      const schema = catalog.schemas.find((s) => s.schema_name === schemaName)
+                      const table = schema?.tables.find((t) => t.table_name === tableName)
+                      if (!table) {
+                        return (
+                          <div className="p-3 text-xs text-gray-400">Table not found.</div>
+                        )
+                      }
+                      const selectedCount = table.columns.filter(
+                        (c) => c.is_selected && c.arrow_type !== null,
+                      ).length
+                      const supportedCount = table.columns.filter(
+                        (c) => c.arrow_type !== null,
+                      ).length
+                      return (
+                        <>
+                          <div className="px-3 py-2 border-b border-gray-100 flex items-center justify-between bg-white sticky top-0">
+                            <span className="text-xs font-semibold font-mono text-gray-800">
+                              {catalogViewTable}
+                            </span>
+                            <span className="text-xs text-gray-500">
+                              {selectedCount}/{supportedCount} selected
+                            </span>
+                          </div>
+                          <table className="w-full text-xs border-collapse">
+                            <thead className="sticky top-9 bg-white">
+                              <tr className="text-gray-500 text-left border-b border-gray-100">
+                                <th className="py-1 pl-3 pr-3 font-medium">Column</th>
+                                <th className="py-1 pr-3 font-medium">Type</th>
+                                <th className="py-1 pr-3 font-medium">Arrow</th>
+                                <th className="py-1 pr-3 font-medium">Null</th>
+                                <th className="py-1 pr-3 font-medium">Sel</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {table.columns
+                                .slice()
+                                .sort((a, b) => a.ordinal_position - b.ordinal_position)
+                                .map((col) => {
+                                  const unsupported = col.arrow_type === null
+                                  return (
+                                    <tr
+                                      key={col.id}
+                                      className={`border-b border-gray-50 ${unsupported ? 'opacity-40' : ''}`}
+                                    >
+                                      <td className="py-0.5 pl-3 pr-3 font-mono text-gray-900">
+                                        {col.column_name}
+                                      </td>
+                                      <td className="py-0.5 pr-3 text-gray-600">{col.data_type}</td>
+                                      <td className="py-0.5 pr-3 text-gray-500">
+                                        {col.arrow_type ?? (
+                                          <span className="text-yellow-600">⚠ unsup</span>
+                                        )}
+                                      </td>
+                                      <td className="py-0.5 pr-3 text-gray-500">
+                                        {col.is_nullable ? 'yes' : 'no'}
+                                      </td>
+                                      <td className="py-0.5 pr-3">
+                                        {!unsupported && (
+                                          col.is_selected ? (
+                                            <span className="text-green-600 font-medium">✓</span>
+                                          ) : (
+                                            <span className="text-gray-300">—</span>
+                                          )
+                                        )}
+                                      </td>
+                                    </tr>
+                                  )
+                                })}
+                            </tbody>
+                          </table>
+                        </>
+                      )
+                    })()
+                  ) : (
+                    <div className="flex items-center justify-center h-full p-6">
+                      <p className="text-sm text-gray-400">Select a table from the list</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

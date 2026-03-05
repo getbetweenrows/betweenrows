@@ -3,6 +3,9 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { changePassword, getUser, updateUser } from '../api/users'
 import { UserForm } from '../components/UserForm'
+import { PasswordInput } from '../components/PasswordInput'
+import { PasswordStrengthIndicator } from '../components/PasswordStrengthIndicator'
+import { validatePassword } from '../utils/passwordValidation'
 import type { UpdateUserPayload } from '../types/user'
 
 export function UserEditPage() {
@@ -45,6 +48,10 @@ export function UserEditPage() {
   async function handlePasswordChange(e: React.FormEvent) {
     e.preventDefault()
     if (!newPassword) return
+    if (!validatePassword(newPassword).valid) {
+      setPwError('Password does not meet the requirements below.')
+      return
+    }
     setPwError(null)
     setPwSuccess(false)
     setChangingPw(true)
@@ -97,24 +104,28 @@ export function UserEditPage() {
       {/* Change password */}
       <section className="border-t border-gray-200 pt-8">
         <h2 className="text-base font-semibold text-gray-900 mb-4">Change password</h2>
-        <form onSubmit={handlePasswordChange} className="flex gap-3 items-start">
-          <input
-            type="password"
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-            placeholder="New password"
-            required
-            className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-64"
-          />
-          <button
-            type="submit"
-            disabled={changingPw}
-            className="bg-gray-800 hover:bg-gray-900 disabled:opacity-60 text-white text-sm font-medium rounded-lg px-4 py-2 transition-colors"
-          >
-            {changingPw ? 'Saving…' : 'Change'}
-          </button>
+        <form onSubmit={handlePasswordChange} className="space-y-3">
+          <div className="flex gap-3 items-start">
+            <div>
+              <PasswordInput
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                placeholder="New password"
+                required
+                className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-64"
+              />
+              <PasswordStrengthIndicator password={newPassword} />
+            </div>
+            <button
+              type="submit"
+              disabled={changingPw}
+              className="bg-gray-800 hover:bg-gray-900 disabled:opacity-60 text-white text-sm font-medium rounded-lg px-4 py-2 transition-colors"
+            >
+              {changingPw ? 'Saving…' : 'Change'}
+            </button>
+          </div>
+          {pwError && <p className="text-sm text-red-600">{pwError}</p>}
         </form>
-        {pwError && <p className="text-sm text-red-600 mt-2">{pwError}</p>}
         {pwSuccess && <p className="text-sm text-green-600 mt-2">Password updated.</p>}
       </section>
     </div>

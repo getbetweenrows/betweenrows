@@ -31,7 +31,7 @@ describe('UserCreatePage', () => {
     await user.type(textboxes[0], 'newuser')   // username
     await user.type(
       container.querySelector('input[type="password"]') as HTMLInputElement,
-      'secret',
+      'Test@123!',
     )
     await user.type(textboxes[1], 'acme')  // tenant
 

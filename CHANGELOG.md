@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-03-04
+
+### Added
+- `/commit` slash command for Claude Code
+- `/release` skill with semver Docker image tagging
+
+### Infrastructure
+- Admin-ui test suite with Vitest, integrated into CI
+
 ## [0.2.0] - 2026-03-04
 
 ### ✨ Added

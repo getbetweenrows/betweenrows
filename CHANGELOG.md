@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-03-04
+
+### Added
+- Password toggle visibility on login/password fields
+- Password complexity validation
+- Catalog viewer page for browsing the discovered catalog
+- Button on the data source list view to open the catalog viewer
+
+### Fixed
+- `tsc -b` typecheck failure in `client.test.ts`; aligned `typecheck` script accordingly
+
 ## [0.2.2] - 2026-03-04
 
 ### Fixed

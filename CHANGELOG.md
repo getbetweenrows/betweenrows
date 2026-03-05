@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] - 2026-02-20
+## [Unreleased]
+
+## [0.2.0] - 2026-03-04
 
 ### ✨ Added
 - **Multi Data Source Management**: The proxy now supports connecting to multiple, dynamically configured upstream data sources.
@@ -18,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### ♻️ Changed
 - **Authentication Flow**: The PostgreSQL `database` parameter in the connection string is now used to select the target data source.
 - **Project Version**: Incremented crate versions to `0.2.0` to reflect new feature set.
+- **Schema Alias Support**: Catalog discovery now supports schema aliases for more flexible data source mapping.
+- **Per-Column Selection**: Catalog discovery wizard allows selecting individual columns per table.
+- **Idle Connection Timeout**: pgwire proxy now closes idle connections after a configurable timeout.
+- **Fly.io Auto Stop/Start**: Deployment is configured to automatically stop and start machines based on traffic.
 
 ## [0.1.0] - (Initial Release)
 

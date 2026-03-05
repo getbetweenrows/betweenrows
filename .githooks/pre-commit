@@ -6,3 +6,6 @@ cargo fmt --check
 
 echo "→ cargo clippy -p proxy"
 cargo clippy -p proxy -- -D warnings
+
+echo "→ admin-ui tests"
+(cd admin-ui && npm run test:run)

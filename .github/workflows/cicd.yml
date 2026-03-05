@@ -19,8 +19,23 @@ jobs:
       - name: Clippy
         run: cargo clippy -p proxy -- -D warnings
 
-      - name: Run tests
+      - name: Run Rust tests
         run: cargo test -p proxy
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: admin-ui/package-lock.json
+
+      - name: Install admin-ui dependencies
+        run: npm ci
+        working-directory: admin-ui
+
+      - name: Run admin-ui tests
+        run: npm run test:run
+        working-directory: admin-ui
 
   publish:
     needs: test

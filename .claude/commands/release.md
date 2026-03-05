@@ -36,7 +36,7 @@ Once the user confirms the version and changelog entries:
 
 ### 4. Commit and tag
 
-- Stage only the four files above.
+- Stage the four files above plus `Cargo.lock` (updated when Cargo.toml versions change).
 - Commit with message: `Release vX.Y.Z`
 - Create an annotated tag: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
 

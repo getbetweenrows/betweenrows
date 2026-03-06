@@ -11,12 +11,13 @@ futures = "0.3"
 async-stream = "0.3"
 dotenvy = "0.15"
 
-# DataFusion dependencies (v51 — shared by datafusion-table-providers and datafusion-pg-catalog)
-datafusion = "51"
-datafusion-expr = "51"
-datafusion-sql = "51"
-datafusion-table-providers = { version = "0.9", features = ["postgres"] }
-datafusion-pg-catalog = "0.13.1"
+# DataFusion dependencies (v52 — shared by datafusion-table-providers and datafusion-pg-catalog)
+datafusion = "52"
+datafusion-expr = "52"
+datafusion-sql = "52"
+datafusion-table-providers = { version = "0.10", features = ["postgres"] }
+datafusion-pg-catalog = "0.15"
+datafusion-functions-json = "0.52"
 
 # Postgres dependencies
 tokio-postgres = "0.7"

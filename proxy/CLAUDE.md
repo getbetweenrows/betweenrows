@@ -1,7 +1,7 @@
 # Proxy — Rust PostgreSQL Wire Protocol Proxy
 
 ## Key Versions
-pgwire 0.38, DataFusion 51, axum 0.8, SeaORM 1, tokio-postgres 0.7, argon2 0.5, aes-gcm 0.10, jsonwebtoken 9
+pgwire 0.38, DataFusion 52, axum 0.8, SeaORM 1, tokio-postgres 0.7, argon2 0.5, aes-gcm 0.10, jsonwebtoken 9
 
 ## Key Files
 - `src/server.rs` — `process_socket_with_idle_timeout()` (replaces pgwire's `process_socket`; adds idle + startup timeouts)
@@ -49,4 +49,11 @@ Always get Arrow types from the library's `get_schema()` during discovery — th
 - Idle timeout: `process_socket_with_idle_timeout` in `server.rs` replaces `pgwire::tokio::process_socket`. Env var `BR_IDLE_TIMEOUT_SECS` (default 900). Tests use `tokio::time::pause()` + `advance()` — do not add real `sleep()` calls in server tests.
 
 ## Known Issues
-- **JSONB / regclass / regproc not supported** — `datafusion-table-providers` silently drops these columns (`UnsupportedTypeAction::Warn`). Catalog stores `arrow_type = NULL`; `build_arrow_schema` skips them.
+- **regclass / regproc not supported** — `datafusion-table-providers` drops these columns. Catalog stores `arrow_type = NULL`; `build_arrow_schema` skips them.
+- **json/jsonb wire type** — json/jsonb columns are announced as `VARCHAR` (not `JSONB`) in the pgwire RowDescription. Data is correct; some GUI tools won't show a JSON-specific editor.
+
+## JSON / JSONB Support
+- Both `json` and `jsonb` columns map to Arrow `Utf8` via `UnsupportedTypeAction::String` on the pool (set in both `discovery/postgres.rs` and `engine/mod.rs`).
+- `datafusion-functions-json` is registered on every `SessionContext` via `register_all()` — provides `->`, `->>`, `?` operators and all JSON UDFs.
+- `BetweenRowsPostgresDialect` in `engine/mod.rs` unparses JSON UDFs back to native PG operators for filter pushdown. Wire type is still `VARCHAR`.
+- **Pushdown coverage**: `json_as_text`, `json_get_str`, `json_get`, `json_get_json`, `json_contains` are pushed down. Other UDFs (e.g. `json_length`, `json_keys`) are not — DataFusion evaluates them in-process after fetching the rows.

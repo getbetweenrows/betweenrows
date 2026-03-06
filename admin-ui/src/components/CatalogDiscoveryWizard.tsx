@@ -606,7 +606,14 @@ export function CatalogDiscoveryWizard({ datasourceId }: Props) {
                                       <td className="py-0.5 pl-3 pr-3 font-mono text-gray-900">
                                         {col.column_name}
                                       </td>
-                                      <td className="py-0.5 pr-3 text-gray-600">{col.data_type}</td>
+                                      <td className="py-0.5 pr-3 text-gray-600">
+                                        <span>{col.data_type}</span>
+                                        {(col.data_type === 'jsonb' || col.data_type === 'json') && (
+                                          <span className="ml-1 px-1 py-0.5 text-xs bg-teal-50 text-teal-700 rounded font-medium">
+                                            json
+                                          </span>
+                                        )}
+                                      </td>
                                       <td className="py-0.5 pr-3 text-gray-500">
                                         {col.arrow_type ?? (
                                           <span className="text-yellow-600">⚠ unsup</span>
@@ -1016,7 +1023,14 @@ export function CatalogDiscoveryWizard({ datasourceId }: Props) {
                                   <td className="py-0.5 pr-3 font-mono text-gray-900">
                                     {col.column_name}
                                   </td>
-                                  <td className="py-0.5 pr-3 text-gray-600">{col.data_type}</td>
+                                  <td className="py-0.5 pr-3 text-gray-600">
+                                    <span>{col.data_type}</span>
+                                    {(col.data_type === 'jsonb' || col.data_type === 'json') && (
+                                      <span className="ml-1 px-1 py-0.5 text-xs bg-teal-50 text-teal-700 rounded font-medium">
+                                        json
+                                      </span>
+                                    )}
+                                  </td>
                                   <td className="py-0.5 pr-3 text-gray-500">
                                     {col.arrow_type ?? (
                                       <span className="text-yellow-600">⚠ unsup</span>

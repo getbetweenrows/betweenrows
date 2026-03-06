@@ -189,7 +189,7 @@ impl DiscoveryProvider for PostgresDiscoveryProvider {
         let pool = tokio::select! {
             res = PostgresConnectionPool::new(pool_params) => {
                 res.map_err(|e| DiscoveryError::Connect(e.to_string()))?
-                   .with_unsupported_type_action(UnsupportedTypeAction::Warn)
+                   .with_unsupported_type_action(UnsupportedTypeAction::String)
             }
             _ = cancel.cancelled() => return Err(DiscoveryError::Cancelled),
         };

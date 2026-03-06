@@ -2,7 +2,10 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit}
 use datafusion::catalog::{CatalogProvider, SchemaProvider};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion::sql::TableReference;
-use datafusion::sql::unparser::dialect::PostgreSqlDialect;
+use datafusion::sql::sqlparser::ast as sql_ast;
+use datafusion::sql::unparser::Unparser;
+use datafusion::sql::unparser::dialect::{Dialect, IntervalStyle, PostgreSqlDialect};
+use datafusion_expr::Expr;
 use datafusion_pg_catalog::pg_catalog::{context::PgCatalogContextProvider, setup_pg_catalog};
 use datafusion_table_providers::{
     UnsupportedTypeAction,
@@ -22,6 +25,115 @@ use uuid::Uuid;
 use crate::entity::{
     data_source, discovered_column, discovered_schema, discovered_table, user_data_source,
 };
+
+// ---------- custom dialect for JSON pushdown ----------
+
+/// PostgreSQL dialect extended to unparse `datafusion-functions-json` UDFs
+/// back to native PG JSON operators (`->`, `->>`, `?`) so that filters are
+/// pushed down to the upstream PostgreSQL server as native syntax.
+struct BetweenRowsPostgresDialect;
+
+// All methods below except `scalar_function_to_sql_overrides` mirror the
+// implementations in `PostgreSqlDialect`. If that crate's defaults change,
+// sync these accordingly.
+impl Dialect for BetweenRowsPostgresDialect {
+    fn identifier_quote_style(&self, _: &str) -> Option<char> {
+        Some('"')
+    }
+
+    fn requires_derived_table_alias(&self) -> bool {
+        true
+    }
+
+    fn supports_qualify(&self) -> bool {
+        false
+    }
+
+    fn supports_empty_select_list(&self) -> bool {
+        true
+    }
+
+    fn interval_style(&self) -> IntervalStyle {
+        IntervalStyle::PostgresVerbose
+    }
+
+    fn float64_ast_dtype(&self) -> sql_ast::DataType {
+        sql_ast::DataType::DoublePrecision
+    }
+
+    fn scalar_function_to_sql_overrides(
+        &self,
+        unparser: &Unparser,
+        func_name: &str,
+        args: &[Expr],
+    ) -> datafusion::common::Result<Option<sql_ast::Expr>> {
+        // `JsonFunctionRewriter` flattens nested calls to variadic form, so args are:
+        //   [col, key0, key1, ...]
+        // We chain binary ops left-to-right: col->key0->key1->...
+        // For json_as_text / json_get_str: last hop uses ->>, earlier hops use ->
+        // For json_get / json_get_json:    all hops use ->
+        // For json_contains:               single ? operator (one key only)
+        match func_name {
+            "json_as_text" | "json_get_str" => {
+                if args.len() < 2 {
+                    return Ok(None);
+                }
+                let sql_args: Vec<sql_ast::Expr> = args
+                    .iter()
+                    .map(|a| unparser.expr_to_sql(a))
+                    .collect::<datafusion::common::Result<_>>()?;
+                let mut expr = sql_args[0].clone();
+                for e in &sql_args[1..sql_args.len() - 1] {
+                    expr = json_binary_op(expr, "->", e.clone());
+                }
+                expr = json_binary_op(expr, "->>", sql_args[sql_args.len() - 1].clone());
+                Ok(Some(expr))
+            }
+            "json_get" | "json_get_json" => {
+                if args.len() < 2 {
+                    return Ok(None);
+                }
+                let sql_args: Vec<sql_ast::Expr> = args
+                    .iter()
+                    .map(|a| unparser.expr_to_sql(a))
+                    .collect::<datafusion::common::Result<_>>()?;
+                let mut expr = sql_args[0].clone();
+                for e in &sql_args[1..] {
+                    expr = json_binary_op(expr, "->", e.clone());
+                }
+                Ok(Some(expr))
+            }
+            "json_contains" => {
+                if args.len() != 2 {
+                    return Ok(None);
+                }
+                let left = unparser.expr_to_sql(&args[0])?;
+                let right = unparser.expr_to_sql(&args[1])?;
+                // `?` is PostgreSQL's key-exists operator. `BinaryOperator::Custom`
+                // prints it verbatim. Note: some JDBC/ODBC drivers treat `?` as a
+                // bind-parameter placeholder — this is only used in pushdown SQL sent
+                // to upstream PG over tokio-postgres, which is unaffected.
+                Ok(Some(json_binary_op(left, "?", right)))
+            }
+            _ => {
+                // Other JSON UDFs (e.g. json_length, json_keys) are not mapped here;
+                // they fall back to PostgreSqlDialect which serializes them as function
+                // calls. PostgreSQL won't recognise those names, so pushdown is skipped
+                // and DataFusion evaluates them in-process instead.
+                PostgreSqlDialect {}.scalar_function_to_sql_overrides(unparser, func_name, args)
+            }
+        }
+    }
+}
+
+/// Build a BinaryOp AST node for a JSON operator.
+fn json_binary_op(left: sql_ast::Expr, op: &str, right: sql_ast::Expr) -> sql_ast::Expr {
+    sql_ast::Expr::BinaryOp {
+        left: Box::new(left),
+        op: sql_ast::BinaryOperator::Custom(op.to_string()),
+        right: Box::new(right),
+    }
+}
 
 // ---------- helpers ----------
 
@@ -226,7 +338,7 @@ impl LazyPool {
         let new_pool = PostgresConnectionPool::new(postgres_params)
             .await
             .map_err(|e| format!("Failed to create Postgres pool: {e}"))?
-            .with_unsupported_type_action(UnsupportedTypeAction::Warn);
+            .with_unsupported_type_action(UnsupportedTypeAction::String);
         let new_pool: Arc<DynPostgresConnectionPool> = Arc::new(new_pool);
         *guard = Some(new_pool.clone());
         Ok(new_pool)
@@ -380,7 +492,7 @@ impl SchemaProvider for VirtualSchemaProvider {
             arrow_schema,
             TableReference::full("postgres", self.schema_name.as_str(), name),
         )
-        .with_dialect(Arc::new(PostgreSqlDialect {}));
+        .with_dialect(Arc::new(BetweenRowsPostgresDialect));
 
         Ok(Some(Arc::new(table)))
     }
@@ -486,11 +598,14 @@ async fn create_session_context_from_catalog(
         .with_information_schema(true)
         .with_default_catalog_and_schema("postgres", default_schema);
 
-    let ctx = SessionContext::new_with_config(config);
+    let mut ctx = SessionContext::new_with_config(config);
     ctx.register_catalog("postgres", Arc::new(catalog));
 
     setup_pg_catalog(&ctx, "postgres", ProxyCatalogContext)
         .map_err(|e| format!("Failed to setup pg_catalog: {}", e))?;
+
+    datafusion_functions_json::register_all(&mut ctx)
+        .map_err(|e| format!("Failed to register JSON UDFs: {}", e))?;
 
     tracing::debug!("SessionContext ready (pool deferred until first user-table query)");
 
@@ -1277,5 +1392,69 @@ mod tests {
     fn test_select_default_schema_empty_map_returns_literal_public() {
         let map: HashMap<String, VirtualCatalogSchema> = HashMap::new();
         assert_eq!(select_default_schema(&map), "public");
+    }
+
+    // ── BetweenRowsPostgresDialect JSON unparsing tests ───────────────────────
+
+    fn unparse(expr: &Expr) -> String {
+        let unparser = Unparser::new(&BetweenRowsPostgresDialect);
+        unparser.expr_to_sql(expr).unwrap().to_string()
+    }
+
+    #[test]
+    fn test_dialect_json_as_text_single_key() {
+        // json_as_text(payload, 'name') → "payload"->>'name'
+        let func = datafusion_functions_json::udfs::json_as_text_udf();
+        let expr = func.call(vec![
+            datafusion::prelude::col("payload"),
+            datafusion::prelude::lit("name"),
+        ]);
+        assert_eq!(unparse(&expr), r#""payload" ->> 'name'"#);
+    }
+
+    #[test]
+    fn test_dialect_json_as_text_chained() {
+        // json_as_text(payload, 'a', 'b') → "payload" -> 'a' ->> 'b'
+        let func = datafusion_functions_json::udfs::json_as_text_udf();
+        let expr = func.call(vec![
+            datafusion::prelude::col("payload"),
+            datafusion::prelude::lit("a"),
+            datafusion::prelude::lit("b"),
+        ]);
+        assert_eq!(unparse(&expr), r#""payload" -> 'a' ->> 'b'"#);
+    }
+
+    #[test]
+    fn test_dialect_json_get_single_key() {
+        // json_get(payload, 'tags') → "payload" -> 'tags'
+        let func = datafusion_functions_json::udfs::json_get_udf();
+        let expr = func.call(vec![
+            datafusion::prelude::col("payload"),
+            datafusion::prelude::lit("tags"),
+        ]);
+        assert_eq!(unparse(&expr), r#""payload" -> 'tags'"#);
+    }
+
+    #[test]
+    fn test_dialect_json_get_chained() {
+        // json_get(payload, 'a', 'b') → "payload" -> 'a' -> 'b'
+        let func = datafusion_functions_json::udfs::json_get_udf();
+        let expr = func.call(vec![
+            datafusion::prelude::col("payload"),
+            datafusion::prelude::lit("a"),
+            datafusion::prelude::lit("b"),
+        ]);
+        assert_eq!(unparse(&expr), r#""payload" -> 'a' -> 'b'"#);
+    }
+
+    #[test]
+    fn test_dialect_json_contains() {
+        // json_contains(payload, 'key') → "payload" ? 'key'
+        let func = datafusion_functions_json::udfs::json_contains_udf();
+        let expr = func.call(vec![
+            datafusion::prelude::col("payload"),
+            datafusion::prelude::lit("key"),
+        ]);
+        assert_eq!(unparse(&expr), r#""payload" ? 'key'"#);
     }
 }

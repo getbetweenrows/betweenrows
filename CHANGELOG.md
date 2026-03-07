@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `PolicyHook` replaces hardcoded `RLSHook`; supports `row_filter`, `column_mask`, and `column_access` obligation types
   - Template variables (`{user.tenant}`, `{user.username}`, `{user.id}`) with parse-then-substitute injection safety
   - Wildcard matching (`schema: "*"`, `table: "*"`) in obligation definitions
-  - `access_mode` field on datasources: `"open"` (default) or `"policy_required"` (no policy = empty results)
+  - `access_mode` field on datasources: `"policy_required"` (default) or `"open"` (no policy = full access)
   - Optimistic concurrency on policy updates via `version` field (409 Conflict on mismatch)
   - Immutable `policy_version` snapshots on every policy mutation for audit traceability
   - Deny policies short-circuit with error before plan execution

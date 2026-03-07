@@ -73,7 +73,7 @@ export function makeDataSource(overrides: Partial<DataSource> = {}): DataSource 
     ds_type: 'postgres',
     config: { host: 'localhost', port: 5432, db: 'mydb', user: 'postgres' },
     is_active: true,
-    access_mode: 'open',
+    access_mode: 'policy_required',
     last_sync_at: null,
     last_sync_result: null,
     created_at: '2024-01-01T00:00:00Z',

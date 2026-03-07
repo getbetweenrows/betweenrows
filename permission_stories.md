@@ -469,7 +469,7 @@ The following stories are implemented in the current release via the policy syst
 **Key design decisions for P0:**
 - Policies assign directly to users or all users (`user_id = NULL`). No roles/groups.
 - `is_admin` grants management API access only — does NOT bypass data policies.
-- Datasource `access_mode`: `"open"` (default) or `"policy_required"`.
+- Datasource `access_mode`: `"policy_required"` (default) or `"open"`.
 - Version snapshots for audit: every policy mutation increments `version` and creates a `policy_version` snapshot.
 - Template variables (`{user.tenant}`, etc.) use parse-then-substitute — immune to injection.
 

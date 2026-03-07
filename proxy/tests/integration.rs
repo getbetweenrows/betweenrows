@@ -121,13 +121,53 @@ async fn test_sql_rewrite_in_context() {
     let client = connect().await.expect("Failed to connect to proxy");
 
     // Query pg_class without pg_catalog prefix
-    // sql_rewrite should prepend pg_catalog automatically
+    // engine/rewrite.rs prepends pg_catalog automatically
     let rows = client
         .query("SELECT relname FROM pg_class LIMIT 5", &[])
         .await
-        .expect("Failed to query pg_class (sql_rewrite should qualify it)");
+        .expect("Failed to query pg_class (engine/rewrite should qualify it)");
 
     assert!(!rows.is_empty(), "Should return pg_class rows");
+}
+
+#[tokio::test]
+#[ignore] // Requires running proxy
+async fn test_explain_returns_query_plan() {
+    let client = connect().await.expect("Failed to connect to proxy");
+
+    // EXPLAIN should return rows under a single "QUERY PLAN" column, not "OK"
+    let rows = client
+        .query("EXPLAIN SELECT 1", &[])
+        .await
+        .expect("EXPLAIN should return a result set, not a command tag");
+
+    assert!(!rows.is_empty(), "EXPLAIN should return at least one row");
+
+    // Column must be named "QUERY PLAN" (PostgreSQL wire format)
+    let col_name = rows[0].columns()[0].name();
+    assert_eq!(
+        col_name, "QUERY PLAN",
+        "EXPLAIN column should be 'QUERY PLAN'"
+    );
+
+    let plan_line: String = rows[0].get(0);
+    assert!(!plan_line.is_empty(), "Plan line should not be empty");
+}
+
+#[tokio::test]
+#[ignore] // Requires running proxy
+async fn test_show_tables_returns_rows() {
+    let client = connect().await.expect("Failed to connect to proxy");
+
+    // SHOW TABLES should return a result set, not "OK"
+    let rows = client
+        .query("SHOW TABLES", &[])
+        .await
+        .expect("SHOW TABLES should return a result set");
+
+    // Result may be empty if no user tables are registered, but it must be a Query response
+    // (tokio-postgres would error if it got a command tag instead of a row description)
+    let _ = rows;
 }
 
 #[tokio::test]

@@ -18,6 +18,7 @@ datafusion-sql = "52"
 datafusion-table-providers = { version = "0.10", features = ["postgres"] }
 datafusion-pg-catalog = "0.15"
 datafusion-functions-json = "0.52"
+arrow-pg = { version = "0.12", features = ["datafusion"] }
 
 # Postgres dependencies
 tokio-postgres = "0.7"
@@ -62,6 +63,5 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 
 [dev-dependencies]
-arrow = "57"
 tokio-test = "0.4"
 tower = { version = "0.5", features = ["util"] }

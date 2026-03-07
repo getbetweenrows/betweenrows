@@ -1,11 +1,11 @@
-use crate::arrow_conversion::{build_field_info, encode_batch_optimized};
+use arrow_pg::datatypes::df::encode_dataframe;
 use async_trait::async_trait;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::sqlparser::ast::{ObjectNamePart, Statement, TableFactor, Visit, Visitor};
-use futures::stream::StreamExt;
 use pgwire::api::ClientInfo;
-use pgwire::api::results::{QueryResponse, Response};
+use pgwire::api::portal::Format;
+use pgwire::api::results::Response;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use std::ops::ControlFlow;
 
@@ -174,57 +174,18 @@ impl QueryHook for RLSHook {
             }
         };
 
-        let stream_start = std::time::Instant::now();
-        let mut stream = match df.execute_stream().await {
-            Ok(stream) => stream,
+        let response = match encode_dataframe(df, &Format::UnifiedText, None).await {
+            Ok(qr) => {
+                tracing::info!(elapsed = ?query_start.elapsed(), "RLS query completed");
+                Response::Query(qr)
+            }
             Err(e) => {
-                tracing::error!(error = %e, "Failed to create stream");
-                return Some(Err(PgWireError::ApiError(Box::new(e))));
+                tracing::error!(error = %e, "RLS encoding error");
+                return Some(Err(e));
             }
         };
-        tracing::debug!(elapsed = ?stream_start.elapsed(), "RLS stream setup");
 
-        let schema = stream.schema();
-        let fields = build_field_info(&schema);
-        let fields_for_stream = fields.clone();
-
-        let mut total_rows: usize = 0;
-        let mut batch_count: usize = 0;
-
-        let encoded_stream = async_stream::stream! {
-            while let Some(batch_result) = stream.next().await {
-                match batch_result {
-                    Ok(batch) => {
-                        total_rows += batch.num_rows();
-                        batch_count += 1;
-
-                        match encode_batch_optimized(batch, fields_for_stream.clone()) {
-                            Ok(rows) => {
-                                for row in rows {
-                                    yield Ok(row);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!(error = %e, "RLS batch encoding error");
-                                yield Err(e);
-                                return;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "RLS stream batch error");
-                        yield Err(PgWireError::ApiError(Box::new(e)));
-                        return;
-                    }
-                }
-            }
-            tracing::info!(batches = batch_count, rows = total_rows, elapsed = ?query_start.elapsed(), "RLS query completed");
-        };
-
-        Some(Ok(Response::Query(QueryResponse::new(
-            fields,
-            encoded_stream,
-        ))))
+        Some(Ok(response))
     }
 }
 
@@ -242,7 +203,7 @@ mod tests {
         let mut statements =
             Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("Failed to parse SQL");
         assert_eq!(statements.len(), 1);
-        crate::sql_rewrite::rewrite_statement(&mut statements[0]);
+        crate::engine::rewrite::rewrite_statement(&mut statements[0]);
         statements.remove(0)
     }
 

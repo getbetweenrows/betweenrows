@@ -1,3 +1,5 @@
+pub mod rewrite;
+
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::catalog::{CatalogProvider, SchemaProvider};
 use datafusion::prelude::{SessionConfig, SessionContext};

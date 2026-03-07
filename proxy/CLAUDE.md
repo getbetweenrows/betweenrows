@@ -1,7 +1,7 @@
 # Proxy — Rust PostgreSQL Wire Protocol Proxy
 
 ## Key Versions
-pgwire 0.38, DataFusion 52, axum 0.8, SeaORM 1, tokio-postgres 0.7, argon2 0.5, aes-gcm 0.10, jsonwebtoken 9
+pgwire 0.38, DataFusion 52, axum 0.8, SeaORM 1, tokio-postgres 0.7, argon2 0.5, aes-gcm 0.10, jsonwebtoken 9, arrow-pg 0.12
 
 ## Key Files
 - `src/server.rs` — `process_socket_with_idle_timeout()` (replaces pgwire's `process_socket`; adds idle + startup timeouts)
@@ -10,6 +10,7 @@ pgwire 0.38, DataFusion 52, axum 0.8, SeaORM 1, tokio-postgres 0.7, argon2 0.5, 
 - `src/admin/datasource_types.rs` — `split_config`, `merge_config`, `get_type_defs`
 - `src/admin/discovery_job.rs` — `JobStore`, `DiscoveryJob`, `DiscoveryEvent`, `DiscoveryRequest`
 - `src/engine/mod.rs` — `EngineCache`, `VirtualCatalogProvider`, `build_arrow_schema()`, `arrow_type_to_string()`
+- `src/engine/rewrite.rs` — `rewrite_statement()` AST visitor (pg_catalog table qualification, schema-stripped function calls)
 - `src/hooks/read_only.rs` — `ReadOnlyHook` (allowlist: Query, Show*, Explain*)
 - `src/hooks/rls.rs` — `RLSHook`
 - `src/discovery/` — `DiscoveryProvider` trait + Postgres impl
@@ -40,6 +41,7 @@ Always get Arrow types from the library's `get_schema()` during discovery — th
 `job_store: Arc<Mutex<discovery_job::JobStore>>` replaced the old `discovery_locks: Arc<Mutex<HashSet<i32>>>`.
 
 ## Key Patterns
+- **Always-stream response**: `handler.rs` always returns `Response::Query(encode_dataframe(...))` for every statement that reaches DataFusion — no `is_select` enumeration. The only exception is `Statement::Explain`, which is intercepted before streaming and reformatted into PostgreSQL's single `"QUERY PLAN"` column via `execute_explain()`. Arrow → pgwire encoding is handled by `arrow-pg`.
 - **Hook ordering**: `ReadOnlyHook` runs first (blocks writes with SQLSTATE 25006), then `RLSHook`. Hooks run in both simple and extended query paths. The allowlist in `ReadOnlyHook` must be reviewed before adding new `Statement` variants.
 - `ApiErr` implements `IntoResponse` → JSON `{"error": "..."}` error bodies
 - `AdminClaims` / `AuthClaims` use `FromRequestParts<S> where AdminState: FromRef<S>`; `AdminClaims` also checks `is_admin == true`
@@ -50,7 +52,8 @@ Always get Arrow types from the library's `get_schema()` during discovery — th
 
 ## Known Issues
 - **regclass / regproc not supported** — `datafusion-table-providers` drops these columns. Catalog stores `arrow_type = NULL`; `build_arrow_schema` skips them.
-- **json/jsonb wire type** — json/jsonb columns are announced as `VARCHAR` (not `JSONB`) in the pgwire RowDescription. Data is correct; some GUI tools won't show a JSON-specific editor.
+- **json/jsonb wire type** — json/jsonb columns are announced as `TEXT` (arrow-pg maps `Utf8` → `Type::TEXT`) in the pgwire RowDescription. Data is correct; some GUI tools won't show a JSON-specific editor.
+- **`->>` / `->` operator precedence** — sqlparser 0.59 gives `->>` lower precedence than `=`, so `col->>'key' = 'val'` is misparsed as `col ->> ('key' = 'val')`. In practice this is masked because the filter is pushed down to upstream PostgreSQL before DataFusion evaluates it. Visible in `EXPLAIN` output as a planning error. Workaround: add explicit parens `(col->>'key') = 'val'`. Will be fixed when DataFusion upgrades to sqlparser 0.60+.
 
 ## JSON / JSONB Support
 - Both `json` and `jsonb` columns map to Arrow `Utf8` via `UnsupportedTypeAction::String` on the pool (set in both `discovery/postgres.rs` and `engine/mod.rs`).

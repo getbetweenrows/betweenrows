@@ -1,24 +1,26 @@
-use crate::arrow_conversion::{build_field_info, encode_batch_optimized};
 use crate::auth::Auth;
 use crate::engine::EngineCache;
+use crate::engine::rewrite::rewrite_statement;
 use crate::hooks::{QueryHook, read_only::ReadOnlyHook, rls::RLSHook};
+use arrow_pg::datatypes::arrow_schema_to_pg_fields;
+use arrow_pg::datatypes::df::encode_dataframe;
 use async_trait::async_trait;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 use futures::Sink;
 use futures::sink::SinkExt;
-use futures::stream::StreamExt;
 use pgwire::api::auth::{
     DefaultServerParameterProvider, StartupHandler, finish_authentication, protocol_negotiation,
     save_startup_parameters_to_metadata,
 };
-use pgwire::api::portal::Portal;
+use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{
-    DescribePortalResponse, DescribeStatementResponse, QueryResponse, Response, Tag,
+    DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat, FieldInfo,
+    QueryResponse, Response,
 };
 use pgwire::api::stmt::{NoopQueryParser, StoredStatement};
-use pgwire::api::{ClientInfo, PgWireConnectionState, PgWireServerHandlers};
+use pgwire::api::{ClientInfo, PgWireConnectionState, PgWireServerHandlers, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
@@ -76,6 +78,59 @@ impl ProxyHandler {
         tracing::debug!(datasource = %datasource, elapsed = ?start.elapsed(), "SessionContext ready");
         Ok(ctx)
     }
+}
+
+/// Execute a DataFusion EXPLAIN statement and reformat its output into the single-column
+/// "QUERY PLAN" format that PostgreSQL clients (TablePlus, DBeaver, psql, etc.) expect.
+///
+/// DataFusion returns two columns: `plan_type` (col 0) and `plan` (col 1).
+/// We discard `plan_type` and emit each line of `plan` as a separate row under
+/// a single column named "QUERY PLAN", matching the real PostgreSQL wire format.
+async fn execute_explain(df: datafusion::prelude::DataFrame) -> PgWireResult<Response> {
+    use datafusion::arrow::array::{Array, StringArray};
+
+    let fields = Arc::new(vec![FieldInfo::new(
+        "QUERY PLAN".to_string(),
+        None,
+        None,
+        Type::TEXT,
+        FieldFormat::Text,
+    )]);
+
+    let batches = df.collect().await.map_err(|e| {
+        tracing::error!(error = %e, "DataFusion EXPLAIN error");
+        PgWireError::ApiError(Box::new(e))
+    })?;
+
+    let mut rows = Vec::new();
+    for batch in &batches {
+        // DataFusion EXPLAIN schema: col 0 = plan_type, col 1 = plan (full text)
+        if batch.num_columns() < 2 {
+            continue;
+        }
+        if let Some(plan_array) = batch.column(1).as_any().downcast_ref::<StringArray>() {
+            for i in 0..batch.num_rows() {
+                let plan_text = if plan_array.is_null(i) {
+                    ""
+                } else {
+                    plan_array.value(i)
+                };
+                for line in plan_text.lines() {
+                    let mut encoder = DataRowEncoder::new(fields.clone());
+                    encoder.encode_field(&Some(line))?;
+                    rows.push(encoder.take_row());
+                }
+            }
+        }
+    }
+
+    let stream = async_stream::stream! {
+        for row in rows {
+            yield Ok::<_, PgWireError>(row);
+        }
+    };
+
+    Ok(Response::Query(QueryResponse::new(fields, stream)))
 }
 
 impl PgWireServerHandlers for ProxyHandler {
@@ -240,7 +295,7 @@ impl SimpleQueryHandler for ProxyHandler {
 
         for mut statement in statements {
             // Rewrite AST for PostgreSQL compatibility before processing
-            crate::sql_rewrite::rewrite_statement(&mut statement);
+            rewrite_statement(&mut statement);
 
             // Execute hook pipeline
             let mut hook_response = None;
@@ -260,70 +315,26 @@ impl SimpleQueryHandler for ProxyHandler {
                 let sql = statement.to_string();
                 tracing::debug!(sql = %sql, "Executing via DataFusion");
 
-                let query_start = std::time::Instant::now();
-
                 let df = ctx.sql(&sql).await.map_err(|e| {
                     tracing::error!(error = %e, "DataFusion query error");
                     PgWireError::ApiError(Box::new(e))
                 })?;
 
-                let is_select = matches!(
+                let query_start = std::time::Instant::now();
+                if matches!(
                     statement,
-                    datafusion::sql::sqlparser::ast::Statement::Query(_)
-                );
-
-                if is_select {
-                    let stream_start = std::time::Instant::now();
-                    let mut stream = df.execute_stream().await.map_err(|e| {
-                        tracing::error!(error = %e, "DataFusion stream error");
-                        PgWireError::ApiError(Box::new(e))
-                    })?;
-                    tracing::debug!(elapsed = ?stream_start.elapsed(), "Stream setup");
-
-                    let schema = stream.schema();
-                    let fields = build_field_info(&schema);
-                    let fields_for_stream = fields.clone();
-
-                    let mut total_rows: usize = 0;
-                    let mut batch_count: usize = 0;
-
-                    let encoded_stream = async_stream::stream! {
-                        while let Some(batch_result) = stream.next().await {
-                            match batch_result {
-                                Ok(batch) => {
-                                    total_rows += batch.num_rows();
-                                    batch_count += 1;
-
-                                    match encode_batch_optimized(batch, fields_for_stream.clone()) {
-                                        Ok(rows) => {
-                                            for row in rows {
-                                                yield Ok(row);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::error!(error = %e, "Batch encoding error");
-                                            yield Err(e);
-                                            return;
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!(error = %e, "Stream batch error");
-                                    yield Err(PgWireError::ApiError(Box::new(e)));
-                                    return;
-                                }
-                            }
-                        }
-                        tracing::debug!(batches = batch_count, rows = total_rows, elapsed = ?query_start.elapsed(), "Streamed result");
-                    };
-
-                    Response::Query(QueryResponse::new(fields, encoded_stream))
+                    datafusion::sql::sqlparser::ast::Statement::Explain { .. }
+                ) {
+                    execute_explain(df).await?
                 } else {
-                    let _batches = df.collect().await.map_err(|e| {
-                        tracing::error!(error = %e, "DataFusion execution error");
-                        PgWireError::ApiError(Box::new(e))
-                    })?;
-                    Response::Execution(Tag::new("OK"))
+                    let qr = encode_dataframe(df, &Format::UnifiedText, None)
+                        .await
+                        .map_err(|e| {
+                            tracing::error!(error = %e, "DataFusion encoding error");
+                            e
+                        })?;
+                    tracing::debug!(elapsed = ?query_start.elapsed(), "Query completed");
+                    Response::Query(qr)
                 }
             };
 
@@ -364,11 +375,11 @@ impl ExtendedQueryHandler for ProxyHandler {
         })?;
 
         if statements.is_empty() {
-            return Ok(Response::Execution(Tag::new("OK")));
+            return Ok(Response::EmptyQuery);
         }
 
         let mut statement = statements.into_iter().next().unwrap();
-        crate::sql_rewrite::rewrite_statement(&mut statement);
+        rewrite_statement(&mut statement);
 
         let mut hook_response = None;
         for hook in &self.hooks {
@@ -388,70 +399,26 @@ impl ExtendedQueryHandler for ProxyHandler {
         let sql = statement.to_string();
         tracing::debug!(sql = %sql, "Executing via DataFusion");
 
-        let query_start = std::time::Instant::now();
-
         let df = ctx.sql(&sql).await.map_err(|e| {
             tracing::error!(error = %e, "DataFusion query error");
             PgWireError::ApiError(Box::new(e))
         })?;
 
-        let is_select = matches!(
+        let query_start = std::time::Instant::now();
+        if matches!(
             statement,
-            datafusion::sql::sqlparser::ast::Statement::Query(_)
-        );
-
-        if is_select {
-            let stream_start = std::time::Instant::now();
-            let mut stream = df.execute_stream().await.map_err(|e| {
-                tracing::error!(error = %e, "DataFusion stream error");
-                PgWireError::ApiError(Box::new(e))
-            })?;
-            tracing::debug!(elapsed = ?stream_start.elapsed(), "Stream setup");
-
-            let schema = stream.schema();
-            let fields = build_field_info(&schema);
-            let fields_for_stream = fields.clone();
-
-            let mut total_rows: usize = 0;
-            let mut batch_count: usize = 0;
-
-            let encoded_stream = async_stream::stream! {
-                while let Some(batch_result) = stream.next().await {
-                    match batch_result {
-                        Ok(batch) => {
-                            total_rows += batch.num_rows();
-                            batch_count += 1;
-
-                            match encode_batch_optimized(batch, fields_for_stream.clone()) {
-                                Ok(rows) => {
-                                    for row in rows {
-                                        yield Ok(row);
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!(error = %e, "Batch encoding error");
-                                    yield Err(e);
-                                    return;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "Stream batch error");
-                            yield Err(PgWireError::ApiError(Box::new(e)));
-                            return;
-                        }
-                    }
-                }
-                tracing::debug!(batches = batch_count, rows = total_rows, elapsed = ?query_start.elapsed(), "Streamed result");
-            };
-
-            Ok(Response::Query(QueryResponse::new(fields, encoded_stream)))
+            datafusion::sql::sqlparser::ast::Statement::Explain { .. }
+        ) {
+            execute_explain(df).await
         } else {
-            let _batches = df.collect().await.map_err(|e| {
-                tracing::error!(error = %e, "DataFusion execution error");
-                PgWireError::ApiError(Box::new(e))
-            })?;
-            Ok(Response::Execution(Tag::new("OK")))
+            let qr = encode_dataframe(df, &Format::UnifiedText, None)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "DataFusion encoding error");
+                    e
+                })?;
+            tracing::debug!(elapsed = ?query_start.elapsed(), "Query completed");
+            Ok(Response::Query(qr))
         }
     }
 
@@ -474,7 +441,7 @@ impl ExtendedQueryHandler for ProxyHandler {
         }
 
         let mut statement = statements.into_iter().next().unwrap();
-        crate::sql_rewrite::rewrite_statement(&mut statement);
+        rewrite_statement(&mut statement);
 
         for hook in &self.hooks {
             if let Some(response) = hook
@@ -492,13 +459,10 @@ impl ExtendedQueryHandler for ProxyHandler {
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
         let schema = df.schema();
-        let fields = build_field_info(schema.inner());
-        let param_types = vec![];
+        let fields = arrow_schema_to_pg_fields(schema.inner(), &Format::UnifiedText, None)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
-        Ok(DescribeStatementResponse::new(
-            param_types,
-            (*fields).clone(),
-        ))
+        Ok(DescribeStatementResponse::new(vec![], fields))
     }
 
     async fn do_describe_portal<C>(
@@ -520,7 +484,7 @@ impl ExtendedQueryHandler for ProxyHandler {
         }
 
         let mut statement = statements.into_iter().next().unwrap();
-        crate::sql_rewrite::rewrite_statement(&mut statement);
+        rewrite_statement(&mut statement);
 
         for hook in &self.hooks {
             if let Some(response) = hook
@@ -538,8 +502,9 @@ impl ExtendedQueryHandler for ProxyHandler {
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
         let schema = df.schema();
-        let fields = build_field_info(schema.inner());
+        let fields = arrow_schema_to_pg_fields(schema.inner(), &Format::UnifiedText, None)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
-        Ok(DescribePortalResponse::new((*fields).clone()))
+        Ok(DescribePortalResponse::new(fields))
     }
 }

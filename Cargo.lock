@@ -387,6 +387,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrow-pg"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87077429e1f81c2a024d0a62eaec0bbc101913c0ba7ce676bf90d21a4dbc79f0"
+dependencies = [
+ "arrow",
+ "arrow-schema",
+ "bytes",
+ "chrono",
+ "datafusion",
+ "futures",
+ "pg_interval_2",
+ "pgwire",
+ "postgres-types",
+ "rust_decimal",
+]
+
+[[package]]
 name = "arrow-row"
 version = "57.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3784,7 +3802,7 @@ version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "argon2",
- "arrow",
+ "arrow-pg",
  "async-stream",
  "async-trait",
  "axum",

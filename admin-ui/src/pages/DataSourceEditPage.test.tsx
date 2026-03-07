@@ -19,6 +19,13 @@ vi.mock('../api/users', () => ({
   listUsers: vi.fn(),
 }))
 
+vi.mock('../api/policies', () => ({
+  listDatasourcePolicies: vi.fn(),
+  assignPolicy: vi.fn(),
+  removeAssignment: vi.fn(),
+  listPolicies: vi.fn(),
+}))
+
 import {
   getDataSource,
   updateDataSource,
@@ -26,18 +33,23 @@ import {
   getDataSourceUsers,
 } from '../api/datasources'
 import { listUsers } from '../api/users'
+import { listDatasourcePolicies, listPolicies } from '../api/policies'
 
 const mockGetDataSource = getDataSource as ReturnType<typeof vi.fn>
 const mockUpdateDataSource = updateDataSource as ReturnType<typeof vi.fn>
 const mockGetTypes = getDataSourceTypes as ReturnType<typeof vi.fn>
 const mockGetDsUsers = getDataSourceUsers as ReturnType<typeof vi.fn>
 const mockListUsers = listUsers as ReturnType<typeof vi.fn>
+const mockListDsPolicies = listDatasourcePolicies as ReturnType<typeof vi.fn>
+const mockListPolicies = listPolicies as ReturnType<typeof vi.fn>
 
 beforeEach(() => {
   vi.clearAllMocks()
   mockGetTypes.mockResolvedValue([makeDataSourceType()])
   mockGetDsUsers.mockResolvedValue([])
   mockListUsers.mockResolvedValue({ data: [], total: 0, page: 1, page_size: 100 })
+  mockListDsPolicies.mockResolvedValue([])
+  mockListPolicies.mockResolvedValue({ data: [], total: 0, page: 1, page_size: 100 })
 })
 
 // Wrap DataSourceEditPage in a Route so useParams works correctly
@@ -72,7 +84,7 @@ describe('DataSourceEditPage', () => {
     renderEditPage()
 
     await waitFor(() => expect(screen.getByDisplayValue('prod-db')).toBeInTheDocument())
-    await waitFor(() => expect(screen.getByRole('combobox')).toBeDisabled())
+    await waitFor(() => expect(screen.getByDisplayValue('PostgreSQL')).toBeDisabled())
   })
 
   it('renders UserAssignmentPanel', async () => {

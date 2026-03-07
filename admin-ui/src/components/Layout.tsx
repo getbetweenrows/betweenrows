@@ -45,6 +45,30 @@ export function Layout() {
           >
             Data Sources
           </NavLink>
+          <NavLink
+            to="/policies"
+            className={({ isActive }) =>
+              `flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+                isActive
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-300 hover:bg-gray-700 hover:text-white'
+              }`
+            }
+          >
+            Policies
+          </NavLink>
+          <NavLink
+            to="/audit"
+            className={({ isActive }) =>
+              `flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+                isActive
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-300 hover:bg-gray-700 hover:text-white'
+              }`
+            }
+          >
+            Query Audit
+          </NavLink>
         </nav>
 
         <div className="px-4 py-4 border-t border-gray-700">

@@ -1,0 +1,29 @@
+import { client } from './client'
+import type { PaginatedResponse } from '../types/user'
+
+export interface AuditLogEntry {
+  id: string
+  user_id: string
+  username: string
+  data_source_id: string
+  datasource_name: string
+  original_query: string
+  rewritten_query: string | null
+  policies_applied: Array<{ policy_id: string; version: number; name: string }>
+  execution_time_ms: number | null
+  client_ip: string | null
+  client_info: string | null
+  created_at: string
+}
+
+export async function listAuditLogs(params?: {
+  page?: number
+  page_size?: number
+  user_id?: string
+  datasource_id?: string
+  from?: string
+  to?: string
+}): Promise<PaginatedResponse<AuditLogEntry>> {
+  const { data } = await client.get<PaginatedResponse<AuditLogEntry>>('/audit/queries', { params })
+  return data
+}

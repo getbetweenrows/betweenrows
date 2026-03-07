@@ -1,6 +1,6 @@
-# Release
-
-Prepare and tag a new release for this project. Both apps (proxy and admin-ui) share a single version.
+---
+description: Prepare and tag a new release for this project. Both apps (proxy and admin-ui) share a single version.
+---
 
 ## Steps
 
@@ -13,6 +13,7 @@ Prepare and tag a new release for this project. Both apps (proxy and admin-ui) s
 ### 2. Draft changelog entries
 
 Analyse the commits from step 1 and draft changelog entries grouped by:
+
 - **Added** — new features
 - **Changed** — changes to existing behaviour
 - **Fixed** — bug fixes
@@ -43,7 +44,9 @@ Once the user confirms the version and changelog entries:
 ### 5. Finish
 
 Tell the user the release is ready and show the exact command to push:
+
 ```
 git push && git push origin vX.Y.Z
 ```
+
 Remind them that pushing the tag triggers CI to build and publish a Docker image tagged `vX.Y.Z`.

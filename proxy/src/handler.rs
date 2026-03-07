@@ -1,7 +1,7 @@
 use crate::auth::Auth;
 use crate::engine::EngineCache;
 use crate::engine::rewrite::rewrite_statement;
-use crate::hooks::{QueryHook, read_only::ReadOnlyHook, rls::RLSHook};
+use crate::hooks::{QueryHook, policy::PolicyHook, read_only::ReadOnlyHook};
 use arrow_pg::datatypes::arrow_schema_to_pg_fields;
 use arrow_pg::datatypes::df::encode_dataframe;
 use async_trait::async_trait;
@@ -35,9 +35,12 @@ pub struct ProxyHandler {
 }
 
 impl ProxyHandler {
-    pub fn new(auth: Arc<Auth>, engine_cache: Arc<EngineCache>) -> Self {
-        let hooks: Vec<Arc<dyn QueryHook>> =
-            vec![Arc::new(ReadOnlyHook::new()), Arc::new(RLSHook::new())];
+    pub fn new(
+        auth: Arc<Auth>,
+        engine_cache: Arc<EngineCache>,
+        policy_hook: Arc<PolicyHook>,
+    ) -> Self {
+        let hooks: Vec<Arc<dyn QueryHook>> = vec![Arc::new(ReadOnlyHook::new()), policy_hook];
 
         tracing::info!(hook_count = hooks.len(), "Initialized query hooks");
 
@@ -187,7 +190,10 @@ impl StartupHandler for ProxyHandler {
 
                 match self.auth.authenticate(&username, &pwd.password).await {
                     Ok(user) => {
-                        // Store tenant in metadata for RLS hook
+                        // Store user context in metadata for PolicyHook
+                        client
+                            .metadata_mut()
+                            .insert("user_id".to_owned(), user.id.to_string());
                         client
                             .metadata_mut()
                             .insert("tenant".to_owned(), user.tenant.clone());
@@ -443,15 +449,6 @@ impl ExtendedQueryHandler for ProxyHandler {
         let mut statement = statements.into_iter().next().unwrap();
         rewrite_statement(&mut statement);
 
-        for hook in &self.hooks {
-            if let Some(response) = hook
-                .handle_query(&statement, &ctx, client as &(dyn ClientInfo + Sync))
-                .await
-            {
-                response?;
-            }
-        }
-
         let sql = statement.to_string();
         let df = ctx
             .sql(&sql)
@@ -485,15 +482,6 @@ impl ExtendedQueryHandler for ProxyHandler {
 
         let mut statement = statements.into_iter().next().unwrap();
         rewrite_statement(&mut statement);
-
-        for hook in &self.hooks {
-            if let Some(response) = hook
-                .handle_query(&statement, &ctx, client as &(dyn ClientInfo + Sync))
-                .await
-            {
-                response?;
-            }
-        }
 
         let sql = statement.to_string();
         let df = ctx

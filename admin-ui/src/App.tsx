@@ -11,6 +11,10 @@ import { DataSourcesListPage } from './pages/DataSourcesListPage'
 import { DataSourceCreatePage } from './pages/DataSourceCreatePage'
 import { DataSourceEditPage } from './pages/DataSourceEditPage'
 import { DataSourceCatalogPage } from './pages/DataSourceCatalogPage'
+import { PoliciesListPage } from './pages/PoliciesListPage'
+import { PolicyCreatePage } from './pages/PolicyCreatePage'
+import { PolicyEditPage } from './pages/PolicyEditPage'
+import { QueryAuditPage } from './pages/QueryAuditPage'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -38,6 +42,10 @@ export function App() {
                 <Route path="datasources/create" element={<DataSourceCreatePage />} />
                 <Route path="datasources/:id/edit" element={<DataSourceEditPage />} />
                 <Route path="datasources/:id/catalog" element={<DataSourceCatalogPage />} />
+                <Route path="policies" element={<PoliciesListPage />} />
+                <Route path="policies/create" element={<PolicyCreatePage />} />
+                <Route path="policies/:id/edit" element={<PolicyEditPage />} />
+                <Route path="audit" element={<QueryAuditPage />} />
               </Route>
             </Route>
 

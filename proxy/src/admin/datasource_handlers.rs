@@ -18,6 +18,7 @@ use super::{
     dto::{
         CreateDataSourceRequest, DataSourceResponse, ListDataSourcesQuery, PaginatedResponse,
         SetDataSourceUsersRequest, TestConnectionResponse, UpdateDataSourceRequest, UserResponse,
+        validate_access_mode, validate_datasource_name,
     },
     jwt::AdminClaims,
 };
@@ -38,6 +39,7 @@ fn ds_response(model: data_source::Model) -> Result<DataSourceResponse, ApiErr> 
         ds_type: model.ds_type,
         config,
         is_active: model.is_active,
+        access_mode: model.access_mode,
         last_sync_at: model.last_sync_at,
         last_sync_result,
         created_at: model.created_at,
@@ -105,6 +107,15 @@ pub async fn create_datasource(
     State(state): State<AdminState>,
     Json(body): Json<CreateDataSourceRequest>,
 ) -> Result<(StatusCode, Json<DataSourceResponse>), ApiErr> {
+    validate_datasource_name(&body.name)
+        .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    if !validate_access_mode(&body.access_mode) {
+        return Err(ApiErr::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "access_mode must be 'open' or 'policy_required'",
+        ));
+    }
+
     // Validate and split config using type registry
     let (config_json, secure_json) = datasource_types::split_config(&body.ds_type, body.config)
         .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
@@ -127,6 +138,7 @@ pub async fn create_datasource(
         config: Set(config_str),
         secure_config: Set(secure_str),
         is_active: Set(true),
+        access_mode: Set(body.access_mode),
         last_sync_at: Set(None),
         last_sync_result: Set(None),
         created_at: Set(now),
@@ -191,11 +203,22 @@ pub async fn update_datasource(
 
     let mut active: data_source::ActiveModel = model.clone().into();
 
-    if let Some(name) = body.name {
-        active.name = Set(name);
+    if let Some(ref name) = body.name {
+        validate_datasource_name(name)
+            .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+        active.name = Set(name.clone());
     }
     if let Some(is_active) = body.is_active {
         active.is_active = Set(is_active);
+    }
+    if let Some(access_mode) = body.access_mode {
+        if !validate_access_mode(&access_mode) {
+            return Err(ApiErr::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "access_mode must be 'open' or 'policy_required'",
+            ));
+        }
+        active.access_mode = Set(access_mode);
     }
 
     if let Some(config_input) = body.config {
@@ -437,6 +460,7 @@ mod tests {
             config: Set(serde_json::to_string(&config).unwrap()),
             secure_config: Set(secure_enc),
             is_active: Set(true),
+            access_mode: Set("open".to_string()),
             last_sync_at: Set(None),
             last_sync_result: Set(None),
             created_at: Set(now),
@@ -472,6 +496,7 @@ mod tests {
             config: Set(serde_json::to_string(&config).unwrap()),
             secure_config: Set(secure_enc.clone()),
             is_active: Set(true),
+            access_mode: Set("open".to_string()),
             last_sync_at: Set(None),
             last_sync_result: Set(None),
             created_at: Set(now),
@@ -534,6 +559,7 @@ mod tests {
             config: Set("{}".to_string()),
             secure_config: Set("".to_string()),
             is_active: Set(true),
+            access_mode: Set("open".to_string()),
             last_sync_at: Set(None),
             last_sync_result: Set(None),
             created_at: Set(now),

@@ -23,6 +23,8 @@ export interface DataSource {
   /** Non-secret config only. Secret fields (e.g. password) are never returned. */
   config: Record<string, unknown>
   is_active: boolean
+  /** "open" = no policies required; "policy_required" = policies must be assigned */
+  access_mode: string
   created_at: string
   updated_at: string
 }
@@ -39,6 +41,7 @@ export interface UpdateDataSourcePayload {
   is_active?: boolean
   /** Partial config update. Absent fields preserved. Empty string = keep secret. */
   config?: Record<string, unknown>
+  access_mode?: string
 }
 
 export interface TestConnectionResponse {

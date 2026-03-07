@@ -52,7 +52,7 @@ describe('DataSourceForm – create mode', () => {
     fireEvent.submit(container.querySelector('form')!)
 
     await waitFor(() =>
-      expect(screen.getByText(/name is required/i)).toBeInTheDocument(),
+      expect(screen.getByText(/must be between 1 and 64 characters/i)).toBeInTheDocument(),
     )
   })
 

@@ -100,6 +100,69 @@ pub struct CreateDataSourceRequest {
     /// Flat config object containing all fields (secret and non-secret).
     /// Backend splits them into config/secure_config using the type registry.
     pub config: serde_json::Value,
+    /// "open" or "policy_required" (default "policy_required")
+    #[serde(default = "default_access_mode")]
+    pub access_mode: String,
+}
+
+fn default_access_mode() -> String {
+    "policy_required".to_string()
+}
+
+pub fn validate_access_mode(mode: &str) -> bool {
+    matches!(mode, "open" | "policy_required")
+}
+
+/// Username: 3–50 chars, starts with a letter, only [a-zA-Z0-9_.-]
+pub fn validate_username(name: &str) -> Result<(), &'static str> {
+    if name.len() < 3 || name.len() > 50 {
+        return Err("Username must be between 3 and 50 characters");
+    }
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return Err("Username must start with a letter"),
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+        return Err("Username may only contain letters, digits, underscores, dots, and hyphens");
+    }
+    Ok(())
+}
+
+/// Datasource name: 1–64 chars, starts with a letter, only [a-zA-Z0-9_-]
+/// No spaces — the name is used as a DataFusion catalog identifier.
+pub fn validate_datasource_name(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() || name.len() > 64 {
+        return Err("Datasource name must be between 1 and 64 characters");
+    }
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return Err("Datasource name must start with a letter"),
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')) {
+        return Err("Datasource name may only contain letters, digits, underscores, and hyphens");
+    }
+    Ok(())
+}
+
+/// Policy name: 1–100 chars, no leading/trailing whitespace,
+/// only [a-zA-Z0-9 _\-.:()'"]
+pub fn validate_policy_name(name: &str) -> Result<(), &'static str> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.len() > 100 {
+        return Err("Policy name must be between 1 and 100 characters");
+    }
+    if trimmed != name {
+        return Err("Policy name must not have leading or trailing whitespace");
+    }
+    if !name.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, ' ' | '_' | '-' | '.' | ':' | '(' | ')' | '\'' | '"')
+    }) {
+        return Err("Policy name contains invalid characters");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,6 +171,7 @@ pub struct UpdateDataSourceRequest {
     pub is_active: Option<bool>,
     /// Flat config update — absent fields are preserved, empty-string secret fields kept as-is.
     pub config: Option<serde_json::Value>,
+    pub access_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +196,7 @@ pub struct DataSourceResponse {
     /// Non-secret config only (password/secrets are never returned).
     pub config: serde_json::Value,
     pub is_active: bool,
+    pub access_mode: String,
     pub last_sync_at: Option<NaiveDateTime>,
     pub last_sync_result: Option<serde_json::Value>,
     pub created_at: NaiveDateTime,
@@ -260,6 +325,132 @@ pub struct CatalogColumnResponse {
     pub column_default: Option<String>,
     pub arrow_type: Option<String>,
     pub is_selected: bool,
+}
+
+// ---------- policy requests ----------
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ObligationRequest {
+    pub obligation_type: String, // "row_filter" | "column_mask" | "column_access"
+    pub definition: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePolicyRequest {
+    pub name: String,
+    pub effect: String, // "permit" | "deny"
+    pub description: Option<String>,
+    #[serde(default = "default_true")]
+    pub is_enabled: bool,
+    #[serde(default)]
+    pub obligations: Vec<ObligationRequest>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdatePolicyRequest {
+    pub name: Option<String>,
+    pub effect: Option<String>,
+    pub description: Option<String>,
+    pub is_enabled: Option<bool>,
+    pub obligations: Option<Vec<ObligationRequest>>,
+    /// Optimistic concurrency: client must send the current version
+    pub version: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListPoliciesQuery {
+    pub page: Option<u64>,
+    pub page_size: Option<u64>,
+    pub search: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AssignPolicyRequest {
+    pub policy_id: uuid::Uuid,
+    pub user_id: Option<uuid::Uuid>, // None = all users
+    #[serde(default = "default_priority")]
+    pub priority: i32,
+}
+
+fn default_priority() -> i32 {
+    100
+}
+
+// ---------- policy responses ----------
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ObligationResponse {
+    pub id: uuid::Uuid,
+    pub obligation_type: String,
+    pub definition: serde_json::Value,
+    pub created_at: chrono::NaiveDateTime,
+    pub updated_at: chrono::NaiveDateTime,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PolicyResponse {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub effect: String,
+    pub is_enabled: bool,
+    pub version: i32,
+    pub obligation_count: usize,
+    pub assignment_count: usize,
+    pub created_by: uuid::Uuid,
+    pub updated_by: uuid::Uuid,
+    pub created_at: chrono::NaiveDateTime,
+    pub updated_at: chrono::NaiveDateTime,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub obligations: Option<Vec<ObligationResponse>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignments: Option<Vec<PolicyAssignmentResponse>>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct PolicyAssignmentResponse {
+    pub id: uuid::Uuid,
+    pub policy_id: uuid::Uuid,
+    pub policy_name: String,
+    pub data_source_id: uuid::Uuid,
+    pub datasource_name: String,
+    pub user_id: Option<uuid::Uuid>,
+    pub username: Option<String>, // None = all users
+    pub priority: i32,
+    pub created_at: chrono::NaiveDateTime,
+    pub updated_at: chrono::NaiveDateTime,
+}
+
+// ---------- audit log requests/responses ----------
+
+#[derive(Debug, Deserialize)]
+pub struct ListAuditLogQuery {
+    pub page: Option<u64>,
+    pub page_size: Option<u64>,
+    pub user_id: Option<uuid::Uuid>,
+    pub datasource_id: Option<uuid::Uuid>,
+    pub from: Option<String>, // ISO datetime string
+    pub to: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditLogResponse {
+    pub id: uuid::Uuid,
+    pub user_id: uuid::Uuid,
+    pub username: String,
+    pub data_source_id: uuid::Uuid,
+    pub datasource_name: String,
+    pub original_query: String,
+    pub rewritten_query: Option<String>,
+    pub policies_applied: serde_json::Value,
+    pub execution_time_ms: Option<i64>,
+    pub client_ip: Option<String>,
+    pub client_info: Option<String>,
+    pub created_at: chrono::NaiveDateTime,
 }
 
 // ---------- discovery job responses ----------

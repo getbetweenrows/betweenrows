@@ -2,7 +2,7 @@ use axum::{
     Router,
     http::{HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Json, Response},
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
@@ -14,7 +14,9 @@ use tower_http::set_header::response::SetResponseHeaderLayer;
 
 use crate::auth::Auth;
 use crate::engine::EngineCache;
+use crate::hooks::policy::PolicyHook;
 
+pub mod audit_handlers;
 pub mod auth_handlers;
 pub mod catalog_handlers;
 pub mod datasource_handlers;
@@ -22,6 +24,7 @@ pub mod datasource_types;
 pub mod discovery_job;
 pub mod dto;
 pub mod jwt;
+pub mod policy_handlers;
 pub mod user_handlers;
 
 // ---------- shared state ----------
@@ -36,6 +39,8 @@ pub struct AdminState {
     pub master_key: [u8; 32],
     /// In-memory job registry for async discovery operations.
     pub job_store: Arc<Mutex<discovery_job::JobStore>>,
+    /// PolicyHook reference for cache invalidation from admin API.
+    pub policy_hook: Option<Arc<PolicyHook>>,
 }
 
 // ---------- error type ----------
@@ -151,6 +156,15 @@ fn api_v1() -> Router<AdminState> {
             get(datasource_handlers::get_datasource_users)
                 .put(datasource_handlers::set_datasource_users),
         )
+        // datasource policy assignments
+        .route(
+            "/datasources/{id}/policies",
+            get(policy_handlers::list_datasource_policies).post(policy_handlers::assign_policy),
+        )
+        .route(
+            "/datasources/{id}/policies/{assignment_id}",
+            delete(policy_handlers::remove_assignment),
+        )
         // async discovery jobs
         .route(
             "/datasources/{id}/discover",
@@ -169,4 +183,17 @@ fn api_v1() -> Router<AdminState> {
             "/datasources/{id}/catalog",
             get(catalog_handlers::get_catalog),
         )
+        // policies
+        .route(
+            "/policies",
+            get(policy_handlers::list_policies).post(policy_handlers::create_policy),
+        )
+        .route(
+            "/policies/{id}",
+            get(policy_handlers::get_policy)
+                .put(policy_handlers::update_policy)
+                .delete(policy_handlers::delete_policy),
+        )
+        // audit log
+        .route("/audit/queries", get(audit_handlers::list_audit_logs))
 }

@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { getDataSourceTypes, testDataSource } from '../api/datasources'
 import type { DataSourceType, FieldDef } from '../types/datasource'
 import { PasswordInput } from './PasswordInput'
+import { validateDatasourceName } from '../utils/nameValidation'
 
 interface DataSourceFormProps {
   /** If provided, the form is in edit mode for this id. */
@@ -13,12 +14,14 @@ interface DataSourceFormProps {
     ds_type?: string
     config?: Record<string, unknown>
     is_active?: boolean
+    access_mode?: string
   }
   onSubmit: (values: {
     name: string
     ds_type: string
     config: Record<string, unknown>
     is_active: boolean
+    access_mode?: string
   }) => Promise<void>
   submitLabel?: string
   isSubmitting?: boolean
@@ -42,6 +45,7 @@ export function DataSourceForm({
   const [name, setName] = useState(initialValues?.name ?? '')
   const [dsType, setDsType] = useState(initialValues?.ds_type ?? '')
   const [isActive, setIsActive] = useState(initialValues?.is_active ?? true)
+  const [accessMode, setAccessMode] = useState(initialValues?.access_mode ?? 'open')
   const [fieldValues, setFieldValues] = useState<Record<string, string>>(() => {
     const init: Record<string, string> = {}
     if (initialValues?.config) {
@@ -57,6 +61,7 @@ export function DataSourceForm({
   } | null>(null)
   const [testLoading, setTestLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [nameError, setNameError] = useState<string | null>(null)
 
   const selectedType: DataSourceType | undefined = types.find((t) => t.ds_type === dsType)
 
@@ -100,10 +105,9 @@ export function DataSourceForm({
     setError(null)
     setTestResult(null)
 
-    if (!name.trim()) {
-      setError('Name is required')
-      return
-    }
+    const nErr = validateDatasourceName(name.trim())
+    setNameError(nErr)
+    if (nErr) return
     if (!dsType) {
       setError('Please select a data source type')
       return
@@ -122,7 +126,7 @@ export function DataSourceForm({
     }
 
     try {
-      await onSubmit({ name: name.trim(), ds_type: dsType, config, is_active: isActive })
+      await onSubmit({ name: name.trim(), ds_type: dsType, config, is_active: isActive, access_mode: isEdit ? accessMode : undefined })
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { error?: string } } })?.response?.data?.error ??
@@ -151,14 +155,19 @@ export function DataSourceForm({
         <input
           type="text"
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(e) => { setName(e.target.value); setNameError(null) }}
+          onBlur={() => setNameError(validateDatasourceName(name.trim()))}
           placeholder="e.g. production-db"
           className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
           required
         />
-        <p className="text-xs text-gray-500 mt-1">
-          This is the database name clients use in their connection string.
-        </p>
+        {nameError ? (
+          <p className="text-xs text-red-600 mt-1">{nameError}</p>
+        ) : (
+          <p className="text-xs text-gray-500 mt-1">
+            Starts with a letter · letters, digits, <code>_</code> and <code>-</code> only · no spaces · max 64 chars. Used as the database name in connection strings.
+          </p>
+        )}
       </div>
 
       {/* Type selector */}
@@ -211,6 +220,50 @@ export function DataSourceForm({
           <label htmlFor="is_active" className="text-sm text-gray-700">
             Active
           </label>
+        </div>
+      )}
+
+      {/* access_mode (edit mode only) */}
+      {isEdit && (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Access Mode</label>
+          <div className="flex gap-4">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="access_mode"
+                value="open"
+                checked={accessMode === 'open'}
+                onChange={() => setAccessMode('open')}
+                className="text-blue-600 focus:ring-blue-500"
+              />
+              <span className="text-sm text-gray-700">Open</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="access_mode"
+                value="policy_required"
+                checked={accessMode === 'policy_required'}
+                onChange={() => setAccessMode('policy_required')}
+                className="text-blue-600 focus:ring-blue-500"
+              />
+              <span className="text-sm text-gray-700">Policy Required</span>
+            </label>
+          </div>
+          {accessMode === 'open' ? (
+            <div className="mt-2 flex items-start gap-2 rounded-md bg-amber-50 border border-amber-200 px-3 py-2">
+              <span className="text-amber-500 mt-0.5 shrink-0">⚠</span>
+              <p className="text-xs text-amber-700">
+                <strong>Warning:</strong> Open mode grants full data access to all assigned users
+                with no policy enforcement. Only use this for trusted internal datasources.
+              </p>
+            </div>
+          ) : (
+            <p className="text-xs text-gray-500 mt-1">
+              Users with no assigned policy get empty results.
+            </p>
+          )}
         </div>
       )}
 

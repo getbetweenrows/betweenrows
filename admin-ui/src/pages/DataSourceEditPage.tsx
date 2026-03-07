@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getDataSource, updateDataSource } from '../api/datasources'
 import { DataSourceForm } from '../components/DataSourceForm'
 import { UserAssignmentPanel } from '../components/UserAssignmentPanel'
+import { PolicyAssignmentPanel } from '../components/PolicyAssignmentPanel'
 
 export function DataSourceEditPage() {
   const { id } = useParams<{ id: string }>()
@@ -23,6 +24,7 @@ export function DataSourceEditPage() {
     ds_type: string
     config: Record<string, unknown>
     is_active: boolean
+    access_mode?: string
   }) {
     setIsSubmitting(true)
     try {
@@ -30,6 +32,7 @@ export function DataSourceEditPage() {
         name: values.name,
         is_active: values.is_active,
         config: values.config,
+        access_mode: values.access_mode,
       })
       queryClient.invalidateQueries({ queryKey: ['datasources'] })
       queryClient.invalidateQueries({ queryKey: ['datasource', dsId] })
@@ -77,6 +80,7 @@ export function DataSourceEditPage() {
             ds_type: ds.ds_type,
             config: ds.config as Record<string, unknown>,
             is_active: ds.is_active,
+            access_mode: ds.access_mode,
           }}
           onSubmit={handleSubmit}
           submitLabel="Save changes"
@@ -86,6 +90,10 @@ export function DataSourceEditPage() {
 
       <div className="bg-white rounded-xl border border-gray-200 p-6 mb-6">
         <UserAssignmentPanel datasourceId={dsId} />
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 p-6 mb-6">
+        <PolicyAssignmentPanel datasourceId={dsId} />
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 p-6">

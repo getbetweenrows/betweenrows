@@ -16,7 +16,7 @@ use super::{
     AdminState, ApiErr,
     dto::{
         ChangePasswordRequest, CreateUserRequest, ListUsersQuery, PaginatedResponse,
-        UpdateUserRequest, UserResponse,
+        UpdateUserRequest, UserResponse, validate_username,
     },
     jwt::AdminClaims,
 };
@@ -94,6 +94,8 @@ pub async fn create_user(
     State(state): State<AdminState>,
     Json(body): Json<CreateUserRequest>,
 ) -> Result<(StatusCode, Json<UserResponse>), ApiErr> {
+    validate_username(&body.username)
+        .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
     validate_password(&body.password)?;
     let password_hash = Auth::hash_password(&body.password).map_err(ApiErr::internal)?;
 
@@ -287,6 +289,7 @@ mod tests {
             engine_cache,
             master_key: [0u8; 32],
             job_store: Arc::new(Mutex::new(discovery_job::JobStore::new())),
+            policy_hook: None,
         }
     }
 

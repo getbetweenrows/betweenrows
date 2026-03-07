@@ -4,6 +4,7 @@ use proxy::admin::{AdminState, admin_router};
 use proxy::auth::Auth;
 use proxy::engine::EngineCache;
 use proxy::handler::ProxyHandler;
+use proxy::hooks::policy::PolicyHook;
 use proxy::server::process_socket_with_idle_timeout;
 use rand_core::RngCore;
 use sea_orm::Database;
@@ -186,6 +187,9 @@ async fn serve(
     // ── Engine cache ──────────────────────────────────────────────────────────
     let engine_cache = EngineCache::new(db.clone(), master_key);
 
+    // ── Policy hook (shared between admin API and proxy handler) ──────────────
+    let policy_hook = PolicyHook::new(db.clone());
+
     // ── Admin REST API ────────────────────────────────────────────────────────
     let jwt_secret = std::env::var("BR_ADMIN_JWT_SECRET").unwrap_or_else(|_| {
         tracing::warn!(
@@ -215,6 +219,7 @@ async fn serve(
         job_store: Arc::new(tokio::sync::Mutex::new(
             proxy::admin::discovery_job::JobStore::new(),
         )),
+        policy_hook: Some(policy_hook.clone()),
     };
 
     let admin_listener = TcpListener::bind(&admin_bind_addr).await?;
@@ -227,7 +232,7 @@ async fn serve(
     });
 
     // ── pgwire proxy ──────────────────────────────────────────────────────────
-    let handler = Arc::new(ProxyHandler::new(auth, engine_cache));
+    let handler = Arc::new(ProxyHandler::new(auth, engine_cache, policy_hook));
 
     let bind_addr =
         std::env::var("BR_PROXY_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:5434".to_string());

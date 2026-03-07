@@ -3,6 +3,7 @@ import type { CreateUserPayload, UpdateUserPayload } from '../types/user'
 import { PasswordInput } from './PasswordInput'
 import { PasswordStrengthIndicator } from './PasswordStrengthIndicator'
 import { validatePassword } from '../utils/passwordValidation'
+import { validateUsername } from '../utils/nameValidation'
 
 type Mode = 'create' | 'edit'
 
@@ -31,11 +32,15 @@ export function UserForm({ mode, initialValues = {}, onSubmit, onCancel, loading
   const [email, setEmail] = useState(initialValues.email ?? '')
   const [displayName, setDisplayName] = useState(initialValues.display_name ?? '')
   const [localError, setLocalError] = useState<string | null>(null)
+  const [usernameError, setUsernameError] = useState<string | null>(null)
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     setLocalError(null)
     if (mode === 'create') {
+      const unErr = validateUsername(username)
+      setUsernameError(unErr)
+      if (unErr) return
       if (!validatePassword(password).valid) {
         setLocalError('Password does not meet the requirements below.')
         return
@@ -64,13 +69,21 @@ export function UserForm({ mode, initialValues = {}, onSubmit, onCancel, loading
       {/* Username (create only) */}
       {mode === 'create' && (
         <Field label="Username" required>
-          <input
-            type="text"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            required
-            className={inputCls}
-          />
+          <>
+            <input
+              type="text"
+              value={username}
+              onChange={(e) => { setUsername(e.target.value); setUsernameError(null) }}
+              onBlur={() => setUsernameError(validateUsername(username))}
+              required
+              className={inputCls}
+            />
+            {usernameError ? (
+              <p className="text-xs text-red-600 mt-1">{usernameError}</p>
+            ) : (
+              <p className="text-xs text-gray-400 mt-1">3–50 chars · starts with a letter · letters, digits, <code>_</code> <code>.</code> <code>-</code> only</p>
+            )}
+          </>
         </Field>
       )}
 

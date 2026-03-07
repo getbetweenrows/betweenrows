@@ -14,6 +14,8 @@ pub struct Model {
     /// AES-256-GCM encrypted base64: secret params (password, api keys, ...)
     pub secure_config: String,
     pub is_active: bool,
+    /// "open" (no policies = full access) or "policy_required" (no policies = empty results)
+    pub access_mode: String,
     pub last_sync_at: Option<DateTime>,
     pub last_sync_result: Option<String>,
     pub created_at: DateTime,

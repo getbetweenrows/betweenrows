@@ -1,5 +1,6 @@
 import type { User, LoginResponse, PaginatedResponse } from '../types/user'
 import type { DataSource, DataSourceType, FieldDef } from '../types/datasource'
+import type { PolicyResponse, PolicyAssignmentResponse, ObligationResponse } from '../types/policy'
 import type {
   CatalogResponse,
   DiscoveredSchemaResponse,
@@ -72,6 +73,7 @@ export function makeDataSource(overrides: Partial<DataSource> = {}): DataSource 
     ds_type: 'postgres',
     config: { host: 'localhost', port: 5432, db: 'mydb', user: 'postgres' },
     is_active: true,
+    access_mode: 'open',
     last_sync_at: null,
     last_sync_result: null,
     created_at: '2024-01-01T00:00:00Z',
@@ -116,4 +118,50 @@ export function makeDiscoveredColumn(overrides: Partial<DiscoveredColumnResponse
 
 export function makeEmptyCatalog(): CatalogResponse {
   return { schemas: [] }
+}
+
+export function makeObligation(overrides: Partial<ObligationResponse> = {}): ObligationResponse {
+  return {
+    id: id(),
+    obligation_type: 'row_filter',
+    definition: { filter: "tenant_id = '{user.tenant}'" },
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+    ...overrides,
+  }
+}
+
+export function makePolicyAssignment(
+  overrides: Partial<PolicyAssignmentResponse> = {},
+): PolicyAssignmentResponse {
+  return {
+    id: id(),
+    policy_id: id(),
+    policy_name: `policy_${counter}`,
+    data_source_id: id(),
+    datasource_name: `datasource_${counter}`,
+    user_id: null,
+    username: null,
+    priority: 100,
+    created_at: '2024-01-01T00:00:00Z',
+    ...overrides,
+  }
+}
+
+export function makePolicy(overrides: Partial<PolicyResponse> = {}): PolicyResponse {
+  return {
+    id: id(),
+    name: `policy_${counter}`,
+    description: null,
+    effect: 'permit',
+    is_enabled: true,
+    version: 1,
+    obligation_count: 0,
+    assignment_count: 0,
+    obligations: [],
+    assignments: [],
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+    ...overrides,
+  }
 }

@@ -5,8 +5,8 @@ use pgwire::api::ClientInfo;
 use pgwire::api::results::Response;
 use pgwire::error::PgWireResult;
 
+pub mod policy;
 pub mod read_only;
-pub mod rls;
 
 /// QueryHook trait for intercepting and transforming queries
 /// Inspired by datafusion-postgres hooks pattern

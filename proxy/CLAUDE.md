@@ -12,10 +12,13 @@ pgwire 0.38, DataFusion 52, axum 0.8, SeaORM 1, tokio-postgres 0.7, argon2 0.5, 
 - `src/engine/mod.rs` — `EngineCache`, `VirtualCatalogProvider`, `build_arrow_schema()`, `arrow_type_to_string()`
 - `src/engine/rewrite.rs` — `rewrite_statement()` AST visitor (pg_catalog table qualification, schema-stripped function calls)
 - `src/hooks/read_only.rs` — `ReadOnlyHook` (allowlist: Query, Show*, Explain*)
-- `src/hooks/rls.rs` — `RLSHook`
+- `src/hooks/policy.rs` — `PolicyHook` (row filters, column masks, column access, audit logging)
+- `src/admin/policy_handlers.rs` — policy CRUD + assignment endpoints
+- `src/admin/audit_handlers.rs` — `GET /audit/queries`
+- `src/admin/policy_yaml.rs` — YAML export/import
 - `src/discovery/` — `DiscoveryProvider` trait + Postgres impl
 - `src/crypto.rs` — AES-256-GCM `encrypt_json` / `decrypt_json`
-- `../migration/src/lib.rs` — `Migrator` (4 migrations)
+- `../migration/src/lib.rs` — `Migrator` (7 migrations)
 
 ## Critical Gotchas
 
@@ -40,15 +43,34 @@ Always get Arrow types from the library's `get_schema()` during discovery — th
 ### `AdminState` carries `job_store`, not `discovery_locks`
 `job_store: Arc<Mutex<discovery_job::JobStore>>` replaced the old `discovery_locks: Arc<Mutex<HashSet<i32>>>`.
 
+### `AdminState.policy_hook` is `Option<Arc<PolicyHook>>`
+Policy CRUD handlers call `state.policy_hook.invalidate_datasource(&ds.name).await` (and `invalidate_user`) after mutations. It's `Option` so the admin server can be constructed without a hook in tests, but in production it is always `Some`.
+
 ## Key Patterns
 - **Always-stream response**: `handler.rs` always returns `Response::Query(encode_dataframe(...))` for every statement that reaches DataFusion — no `is_select` enumeration. The only exception is `Statement::Explain`, which is intercepted before streaming and reformatted into PostgreSQL's single `"QUERY PLAN"` column via `execute_explain()`. Arrow → pgwire encoding is handled by `arrow-pg`.
-- **Hook ordering**: `ReadOnlyHook` runs first (blocks writes with SQLSTATE 25006), then `RLSHook`. Hooks run in both simple and extended query paths. The allowlist in `ReadOnlyHook` must be reviewed before adding new `Statement` variants.
+- **Hook ordering**: `ReadOnlyHook` runs first (blocks writes with SQLSTATE 25006), then `PolicyHook`. Hooks run in both simple and extended query paths. The allowlist in `ReadOnlyHook` must be reviewed before adding new `Statement` variants.
 - `ApiErr` implements `IntoResponse` → JSON `{"error": "..."}` error bodies
 - `AdminClaims` / `AuthClaims` use `FromRequestParts<S> where AdminState: FromRef<S>`; `AdminClaims` also checks `is_admin == true`
 - Cache invalidation: `engine_cache.invalidate(name)` after catalog operations (keeps shared pool). `engine_cache.invalidate_all(name)` after datasource edit/delete (removes pool too). Never swap these — see README § Performance.
 - Discovery jobs: one active job per datasource enforced by `JobStore.active_by_ds`; cancellation via `CancellationToken` passed through all `DiscoveryProvider` methods
 - Catalog UUID v5 key format: `"{parent_uuid}:{child_name}"` — same natural key → same ID → re-discovery is a safe upsert
 - Idle timeout: `process_socket_with_idle_timeout` in `server.rs` replaces `pgwire::tokio::process_socket`. Env var `BR_IDLE_TIMEOUT_SECS` (default 900). Tests use `tokio::time::pause()` + `advance()` — do not add real `sleep()` calls in server tests.
+
+## PolicyHook
+
+`PolicyHook` replaces the old hardcoded `RLSHook`. It loads policies from the DB, caches per `(datasource_id, username)` for 60 seconds, and applies three obligation types:
+
+- **row_filter** — `Filter(expr)` node injected below the matching `TableScan` via `transform_up`. Template variables (`{user.tenant}`, `{user.username}`, `{user.id}`) are substituted as `Expr::Literal` after parsing — never interpolated as raw SQL.
+- **column_mask** — replaces the column `Expr` in the top-level `Projection` with an aliased mask expression. Async-parsed before `transform_up` via `ctx.sql("SELECT {mask} AS {col} FROM ...")`.
+- **column_access deny** — strips denied columns from the top-level `Projection`. Wildcards (`schema: "*"`, `table: "*"`) match any schema/table.
+
+**Deny policies** short-circuit on the first match — query is rejected with a descriptive error before plan execution.
+
+**access_mode**: If the datasource is `"policy_required"`, tables with no matching permit policy get `Filter(lit(false))` injected → empty results, no upstream round-trip.
+
+**Cache invalidation**: call `policy_hook.invalidate_datasource(&name)` after any policy or datasource mutation. Call `policy_hook.invalidate_user(&user_id)` after user tenant/deactivation changes.
+
+**Audit logging**: after each query, `PolicyHook` spawns a `tokio::spawn` task to insert a `query_audit_log` row asynchronously. The row captures `original_query`, `rewritten_query`, `policies_applied` (JSON with name+version snapshot), `client_ip`, and `client_info` (application_name from pgwire startup params).
 
 ## Known Issues
 - **regclass / regproc not supported** — `datafusion-table-providers` drops these columns. Catalog stores `arrow_type = NULL`; `build_arrow_schema` skips them.

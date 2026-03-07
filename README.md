@@ -118,7 +118,9 @@ psql / app
 QueryProxy (Rust)
     ├─ Authenticates user (Argon2id)
     ├─ Checks data source access (user_data_source table)
-    ├─ Runs query hook pipeline (RLS, masking, …)
+    ├─ Runs query hook pipeline:
+    │      ReadOnlyHook  — blocks writes (SQLSTATE 25006)
+    │      PolicyHook    — row filters, column masks, column access control
     └─ Executes via DataFusion + tokio-postgres federation
     ↓
 Upstream PostgreSQL
@@ -129,8 +131,8 @@ Upstream PostgreSQL
 | Layer | Library | Version |
 |---|---|---|
 | Protocol | pgwire | 0.38 |
-| Query engine | DataFusion | 51 |
-| PG federation | datafusion-table-providers | 0.9 |
+| Query engine | DataFusion | 52 |
+| PG federation | datafusion-table-providers | 0.10 |
 | Async runtime | Tokio | 1 |
 | Admin store | SeaORM + SQLite/PG | 1 |
 | Password hashing | argon2 (Argon2id) | 0.5 |
@@ -145,13 +147,19 @@ Upstream PostgreSQL
 ```
 betweenrows/
 ├── Cargo.toml                        workspace root (proxy, migration crates)
-├── migration/src/                    SeaORM migrations (4 total)
+├── migration/src/                    SeaORM migrations (7 total)
+├── docs/                             User-facing documentation
+│   ├── permission-system.md          Policy system user guide
+│   └── permission-security-tests.md  Security test plan
+├── scripts/demo_ecommerce/           Demo schema + seed data
 ├── admin-ui/                         React admin console
 │   └── src/
 │       ├── api/                      axios + fetch-event-source clients
 │       ├── auth/                     AuthContext, ProtectedRoute, LoginPage
-│       ├── components/               Layout, DataSourceForm, CatalogDiscoveryWizard, …
-│       ├── pages/                    Users*, DataSources*, DataSourceCatalogPage
+│       ├── components/               Layout, DataSourceForm, CatalogDiscoveryWizard,
+│       │                             PolicyForm, PolicyAssignmentPanel, …
+│       ├── pages/                    Users*, DataSources*, DataSourceCatalogPage,
+│       │                             Policies*, QueryAuditPage
 │       └── types/                    TypeScript interfaces
 └── proxy/src/
     ├── main.rs                       entry point: CLI, DB init, EngineCache, servers
@@ -159,22 +167,26 @@ betweenrows/
     ├── handler.rs                    pgwire StartupHandler + query handlers
     ├── auth.rs                       Argon2 auth, user creation
     ├── crypto.rs                     AES-256-GCM encrypt/decrypt
-    ├── admin/                        REST API: mod, dto, jwt, handlers, discovery_job
+    ├── admin/                        REST API: mod, dto, jwt, handlers, discovery_job,
+    │                                 policy_handlers, audit_handlers, policy_yaml
     ├── discovery/                    DiscoveryProvider trait + Postgres impl
-    ├── entity/                       SeaORM entities (proxy_user, data_source, …)
+    ├── entity/                       SeaORM entities (proxy_user, data_source, policy,
+    │                                 policy_obligation, policy_assignment, policy_version,
+    │                                 query_audit_log, …)
     ├── engine/mod.rs                 EngineCache, VirtualCatalogProvider, build_arrow_schema()
-    └── hooks/                        QueryHook trait, RLS hook
+    └── hooks/                        QueryHook trait, ReadOnlyHook, PolicyHook
 ```
 
 ## Quick Start
 
 ```bash
-# 1. Start the proxy (auto-creates proxy_admin.db, seeds admin/admin)
-cargo run -p proxy
+# 1. Start the proxy (auto-creates proxy_admin.db, seeds admin user)
+#    BR_ADMIN_PASSWORD is required on first boot (set your own password)
+BR_ADMIN_PASSWORD=<your-password> cargo run -p proxy
 
 # 2. Start the Admin UI (separate terminal)
 cd admin-ui && npm run dev
-# → http://localhost:5173  (login: admin / admin)
+# → http://localhost:5173  (login: admin / <your-password>)
 
 # 3. Add a data source via the UI, then connect:
 psql "postgresql://admin:admin@127.0.0.1:5434/<datasource-name>"
@@ -301,17 +313,23 @@ Per-user isolation is enforced by:
 
 The shared pool is safe for all authorized users of a datasource: Pool = "how to talk to upstream". Auth + RLS = "what this user can see". These are orthogonal.
 
-### RLS Bypass Resistance
+### Policy Enforcement Resistance
 
-The `RLSHook` uses AST-level table detection (`SystemTableVisitor`) — a query is only exempt from the tenant filter if its `FROM` clause references a schema-qualified system table (e.g. `pg_catalog.pg_class`). String literals like `WHERE name = 'pg_catalog'` do **not** exempt a query. The filter is injected below the `TableScan` node in the logical plan, not as a SQL string.
+`PolicyHook` injects row filters and column transforms at the DataFusion logical plan level via `transform_up`. The filter is applied below the `TableScan` node — it cannot be bypassed by table aliases, CTEs, or subqueries, since DataFusion inlines those into the plan before transformation.
+
+Template variable substitution (`{user.tenant}`, etc.) uses parse-then-substitute: the filter expression is parsed into a `DataFusion Expr` tree first, then placeholder identifiers are replaced with typed `Expr::Literal` values. The user's tenant/username never passes through the SQL parser, preventing injection even if the value contains SQL syntax.
 
 ### Permissions Model
 
 QueryProxy enforces a two-layer access control model:
 
-**Management plane** — controlled by `is_admin` flag. Admins manage users, data sources, and catalogs via the Admin API. Non-admins have no Admin API access.
+**Management plane** — controlled by `is_admin` flag. Admins manage users, data sources, policies, and catalogs via the Admin API. Non-admins have no Admin API access.
 
-**Data plane** — controlled by explicit `user_data_source` assignments. A user can only connect to a data source with an explicit row in `user_data_source`. Being an admin does **not** automatically grant data plane access. Admins are auto-assigned to data sources they create.
+**Data plane** — controlled by two independent mechanisms:
+1. *Connection access* — explicit `user_data_source` assignment. A user can only connect to a datasource with an explicit row. Being an admin does **not** automatically grant data plane access.
+2. *Query policy* — `PolicyHook` applies row filters, column masks, and column access controls per-query based on assigned policies. If the datasource `access_mode` is `"policy_required"`, tables with no matching permit policy return empty results.
+
+See `docs/permission-system.md` for the full policy system user guide.
 
 Connection flow:
 1. Client connects: `psql -d <datasource_name> -U <username>`
@@ -397,6 +415,29 @@ data: {"type":"done"}
 
 Only one discovery job may run per data source at a time — submitting a second returns `409 Conflict` with the active `job_id`.
 
+### Policies
+
+All policy endpoints require admin (`is_admin = true`).
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/policies` | List policies (paginated) |
+| POST | `/policies` | Create policy with obligations |
+| GET | `/policies/{id}` | Get policy + obligations + assignment count |
+| PUT | `/policies/{id}` | Update policy (requires `version` for optimistic concurrency → 409 on conflict) |
+| DELETE | `/policies/{id}` | Delete policy (cascades) |
+| GET | `/policies/export` | Export all policies as YAML |
+| POST | `/policies/import` | Import YAML (`?dry_run=true` to preview) |
+| GET | `/datasources/{id}/policies` | List policy assignments for datasource |
+| POST | `/datasources/{id}/policies` | Assign policy to datasource (optionally scoped to a user) |
+| DELETE | `/datasources/{id}/policies/{assignment_id}` | Remove assignment |
+
+### Audit Log
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/audit/queries` | Paginated query audit log (filter by user, datasource, date range) |
+
 ## Catalog Workflow
 
 Before a data source is queryable via pgwire, a catalog must be saved. The UI wizard guides through three steps:
@@ -415,14 +456,22 @@ The catalog is an **allowlist** — the proxy can never expose tables or columns
 All primary keys are UUIDs. The admin store uses SQLite by default (configurable via `DATABASE_URL`).
 
 ```
-proxy_user (id UUID, username, password_hash, tenant, is_admin, is_active, …)
-data_source (id UUID, name, ds_type, config JSON, secure_config encrypted, is_active,
-             last_sync_at, last_sync_result, …)
-user_data_source (id UUID, user_id → proxy_user, data_source_id → data_source)
+proxy_user        (id UUID, username, password_hash, tenant, is_admin, is_active, …)
+data_source       (id UUID, name, ds_type, config JSON, secure_config encrypted,
+                   is_active, access_mode, last_sync_at, last_sync_result, …)
+user_data_source  (id UUID, user_id → proxy_user, data_source_id → data_source)
 discovered_schema (id UUID v5, data_source_id, schema_name, is_selected)
 discovered_table  (id UUID v5, discovered_schema_id, table_name, table_type, is_selected)
 discovered_column (id UUID v5, discovered_table_id, column_name, ordinal_position,
                    data_type, is_nullable, column_default, arrow_type)
+
+policy            (id UUID v7, name, description, effect, is_enabled, version, …)
+policy_version    (id UUID v7, policy_id, version, snapshot JSON, change_type, changed_by)
+policy_obligation (id UUID v7, policy_id, obligation_type, definition JSON)
+policy_assignment (id UUID v7, policy_id, data_source_id, user_id?, priority)
+query_audit_log   (id UUID v7, user_id, username, data_source_id, datasource_name,
+                   original_query, rewritten_query, policies_applied JSON,
+                   execution_time_ms, client_ip, client_info, created_at)
 ```
 
 Catalog entity IDs (schemas, tables, columns) are deterministic UUID v5 fingerprints derived from their natural keys. Re-discovering the same upstream object always produces the same ID, so re-syncs are safe upserts.

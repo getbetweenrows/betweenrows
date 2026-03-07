@@ -65,3 +65,4 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 [dev-dependencies]
 tokio-test = "0.4"
 tower = { version = "0.5", features = ["util"] }
+tokio = { version = "1", features = ["full"] }

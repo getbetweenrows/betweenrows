@@ -25,7 +25,7 @@ impl Visitor for SystemTableVisitor {
     fn pre_visit_table_factor(&mut self, table_factor: &TableFactor) -> ControlFlow<Self::Break> {
         if let TableFactor::Table { name, .. } = table_factor {
             // A table is "system" only if it carries an explicit system-schema qualifier.
-            // After sql_rewrite::rewrite_statement runs, bare `pg_class` becomes
+            // After engine::rewrite::rewrite_statement runs, bare `pg_class` becomes
             // `pg_catalog.pg_class`, so qualifying is reliable.
             let is_system = if name.0.len() >= 2 {
                 if let ObjectNamePart::Identifier(schema_ident) = &name.0[0] {

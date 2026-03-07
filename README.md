@@ -163,9 +163,7 @@ betweenrows/
     ├── discovery/                    DiscoveryProvider trait + Postgres impl
     ├── entity/                       SeaORM entities (proxy_user, data_source, …)
     ├── engine/mod.rs                 EngineCache, VirtualCatalogProvider, build_arrow_schema()
-    ├── hooks/                        QueryHook trait, RLS hook
-    ├── sql_rewrite.rs                PG AST compatibility visitor
-    └── arrow_conversion.rs           Arrow → pgwire batch encoding
+    └── hooks/                        QueryHook trait, RLS hook
 ```
 
 ## Quick Start
@@ -265,6 +263,18 @@ This means:
 `invalidate_all(name)` (called after datasource connection params are edited or the datasource is deleted) removes both the `SessionContext` and the pool.
 
 **Do not** call `invalidate_all` after catalog operations. **Do not** call plain `invalidate` after datasource edit/delete — the pool would be stale.
+
+### Performance Regression Testing
+
+There is currently no automated performance regression suite. Micro-benchmarks
+(Criterion) were evaluated but rejected: the hot-path functions they would cover
+(AST rewrite, RLS filter injection, schema construction) are sub-microsecond
+operations — regressions there are invisible against real query latency.
+
+Meaningful regression detection requires integration-level tests against a real
+Postgres instance that can verify filter pushdown is still active, connection pool
+reuse is intact, and end-to-end query latency stays within bounds. This is planned
+for a future iteration.
 
 ### Background Warmup
 

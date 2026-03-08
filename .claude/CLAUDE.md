@@ -26,7 +26,11 @@ git config core.hooksPath .githooks
 ```
 
 ## CI/CD
-Push to `main` → GitHub Actions runs Rust tests + admin-ui tests → builds Docker image → deploys to Fly.io.
+- Push to `main` → tests only (Rust + admin-ui)
+- Push `v*` tag → tests → build & publish Docker image (tagged `X.Y.Z` + `X.Y`) → deploy to Fly.io
+- `workflow_dispatch` in GitHub Actions → redeploy a specific existing version
+
+Use `/release` to prepare the changelog, bump versions, commit, and tag. Use `/commit` for day-to-day commits.
 
 ## Migrations (`migration/`)
 

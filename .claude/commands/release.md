@@ -49,4 +49,7 @@ Tell the user the release is ready and show the exact command to push:
 git push && git push origin vX.Y.Z
 ```
 
-Remind them that pushing the tag triggers CI to build and publish a Docker image tagged `vX.Y.Z`.
+Remind them that:
+- Pushing the commit (`git push`) triggers CI: tests only.
+- Pushing the tag (`git push origin vX.Y.Z`) triggers CI: tests → build → publish Docker image tagged `X.Y.Z` and `X.Y` → deploy to Fly.io.
+- To redeploy an existing version without a new release, use the `workflow_dispatch` trigger in GitHub Actions with the version number (e.g. `1.2.3`).

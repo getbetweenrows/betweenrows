@@ -1,12 +1,18 @@
-name: Publish & Deploy
+name: CI / CD
 
 on:
   push:
     branches: [main]
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to deploy (e.g. 1.2.3 — must already exist in GHCR)'
+        required: true
 
 jobs:
   test:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,10 +46,13 @@ jobs:
 
   publish:
     needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -63,9 +72,8 @@ jobs:
         with:
           images: ghcr.io/getbetweenrows/betweenrows
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
-            type=sha,prefix=,format=long
+            type=semver,pattern={{major}}.{{minor}}
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -79,15 +87,29 @@ jobs:
           cache-to: type=gha,mode=max
 
   deploy:
-    needs: publish
+    needs: [publish]
+    if: |
+      always() && (
+        (needs.publish.result == 'success') ||
+        (github.event_name == 'workflow_dispatch')
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ needs.publish.outputs.version }}" >> $GITHUB_OUTPUT
+          fi
+
       - name: Deploy to Fly.io
         uses: superfly/flyctl-actions/setup-flyctl@master
 
-      - run: flyctl deploy --image ghcr.io/getbetweenrows/betweenrows:${{ github.sha }} --app betweenrows
+      - run: flyctl deploy --image ghcr.io/getbetweenrows/betweenrows:${{ steps.version.outputs.tag }} --app betweenrows
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

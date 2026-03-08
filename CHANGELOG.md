@@ -7,26 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-03-08
+
 ### Added
 - **Policy system** — configurable row filtering, column masking, and column access control via named policies assigned to datasources and users
   - `policy`, `policy_version`, `policy_obligation`, `policy_assignment`, `query_audit_log` database tables (migration 007)
-  - `PolicyHook` replaces hardcoded `RLSHook`; supports `row_filter`, `column_mask`, and `column_access` obligation types
+  - `PolicyHook` replaces `RLSHook`; supports `row_filter`, `column_mask`, and `column_access` obligation types
   - Template variables (`{user.tenant}`, `{user.username}`, `{user.id}`) with parse-then-substitute injection safety
   - Wildcard matching (`schema: "*"`, `table: "*"`) in obligation definitions
-  - `access_mode` field on datasources: `"policy_required"` (default) or `"open"` (no policy = full access)
-  - Optimistic concurrency on policy updates via `version` field (409 Conflict on mismatch)
-  - Immutable `policy_version` snapshots on every policy mutation for audit traceability
+  - `access_mode` on datasources: `"policy_required"` (default) or `"open"`
+  - Optimistic concurrency via `version` field (409 Conflict on mismatch)
+  - Immutable `policy_version` snapshots on every mutation for audit traceability
   - Deny policies short-circuit with error before plan execution
-  - 60-second per-session policy cache with `invalidate_datasource` / `invalidate_user` hooks
-- **Policy CRUD API** — `GET/POST /policies`, `GET/PUT/DELETE /policies/{id}` (admin-only)
-- **Policy assignment API** — `GET/POST /datasources/{id}/policies`, `DELETE /datasources/{id}/policies/{assignment_id}`
-- **YAML import/export** — `GET /policies/export`, `POST /policies/import` (with `?dry_run=true`)
-- **Query audit log** — async logging of every proxied query; `GET /audit/queries` with pagination and filtering by user, datasource, date range
-- **Admin UI — Policies** — list, create, and edit policies with an obligation builder (row_filter, column_mask, column_access); inline enable/disable toggle
-- **Admin UI — Policy Assignments** — `PolicyAssignmentPanel` on datasource edit page; assign/remove policies with optional user scope and priority
-- **Admin UI — Query Audit** — paginated log with expandable rows showing original query, rewritten query, and applied policy snapshots
-- **Demo e-commerce schema** — `scripts/demo_ecommerce/` with schema, seed script, and example `policies.yaml` covering all P0 stories
+  - 60-second per-session cache with `invalidate_datasource` / `invalidate_user` hooks
+- **Policy API** — admin-only CRUD and assignment endpoints
+  - `GET/POST /policies`, `GET/PUT/DELETE /policies/{id}`
+  - `GET/POST /datasources/{id}/policies`, `DELETE /datasources/{id}/policies/{assignment_id}`
+- **Query audit log** — async logging of every proxied query
+  - `GET /audit/queries` with pagination and filtering by user, datasource, date range
+- **Visibility-follows-access** — per-connection, per-user filtered `SessionContext`
+  - Users only see tables and columns their policies permit
+  - Policy changes take effect immediately without reconnect
+- **JSON/JSONB support** — `json` and `jsonb` columns via DataFusion v52 and `datafusion-functions-json`
+  - `->` / `->>` operators and JSON UDFs available in queries
+  - Filter pushdown to upstream PostgreSQL for supported operators
+- **EXPLAIN support** — `EXPLAIN <query>` returns a PostgreSQL-compatible single-column `QUERY PLAN` response
+- **Admin UI — Policies** — list, create, and edit policies with an obligation builder; inline enable/disable toggle
+- **Admin UI — Policy Assignments** — assign/remove policies per datasource with optional user scope and priority
+- **Admin UI — Query Audit** — paginated audit log with original query, rewritten query, and applied policy snapshots
+- **Demo e-commerce schema** — `scripts/demo_ecommerce/` with schema, seed script, and example policies
 - **Docs** — `docs/permission-system.md` (user guide) and `docs/permission-security-tests.md` (security test plan)
+
+### Changed
+- **Arrow encoding** — migrated to `arrow-pg`; handler simplified; removed `arrow_conversion` and `sql_rewrite` modules
+
+### Infrastructure
+- **CI/CD** — split into CI (tests on every push to `main`) and CD (publish + deploy on `v*` tag only)
+  - Docker images tagged `X.Y.Z` and `X.Y`; deploy uses explicit version tag for prod traceability
+  - `workflow_dispatch` added for manual redeployment of an existing version
 
 ## [0.3.0] - 2026-03-04
 

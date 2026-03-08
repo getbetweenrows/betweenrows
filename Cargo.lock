@@ -3100,7 +3100,7 @@ dependencies = [
 
 [[package]]
 name = "migration"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "sea-orm-migration",
  "tokio",
@@ -3798,7 +3798,7 @@ dependencies = [
 
 [[package]]
 name = "proxy"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aes-gcm",
  "argon2",

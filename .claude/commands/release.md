@@ -12,14 +12,24 @@ description: Prepare and tag a new release for this project. Both apps (proxy an
 
 ### 2. Draft changelog entries
 
-Analyse the commits from step 1 and draft changelog entries grouped by:
+Draft entries **solely from the commit messages** gathered in step 1. Do not use the existing `## [Unreleased]` section in `CHANGELOG.md` as a source — it may contain entries for features that were planned but never implemented. The commits are the ground truth.
+
+Group entries by:
 
 - **Added** — new features
 - **Changed** — changes to existing behaviour
 - **Fixed** — bug fixes
 - **Infrastructure** — CI, build, tooling changes (omit if trivial)
 
-Do not include merge commits, formatting-only commits, or version bump commits.
+Format each entry as a bolded feature name with a short summary, followed by detail sub-bullets where useful:
+```
+- **Feature name** — one-line summary
+  - detail point
+  - detail point
+```
+Do not mix flat one-liners with wall-of-text entries. Keep the top-level line scannable; put specifics in sub-bullets.
+
+Do not include merge commits, formatting-only commits, or version bump commits. Do not classify a commit as **Fixed** if it fixes a bug in code that was not yet released — those are part of the new feature and belong under **Added** or **Changed**. **Fixed** is only for regressions or bugs in previously released behavior.
 
 Show the draft to the user and ask them to confirm or edit it before proceeding. Also ask for the new version number (suggest one based on the changes: patch for fixes only, minor for new features, major for breaking changes).
 

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 use tower_http::normalize_path::NormalizePathLayer;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::response::SetResponseHeaderLayer;
 
 use crate::auth::Auth;
@@ -99,7 +99,10 @@ pub fn admin_router(state: AdminState) -> Router {
     Router::new()
         .route("/health", get(|| async { StatusCode::OK }))
         .nest("/api/v1", api_v1())
-        .fallback_service(ServeDir::new("/usr/local/share/admin-ui"))
+        .fallback_service(
+            ServeDir::new("/usr/local/share/admin-ui")
+                .fallback(ServeFile::new("/usr/local/share/admin-ui/index.html")),
+        )
         .layer(cors)
         .layer(SetResponseHeaderLayer::if_not_present(
             header::STRICT_TRANSPORT_SECURITY,

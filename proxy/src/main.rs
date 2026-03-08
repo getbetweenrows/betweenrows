@@ -209,6 +209,13 @@ async fn serve(
     let admin_bind_addr =
         std::env::var("BR_ADMIN_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:5435".to_string());
 
+    // ── pgwire proxy handler (created before AdminState so it can be shared) ──
+    let handler = Arc::new(ProxyHandler::new(
+        auth.clone(),
+        engine_cache.clone(),
+        policy_hook.clone(),
+    ));
+
     let admin_state = AdminState {
         auth: auth.clone(),
         db: db.clone(),
@@ -220,6 +227,7 @@ async fn serve(
             proxy::admin::discovery_job::JobStore::new(),
         )),
         policy_hook: Some(policy_hook.clone()),
+        proxy_handler: Some(handler.clone()),
     };
 
     let admin_listener = TcpListener::bind(&admin_bind_addr).await?;
@@ -230,9 +238,6 @@ async fn serve(
             .await
             .expect("admin server failed");
     });
-
-    // ── pgwire proxy ──────────────────────────────────────────────────────────
-    let handler = Arc::new(ProxyHandler::new(auth, engine_cache, policy_hook));
 
     let bind_addr =
         std::env::var("BR_PROXY_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:5434".to_string());
@@ -261,13 +266,29 @@ async fn serve(
             tracing::warn!(error = %e, "Failed to set TCP keepalive");
         }
 
+        let peer_addr = incoming_socket.peer_addr().ok();
+
+        // Assign a unique connection ID and register it so on_startup can look it up.
+        // If peer_addr is unavailable, register_connection still generates an ID but
+        // on_startup will fail gracefully since it can't find the peer addr in pending_conn_ids.
+        let conn_id = peer_addr
+            .map(|addr| handler.register_connection(addr))
+            .unwrap_or_else(|| handler.alloc_connection_id());
+
         let handler_clone = handler.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                process_socket_with_idle_timeout(incoming_socket, handler_clone, idle_timeout).await
+            if let Err(e) = process_socket_with_idle_timeout(
+                incoming_socket,
+                handler_clone.clone(),
+                idle_timeout,
+            )
+            .await
             {
                 tracing::error!(error = %e, "Connection error");
             }
+            // Clean up connection state regardless of how the connection ended
+            // (normal close, auth failure, idle timeout, or error).
+            handler_clone.cleanup_connection(conn_id, peer_addr);
         });
     }
 }

@@ -244,6 +244,7 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
                       placeholder="* or public"
                       className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                     />
+                    <p className="text-xs text-gray-400 mt-1">Use <code className="bg-gray-100 px-1 rounded">*</code> to match all schemas.</p>
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-gray-600 mb-1">Table</label>
@@ -254,6 +255,7 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
                       placeholder="* or orders"
                       className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                     />
+                    <p className="text-xs text-gray-400 mt-1">Use <code className="bg-gray-100 px-1 rounded">*</code> to match all tables.</p>
                   </div>
                 </div>
 
@@ -316,6 +318,9 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
                       placeholder="ssn, credit_card, phone"
                       className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
                     />
+                    <p className="text-xs text-gray-400 mt-1">
+                      Combined with <code className="bg-gray-100 px-1 rounded">schema: *</code> and <code className="bg-gray-100 px-1 rounded">table: *</code> to deny a column across all tables. The table itself remains visible — only the column is hidden.
+                    </p>
                   </div>
                 )}
               </div>

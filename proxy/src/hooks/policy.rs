@@ -868,6 +868,31 @@ impl QueryHook for PolicyHook {
             }
         }
 
+        // Also apply column_access deny from deny-effect policies
+        for policy in &session.deny_policies {
+            for obl in &policy.obligations {
+                if obl.obligation_type == "column_access"
+                    && let Ok(def) =
+                        serde_json::from_value::<ColumnAccessDef>(obl.definition.clone())
+                {
+                    for (df_schema, table) in &user_tables {
+                        if matches_schema_table(
+                            &def.schema,
+                            &def.table,
+                            df_schema,
+                            table,
+                            &session.df_to_upstream,
+                        ) && def.action == "deny"
+                        {
+                            for c in &def.columns {
+                                column_denies.insert(c.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // access_mode == "policy_required": tables with no permit → false filter
         if session.access_mode == "policy_required" {
             for table_key in &user_tables {
@@ -931,6 +956,23 @@ impl QueryHook for PolicyHook {
                     }
                 })
                 .collect();
+
+            if new_exprs.is_empty() {
+                let denied: Vec<&str> = arrow_fields
+                    .iter()
+                    .map(|f| f.name().as_str())
+                    .filter(|n| column_denies.contains(*n))
+                    .collect();
+                return Some(Err(PgWireError::UserError(Box::new(ErrorInfo::new(
+                    "ERROR".to_string(),
+                    "42501".to_string(), // insufficient_privilege
+                    format!(
+                        "Access denied: column{} {} restricted by policy",
+                        if denied.len() == 1 { "" } else { "s" },
+                        denied.join(", ")
+                    ),
+                )))));
+            }
 
             match LogicalPlanBuilder::from(modified_plan)
                 .project(new_exprs)

@@ -46,6 +46,9 @@ Always get Arrow types from the library's `get_schema()` during discovery — th
 ### `AdminState.policy_hook` is `Option<Arc<PolicyHook>>`
 Policy CRUD handlers call `state.policy_hook.invalidate_datasource(&ds.name).await` (and `invalidate_user`) after mutations. It's `Option` so the admin server can be constructed without a hook in tests, but in production it is always `Some`.
 
+### `AdminState.proxy_handler` is `Option<Arc<ProxyHandler>>`
+Policy CRUD handlers also call `state.proxy_handler.rebuild_contexts_for_datasource(&ds.name)` after each policy mutation. This rebuilds the per-connection `SessionContext` for all active connections on that datasource in the background, so schema visibility changes (column deny/allow) take effect immediately without requiring a reconnect. It is `Option` so tests can construct `AdminState` with `proxy_handler: None`.
+
 ## Key Patterns
 - **Always-stream response**: `handler.rs` always returns `Response::Query(encode_dataframe(...))` for every statement that reaches DataFusion — no `is_select` enumeration. The only exception is `Statement::Explain`, which is intercepted before streaming and reformatted into PostgreSQL's single `"QUERY PLAN"` column via `execute_explain()`. Arrow → pgwire encoding is handled by `arrow-pg`.
 - **Hook ordering**: `ReadOnlyHook` runs first (blocks writes with SQLSTATE 25006), then `PolicyHook`. Hooks run in both simple and extended query paths. The allowlist in `ReadOnlyHook` must be reviewed before adding new `Statement` variants.
@@ -68,9 +71,13 @@ Policy CRUD handlers call `state.policy_hook.invalidate_datasource(&ds.name).awa
 
 **access_mode**: If the datasource is `"policy_required"`, tables with no matching permit policy get `Filter(lit(false))` injected → empty results, no upstream round-trip.
 
-**Cache invalidation**: call `policy_hook.invalidate_datasource(&name)` after any policy or datasource mutation. Call `policy_hook.invalidate_user(&user_id)` after user tenant/deactivation changes.
+**Cache invalidation**: call `policy_hook.invalidate_datasource(&name)` after any policy or datasource mutation. Call `policy_hook.invalidate_user(&user_id)` after user tenant/deactivation changes. Also call `proxy_handler.rebuild_contexts_for_datasource(&name)` after policy mutations so active connections immediately see the updated schema (column visibility changes without reconnect).
 
 **Audit logging**: after each query, `PolicyHook` spawns a `tokio::spawn` task to insert a `query_audit_log` row asynchronously. The row captures `original_query`, `rewritten_query`, `policies_applied` (JSON with name+version snapshot), `client_ip`, and `client_info` (application_name from pgwire startup params).
+
+## Bug Fix Protocol
+- Every bug fix MUST include a regression test (unit or integration) that fails before the fix and passes after.
+- Security-related bugs (policy bypass, access control, injection) MUST also be documented in `docs/permission-security-tests.md` following the existing Vector → Bug → Defense → Test format.
 
 ## Known Issues
 - **regclass / regproc not supported** — `datafusion-table-providers` drops these columns. Catalog stores `arrow_type = NULL`; `build_arrow_schema` skips them.

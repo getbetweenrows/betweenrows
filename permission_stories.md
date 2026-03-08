@@ -469,7 +469,9 @@ The following stories are implemented in the current release via the policy syst
 **Key design decisions for P0:**
 - Policies assign directly to users or all users (`user_id = NULL`). No roles/groups.
 - `is_admin` grants management API access only — does NOT bypass data policies.
-- Datasource `access_mode`: `"policy_required"` (default) or `"open"`.
+- Datasource `access_mode`: `"open"` (default) or `"policy_required"`.
+- `column_access deny` obligations are enforced on **both** permit and deny-effect policies. Deny policies with `row_filter` obligations short-circuit with an error; deny policies with `column_access deny` strip columns silently.
+- Disabled policies (`is_enabled: false`) are fully inert — no query-time enforcement, no schema hiding.
 - Version snapshots for audit: every policy mutation increments `version` and creates a `policy_version` snapshot.
 - Template variables (`{user.tenant}`, etc.) use parse-then-substitute — immune to injection.
 

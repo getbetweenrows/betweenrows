@@ -14,6 +14,7 @@ use tower_http::set_header::response::SetResponseHeaderLayer;
 
 use crate::auth::Auth;
 use crate::engine::EngineCache;
+use crate::handler::ProxyHandler;
 use crate::hooks::policy::PolicyHook;
 
 pub mod audit_handlers;
@@ -41,6 +42,8 @@ pub struct AdminState {
     pub job_store: Arc<Mutex<discovery_job::JobStore>>,
     /// PolicyHook reference for cache invalidation from admin API.
     pub policy_hook: Option<Arc<PolicyHook>>,
+    /// ProxyHandler reference to rebuild per-connection SessionContexts after policy mutations.
+    pub proxy_handler: Option<Arc<ProxyHandler>>,
 }
 
 // ---------- error type ----------

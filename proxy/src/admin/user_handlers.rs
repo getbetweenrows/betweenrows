@@ -290,6 +290,7 @@ mod tests {
             master_key: [0u8; 32],
             job_store: Arc::new(Mutex::new(discovery_job::JobStore::new())),
             policy_hook: None,
+            proxy_handler: None,
         }
     }
 

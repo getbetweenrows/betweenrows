@@ -19,13 +19,14 @@ use datafusion_table_providers::{
 };
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as AsyncRwLock;
 use uuid::Uuid;
 
 use crate::entity::{
-    data_source, discovered_column, discovered_schema, discovered_table, user_data_source,
+    data_source, discovered_column, discovered_schema, discovered_table, policy, policy_assignment,
+    policy_obligation, user_data_source,
 };
 
 // ---------- custom dialect for JSON pushdown ----------
@@ -291,6 +292,28 @@ struct VirtualCatalogSchema {
     /// The real upstream schema name, used in TableReference for SQL sent to upstream.
     schema_name: String,
     tables: HashMap<String, VirtualCatalogTable>,
+}
+
+/// Pre-loaded catalog data for a datasource. Cached per datasource name.
+/// Contains raw schema/table/column metadata — shared across all connections to the same datasource.
+struct CachedCatalog {
+    datasource_id: Uuid,
+    schemas: HashMap<String, VirtualCatalogSchema>,
+    default_schema: String,
+    access_mode: String,
+}
+
+/// Computed per-user visibility derived from policy obligations.
+struct UserVisibility {
+    /// None = no filtering needed (open mode, no denies)
+    filter: Option<VisibilityFilter>,
+}
+
+struct VisibilityFilter {
+    /// Tables the user can see: (df_alias, table_name). None = all tables visible (open mode with denies).
+    visible_tables: Option<HashSet<(String, String)>>,
+    /// Columns to hide: (df_alias, table_name, column_name).
+    denied_columns: HashSet<(String, String, String)>,
 }
 
 // ---------- lazy pool ----------
@@ -614,6 +637,30 @@ async fn create_session_context_from_catalog(
     Ok(ctx)
 }
 
+// ---------- visibility matching ----------
+
+/// Check whether an obligation's schema/table matches a given (df_alias, table_name) pair.
+/// Uses the same semantics as `PolicyHook::matches_schema_table()` to ensure consistency.
+fn visibility_matches(
+    obl_schema: &str,
+    obl_table: &str,
+    df_alias: &str,
+    table: &str,
+    df_to_upstream: &HashMap<String, String>,
+) -> bool {
+    if obl_table != "*" && obl_table != table {
+        return false;
+    }
+    if obl_schema == "*" {
+        return true;
+    }
+    let upstream = df_to_upstream
+        .get(df_alias)
+        .map(|s| s.as_str())
+        .unwrap_or(df_alias);
+    obl_schema == upstream
+}
+
 // ---------- engine cache ----------
 
 #[derive(Debug)]
@@ -630,8 +677,10 @@ impl std::error::Error for EngineError {}
 pub struct EngineCache {
     db: DatabaseConnection,
     master_key: [u8; 32],
-    contexts: AsyncRwLock<HashMap<String, Arc<SessionContext>>>,
-    /// Shared LazyPool per datasource. Survives SessionContext invalidation so
+    /// Cached raw catalog per datasource (schema/table/column metadata).
+    /// Shared across all connections to the same datasource.
+    catalogs: AsyncRwLock<HashMap<String, Arc<CachedCatalog>>>,
+    /// Shared LazyPool per datasource. Survives catalog invalidation so
     /// re-discovery after catalog changes reuses the existing upstream connection pool.
     pools: AsyncRwLock<HashMap<String, Arc<LazyPool>>>,
 }
@@ -641,7 +690,7 @@ impl EngineCache {
         Arc::new(Self {
             db,
             master_key,
-            contexts: AsyncRwLock::new(HashMap::new()),
+            catalogs: AsyncRwLock::new(HashMap::new()),
             pools: AsyncRwLock::new(HashMap::new()),
         })
     }
@@ -692,25 +741,25 @@ impl EngineCache {
         Ok(assignment.is_some())
     }
 
-    /// Get (or lazily create) the SessionContext for a named data source.
-    /// Uses virtual schema from local catalog metadata — no live introspection.
-    /// The upstream connection pool is initialised lazily on the first user-table query.
-    pub async fn get_context(
+    /// Get (or lazily load) the raw catalog for a named data source.
+    /// Loads schema/table/column metadata from the admin DB and caches it.
+    /// Per-user visibility filtering happens in `build_user_context()`.
+    async fn get_catalog(
         &self,
         name: &str,
-    ) -> Result<Arc<SessionContext>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Arc<CachedCatalog>, Box<dyn std::error::Error + Send + Sync>> {
         // Fast path: read lock
         {
-            let map = self.contexts.read().await;
-            if let Some(ctx) = map.get(name) {
-                return Ok(ctx.clone());
+            let map = self.catalogs.read().await;
+            if let Some(catalog) = map.get(name) {
+                return Ok(catalog.clone());
             }
         }
 
         // Slow path: write lock (double-check)
-        let mut map = self.contexts.write().await;
-        if let Some(ctx) = map.get(name) {
-            return Ok(ctx.clone());
+        let mut map = self.catalogs.write().await;
+        if let Some(catalog) = map.get(name) {
+            return Ok(catalog.clone());
         }
 
         let ds = data_source::Entity::find()
@@ -720,23 +769,6 @@ impl EngineCache {
             .await
             .map_err(|e| EngineError(format!("DB error: {e}")))?
             .ok_or_else(|| EngineError(format!("Data source '{}' not found or inactive", name)))?;
-
-        let cfg = DataSourceConfig::from_model(&ds, &self.master_key)?;
-
-        // Get or create LazyPool (shared across SessionContext rebuilds).
-        // Acquiring pools.write() while holding contexts.write() is safe because
-        // all other code paths acquire at most one of these locks at a time.
-        let lazy_pool = {
-            let mut pools = self.pools.write().await;
-            if let Some(p) = pools.get(name) {
-                p.clone()
-            } else {
-                let params = build_postgres_params(&cfg);
-                let p = Arc::new(LazyPool::new(params));
-                pools.insert(name.to_string(), p.clone());
-                p
-            }
-        };
 
         // Load stored catalog for this data source
         let schemas_with_tables: Vec<(discovered_schema::Model, Vec<discovered_table::Model>)> =
@@ -748,14 +780,12 @@ impl EngineCache {
                 .await
                 .map_err(|e| EngineError(format!("DB error loading catalog: {e}")))?;
 
-        // Build virtual catalog data
         let mut catalog_schemas: HashMap<String, VirtualCatalogSchema> = HashMap::new();
 
         for (schema, tables) in schemas_with_tables {
             let mut catalog_tables: HashMap<String, VirtualCatalogTable> = HashMap::new();
 
             for table in tables.into_iter().filter(|t| t.is_selected) {
-                // Load columns for this table
                 let columns: Vec<discovered_column::Model> = discovered_column::Entity::find()
                     .filter(discovered_column::Column::DiscoveredTableId.eq(table.id))
                     .all(&self.db)
@@ -788,26 +818,343 @@ impl EngineCache {
             );
         }
 
-        // Determine default search path: prefer alias for "public", else first schema.
         let default_schema = select_default_schema(&catalog_schemas);
 
-        let ctx = create_session_context_from_catalog(catalog_schemas, lazy_pool, &default_schema)
+        let catalog = Arc::new(CachedCatalog {
+            datasource_id: ds.id,
+            schemas: catalog_schemas,
+            default_schema,
+            access_mode: ds.access_mode,
+        });
+
+        map.insert(name.to_string(), catalog.clone());
+        Ok(catalog)
+    }
+
+    /// Get or create the shared LazyPool for a datasource.
+    async fn get_or_create_pool(&self, name: &str, cfg: &DataSourceConfig) -> Arc<LazyPool> {
+        // Fast path
+        {
+            let pools = self.pools.read().await;
+            if let Some(p) = pools.get(name) {
+                return p.clone();
+            }
+        }
+        let mut pools = self.pools.write().await;
+        if let Some(p) = pools.get(name) {
+            return p.clone();
+        }
+        let params = build_postgres_params(cfg);
+        let p = Arc::new(LazyPool::new(params));
+        pools.insert(name.to_string(), p.clone());
+        p
+    }
+
+    /// Compute what tables and columns a user can see, given their policy assignments.
+    async fn compute_user_visibility(
+        &self,
+        user_id: Uuid,
+        catalog: &CachedCatalog,
+    ) -> Result<UserVisibility, Box<dyn std::error::Error + Send + Sync>> {
+        // Build df_alias → upstream_name mapping from catalog
+        let df_to_upstream: HashMap<String, String> = catalog
+            .schemas
+            .iter()
+            .map(|(alias, vs)| (alias.clone(), vs.schema_name.clone()))
+            .collect();
+
+        // Load policy assignments for this datasource + user (user-specific OR wildcard)
+        let assignments = policy_assignment::Entity::find()
+            .filter(policy_assignment::Column::DataSourceId.eq(catalog.datasource_id))
+            .all(&self.db)
+            .await
+            .map_err(|e| EngineError(format!("DB error loading assignments: {e}")))?;
+
+        let relevant: Vec<_> = assignments
+            .into_iter()
+            .filter(|a| a.user_id.is_none() || a.user_id == Some(user_id))
+            .collect();
+
+        if relevant.is_empty() {
+            if catalog.access_mode == "policy_required" {
+                // No policies → no tables visible
+                return Ok(UserVisibility {
+                    filter: Some(VisibilityFilter {
+                        visible_tables: Some(HashSet::new()),
+                        denied_columns: HashSet::new(),
+                    }),
+                });
+            }
+            return Ok(UserVisibility { filter: None });
+        }
+
+        let policy_ids: Vec<Uuid> = relevant
+            .iter()
+            .map(|a| a.policy_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let policies = policy::Entity::find()
+            .filter(policy::Column::Id.is_in(policy_ids.clone()))
+            .filter(policy::Column::IsEnabled.eq(true))
+            .all(&self.db)
+            .await
+            .map_err(|e| EngineError(format!("DB error loading policies: {e}")))?;
+
+        let permit_policy_ids: HashSet<Uuid> = policies
+            .iter()
+            .filter(|p| p.effect == "permit")
+            .map(|p| p.id)
+            .collect();
+
+        let enabled_policy_ids: Vec<Uuid> = policies.iter().map(|p| p.id).collect();
+
+        let obligations = policy_obligation::Entity::find()
+            .filter(policy_obligation::Column::PolicyId.is_in(enabled_policy_ids))
+            .all(&self.db)
+            .await
+            .map_err(|e| EngineError(format!("DB error loading obligations: {e}")))?;
+
+        let mut visible_tables: HashSet<(String, String)> = HashSet::new();
+        let mut denied_columns: HashSet<(String, String, String)> = HashSet::new();
+
+        for obl in &obligations {
+            let def: serde_json::Value = serde_json::from_str(&obl.definition).unwrap_or_default();
+
+            // Only permit obligations contribute to table visibility
+            if permit_policy_ids.contains(&obl.policy_id) {
+                let schema_table: Option<(&str, &str)> = match obl.obligation_type.as_str() {
+                    "row_filter" | "column_mask" | "column_access" => {
+                        match (
+                            def.get("schema").and_then(|v| v.as_str()),
+                            def.get("table").and_then(|v| v.as_str()),
+                        ) {
+                            (Some(s), Some(t)) => Some((s, t)),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+
+                if let Some((obl_schema, obl_table)) = schema_table {
+                    for (df_alias, vs) in &catalog.schemas {
+                        for table_name in vs.tables.keys() {
+                            if visibility_matches(
+                                obl_schema,
+                                obl_table,
+                                df_alias,
+                                table_name,
+                                &df_to_upstream,
+                            ) {
+                                visible_tables.insert((df_alias.clone(), table_name.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // column_access deny from any policy hides columns from the schema
+            if obl.obligation_type == "column_access"
+                && let (Some(obl_schema), Some(obl_table), Some("deny"), Some(cols)) = (
+                    def.get("schema").and_then(|v| v.as_str()),
+                    def.get("table").and_then(|v| v.as_str()),
+                    def.get("action").and_then(|v| v.as_str()),
+                    def.get("columns").and_then(|v| v.as_array()),
+                )
+            {
+                for (df_alias, vs) in &catalog.schemas {
+                    for table_name in vs.tables.keys() {
+                        if visibility_matches(
+                            obl_schema,
+                            obl_table,
+                            df_alias,
+                            table_name,
+                            &df_to_upstream,
+                        ) {
+                            for col_val in cols {
+                                if let Some(col) = col_val.as_str() {
+                                    denied_columns.insert((
+                                        df_alias.clone(),
+                                        table_name.clone(),
+                                        col.to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if catalog.access_mode == "policy_required" {
+            Ok(UserVisibility {
+                filter: Some(VisibilityFilter {
+                    visible_tables: Some(visible_tables),
+                    denied_columns,
+                }),
+            })
+        } else {
+            // Open mode: only filter if there are denied columns
+            if denied_columns.is_empty() {
+                Ok(UserVisibility { filter: None })
+            } else {
+                Ok(UserVisibility {
+                    filter: Some(VisibilityFilter {
+                        visible_tables: None,
+                        denied_columns,
+                    }),
+                })
+            }
+        }
+    }
+
+    /// Build a per-user SessionContext filtered by the user's policy visibility.
+    ///
+    /// Called once at connection time (in `on_startup`). The context is stored in
+    /// the handler's `connection_contexts` map for the lifetime of the connection.
+    pub async fn build_user_context(
+        &self,
+        user_id: Uuid,
+        datasource_name: &str,
+    ) -> Result<Arc<SessionContext>, Box<dyn std::error::Error + Send + Sync>> {
+        let catalog = self.get_catalog(datasource_name).await?;
+
+        // Load datasource config for pool creation (only queries DB if pool not yet cached)
+        let lazy_pool = {
+            let existing = self.pools.read().await.get(datasource_name).cloned();
+            if let Some(p) = existing {
+                p
+            } else {
+                let ds = data_source::Entity::find()
+                    .filter(data_source::Column::Name.eq(datasource_name))
+                    .filter(data_source::Column::IsActive.eq(true))
+                    .one(&self.db)
+                    .await
+                    .map_err(|e| EngineError(format!("DB error: {e}")))?
+                    .ok_or_else(|| {
+                        EngineError(format!(
+                            "Data source '{}' not found or inactive",
+                            datasource_name
+                        ))
+                    })?;
+                let cfg = DataSourceConfig::from_model(&ds, &self.master_key)?;
+                self.get_or_create_pool(datasource_name, &cfg).await
+            }
+        };
+
+        // Compute per-user visibility from policy obligations
+        let visibility = self.compute_user_visibility(user_id, &catalog).await?;
+
+        // Build filtered catalog schemas
+        let filtered_schemas: HashMap<String, VirtualCatalogSchema> =
+            if let Some(filter) = &visibility.filter {
+                let mut schemas = HashMap::new();
+                for (df_alias, vs) in &catalog.schemas {
+                    let tables: HashMap<String, VirtualCatalogTable> = vs
+                        .tables
+                        .iter()
+                        .filter_map(|(table_name, table)| {
+                            // Table visibility check
+                            if filter.visible_tables.as_ref().is_some_and(|visible_set| {
+                                !visible_set.contains(&(df_alias.clone(), table_name.clone()))
+                            }) {
+                                return None;
+                            }
+
+                            // Column visibility: remove denied columns from Arrow schema
+                            let schema_ref = if filter.denied_columns.is_empty() {
+                                table.arrow_schema.clone()
+                            } else {
+                                let fields: Vec<_> = table
+                                    .arrow_schema
+                                    .fields()
+                                    .iter()
+                                    .filter(|f| {
+                                        !filter.denied_columns.contains(&(
+                                            df_alias.clone(),
+                                            table_name.clone(),
+                                            f.name().clone(),
+                                        ))
+                                    })
+                                    .cloned()
+                                    .collect();
+                                Arc::new(Schema::new(fields))
+                            };
+
+                            Some((
+                                table_name.clone(),
+                                VirtualCatalogTable {
+                                    table_name: table_name.clone(),
+                                    arrow_schema: schema_ref,
+                                },
+                            ))
+                        })
+                        .collect();
+
+                    // Include schema if it has visible tables, or if no table filtering
+                    if filter.visible_tables.is_none() || !tables.is_empty() {
+                        schemas.insert(
+                            df_alias.clone(),
+                            VirtualCatalogSchema {
+                                schema_name: vs.schema_name.clone(),
+                                tables,
+                            },
+                        );
+                    }
+                }
+                schemas
+            } else {
+                // No filtering — clone catalog schemas as-is
+                catalog
+                    .schemas
+                    .iter()
+                    .map(|(alias, vs)| {
+                        let tables = vs
+                            .tables
+                            .iter()
+                            .map(|(tname, t)| {
+                                (
+                                    tname.clone(),
+                                    VirtualCatalogTable {
+                                        table_name: t.table_name.clone(),
+                                        arrow_schema: t.arrow_schema.clone(),
+                                    },
+                                )
+                            })
+                            .collect();
+                        (
+                            alias.clone(),
+                            VirtualCatalogSchema {
+                                schema_name: vs.schema_name.clone(),
+                                tables,
+                            },
+                        )
+                    })
+                    .collect()
+            };
+
+        let default_schema = if filtered_schemas.contains_key(&catalog.default_schema) {
+            catalog.default_schema.clone()
+        } else {
+            select_default_schema(&filtered_schemas)
+        };
+
+        let ctx = create_session_context_from_catalog(filtered_schemas, lazy_pool, &default_schema)
             .await?;
-        let ctx = Arc::new(ctx);
-        map.insert(name.to_string(), ctx.clone());
-        Ok(ctx)
+        Ok(Arc::new(ctx))
     }
 
-    /// Remove a data source's cached SessionContext (call after catalog re-discovery).
-    /// Keeps the shared pool so subsequent queries don't need a new connection.
+    /// Remove a data source's cached catalog (call after catalog re-discovery).
+    /// Keeps the shared pool so subsequent connections don't need a new upstream connection.
     pub async fn invalidate(&self, name: &str) {
-        self.contexts.write().await.remove(name);
+        self.catalogs.write().await.remove(name);
     }
 
-    /// Remove both the cached SessionContext AND the shared pool
+    /// Remove both the cached catalog AND the shared pool
     /// (call after datasource connection params are edited or datasource is deleted).
     pub async fn invalidate_all(&self, name: &str) {
-        self.contexts.write().await.remove(name);
+        self.catalogs.write().await.remove(name);
         self.pools.write().await.remove(name);
     }
 
@@ -1460,5 +1807,211 @@ mod tests {
             datafusion::prelude::lit("key"),
         ]);
         assert_eq!(unparse(&expr), r#""payload" ? 'key'"#);
+    }
+
+    // ─── compute_user_visibility regression tests ───────────────────────────
+
+    async fn setup_visibility_db() -> sea_orm::DatabaseConnection {
+        use migration::MigratorTrait as _;
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        migration::Migrator::up(&db, None).await.unwrap();
+        db
+    }
+
+    fn make_catalog(ds_id: Uuid, ds_access_mode: &str) -> CachedCatalog {
+        let mut tables = HashMap::new();
+        let arrow_schema = Arc::new(Schema::new(vec![Field::new("ssn", DataType::Utf8, true)]));
+        tables.insert(
+            "employees".to_string(),
+            VirtualCatalogTable {
+                table_name: "employees".to_string(),
+                arrow_schema,
+            },
+        );
+        let mut schemas = HashMap::new();
+        schemas.insert(
+            "public".to_string(),
+            VirtualCatalogSchema {
+                schema_name: "public".to_string(),
+                tables,
+            },
+        );
+        CachedCatalog {
+            datasource_id: ds_id,
+            schemas,
+            default_schema: "public".to_string(),
+            access_mode: ds_access_mode.to_string(),
+        }
+    }
+
+    async fn insert_test_user(db: &sea_orm::DatabaseConnection, user_id: Uuid) {
+        use crate::entity::proxy_user;
+        use chrono::Utc;
+        use sea_orm::ActiveModelTrait;
+
+        let now = Utc::now().naive_utc();
+        proxy_user::ActiveModel {
+            id: sea_orm::Set(user_id),
+            username: sea_orm::Set(format!("user-{user_id}")),
+            password_hash: sea_orm::Set("hash".to_string()),
+            tenant: sea_orm::Set("test".to_string()),
+            is_admin: sea_orm::Set(false),
+            is_active: sea_orm::Set(true),
+            email: sea_orm::Set(None),
+            display_name: sea_orm::Set(None),
+            last_login_at: sea_orm::Set(None),
+            created_at: sea_orm::Set(now),
+            updated_at: sea_orm::Set(now),
+        }
+        .insert(db)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_test_datasource(db: &sea_orm::DatabaseConnection, ds_id: Uuid) {
+        use crate::entity::data_source;
+        use chrono::Utc;
+        use sea_orm::ActiveModelTrait;
+
+        let now = Utc::now().naive_utc();
+        data_source::ActiveModel {
+            id: sea_orm::Set(ds_id),
+            name: sea_orm::Set(format!("ds-{ds_id}")),
+            ds_type: sea_orm::Set("postgres".to_string()),
+            config: sea_orm::Set("{}".to_string()),
+            secure_config: sea_orm::Set(String::new()),
+            is_active: sea_orm::Set(true),
+            access_mode: sea_orm::Set("open".to_string()),
+            last_sync_at: sea_orm::Set(None),
+            last_sync_result: sea_orm::Set(None),
+            created_at: sea_orm::Set(now),
+            updated_at: sea_orm::Set(now),
+        }
+        .insert(db)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_policy_with_column_deny(
+        db: &sea_orm::DatabaseConnection,
+        ds_id: Uuid,
+        user_id: Uuid,
+        is_enabled: bool,
+        effect: &str,
+    ) {
+        use crate::entity::{policy, policy_assignment, policy_obligation};
+        use chrono::Utc;
+        use sea_orm::ActiveModelTrait;
+
+        let policy_id = Uuid::now_v7();
+        let now = Utc::now().naive_utc();
+
+        policy::ActiveModel {
+            id: sea_orm::Set(policy_id),
+            name: sea_orm::Set(format!("test-policy-{policy_id}")),
+            description: sea_orm::Set(None),
+            effect: sea_orm::Set(effect.to_string()),
+            is_enabled: sea_orm::Set(is_enabled),
+            version: sea_orm::Set(1),
+            created_by: sea_orm::Set(user_id),
+            updated_by: sea_orm::Set(user_id),
+            created_at: sea_orm::Set(now),
+            updated_at: sea_orm::Set(now),
+        }
+        .insert(db)
+        .await
+        .unwrap();
+
+        let obl_def = serde_json::json!({
+            "schema": "public",
+            "table": "employees",
+            "action": "deny",
+            "columns": ["ssn"]
+        })
+        .to_string();
+
+        policy_obligation::ActiveModel {
+            id: sea_orm::Set(Uuid::now_v7()),
+            policy_id: sea_orm::Set(policy_id),
+            obligation_type: sea_orm::Set("column_access".to_string()),
+            definition: sea_orm::Set(obl_def),
+            created_at: sea_orm::Set(now),
+            updated_at: sea_orm::Set(now),
+        }
+        .insert(db)
+        .await
+        .unwrap();
+
+        policy_assignment::ActiveModel {
+            id: sea_orm::Set(Uuid::now_v7()),
+            policy_id: sea_orm::Set(policy_id),
+            data_source_id: sea_orm::Set(ds_id),
+            user_id: sea_orm::Set(Some(user_id)),
+            priority: sea_orm::Set(100),
+            created_at: sea_orm::Set(now),
+            updated_at: sea_orm::Set(now),
+        }
+        .insert(db)
+        .await
+        .unwrap();
+    }
+
+    /// Disabled policy's `column_access deny` obligation must NOT appear in denied_columns.
+    #[tokio::test]
+    async fn test_disabled_policy_column_deny_not_applied() {
+        let db = setup_visibility_db().await;
+        let ds_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+
+        insert_test_user(&db, user_id).await;
+        insert_test_datasource(&db, ds_id).await;
+        insert_policy_with_column_deny(&db, ds_id, user_id, false, "deny").await;
+
+        let cache = EngineCache::new(db, [0u8; 32]);
+        let catalog = make_catalog(ds_id, "open");
+        let vis = cache
+            .compute_user_visibility(user_id, &catalog)
+            .await
+            .unwrap();
+
+        // No obligations from disabled policy → no denied columns
+        match vis.filter {
+            None => {} // expected for open mode with no denies
+            Some(f) => assert!(
+                f.denied_columns.is_empty(),
+                "Disabled policy should not contribute denied columns, got: {:?}",
+                f.denied_columns
+            ),
+        }
+    }
+
+    /// Enabled policy's `column_access deny` obligation MUST appear in denied_columns.
+    #[tokio::test]
+    async fn test_enabled_policy_column_deny_applied() {
+        let db = setup_visibility_db().await;
+        let ds_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+
+        insert_test_user(&db, user_id).await;
+        insert_test_datasource(&db, ds_id).await;
+        insert_policy_with_column_deny(&db, ds_id, user_id, true, "deny").await;
+
+        let cache = EngineCache::new(db, [0u8; 32]);
+        let catalog = make_catalog(ds_id, "open");
+        let vis = cache
+            .compute_user_visibility(user_id, &catalog)
+            .await
+            .unwrap();
+
+        let denied = vis
+            .filter
+            .expect("Expected a visibility filter with denied columns")
+            .denied_columns;
+
+        assert!(
+            denied.iter().any(|(_, _, col)| col == "ssn"),
+            "Expected 'ssn' in denied_columns, got: {:?}",
+            denied
+        );
     }
 }

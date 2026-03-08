@@ -153,3 +153,42 @@ async fn join_both_tables_filtered() { ... }
 #[tokio::test]
 async fn policy_required_no_policy_returns_empty() { ... }
 ```
+
+---
+
+### 9. `column_access deny` on deny-effect policies ignored at query time
+
+**Vector**: Admin creates a **deny-effect** policy with a `column_access deny` obligation on `ssn`, expecting the column to be stripped from query results immediately.
+
+**Bug**: `PolicyHook` only processed `column_access` obligations from *permit* policies (the loop at `handle_query` iterated over `session.permit_policies`). Deny-effect policies were only checked for table-level "Access denied" errors. So `column_access deny` on a deny policy had no query-time effect — the column appeared in results until the user reconnected (when `compute_user_visibility()` hid it from the schema).
+
+**Defense**: `PolicyHook::handle_query` now runs a second loop over `session.deny_policies` after the permit loop, processing only `column_access` obligations and adding matched columns to `column_denies`.
+
+**Test**: Create a deny-effect policy with `column_access deny` on `ssn`. Assign to datasource. Without reconnecting, run `SELECT ssn FROM employees`. Verify `ssn` column is absent from the result set.
+
+---
+
+### 10. Disabled policies still enforced in visibility layer
+
+**Vector**: Admin disables a policy with `column_access deny`, expecting the column to reappear in `information_schema.columns` on next reconnect.
+
+**Bug**: `compute_user_visibility()` loaded obligations for ALL assigned policy IDs, including those belonging to disabled policies. The `column_access deny` block didn't check if the parent policy was enabled, so disabling a policy had no effect on schema visibility.
+
+**Defense**: `compute_user_visibility()` now loads obligations only for *enabled* policy IDs (those from the `is_enabled = true` filtered query). Disabled policies contribute neither to `visible_tables` nor `denied_columns`.
+
+**Test**:
+- Unit: `engine::tests::test_disabled_policy_column_deny_not_applied` — disabled policy → `denied_columns` is empty.
+- Unit: `engine::tests::test_enabled_policy_column_deny_applied` — enabled policy → `denied_columns` contains `ssn`.
+- Manual: Disable a policy with `column_access deny`. Without reconnecting, verify `ssn` reappears in `information_schema.columns` on the next query (policy changes trigger an immediate `SessionContext` rebuild for all active connections).
+
+---
+
+### 11. `SELECT <denied-column>` returns silent empty rows instead of an error
+
+**Vector**: User runs `SELECT ssn FROM customers` where `ssn` is denied. They receive many rows with empty/null values and incorrectly conclude the column is empty in the database.
+
+**Bug**: When all selected columns were stripped by `column_access deny`, `new_exprs` became empty. `LogicalPlanBuilder::project([])` produced a zero-column projection that DataFusion executed successfully — returning N rows with no column data. Clients rendered this as empty rows.
+
+**Defense**: `PolicyHook` now checks for an empty `new_exprs` after column stripping and returns SQLSTATE `42501` (insufficient_privilege) listing the denied columns, before attempting to build the projection.
+
+**Test**: Create a policy with `column_access deny` on `ssn`. Run `SELECT ssn FROM customers`. Verify the response is an error with SQLSTATE `42501` and not an empty result set.

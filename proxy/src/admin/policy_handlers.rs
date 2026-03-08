@@ -537,6 +537,9 @@ pub async fn update_policy(
                 .await
             {
                 hook.invalidate_datasource(&ds.name).await;
+                if let Some(ph) = &state.proxy_handler {
+                    ph.rebuild_contexts_for_datasource(&ds.name);
+                }
             }
         }
     }
@@ -620,6 +623,9 @@ pub async fn delete_policy(
                 .await
             {
                 hook.invalidate_datasource(&ds.name).await;
+                if let Some(ph) = &state.proxy_handler {
+                    ph.rebuild_contexts_for_datasource(&ds.name);
+                }
             }
         }
     }
@@ -735,9 +741,12 @@ pub async fn assign_policy(
 
     txn.commit().await.map_err(ApiErr::internal)?;
 
-    // Invalidate cache
+    // Invalidate cache and rebuild active connection contexts
     if let Some(hook) = &state.policy_hook {
         hook.invalidate_datasource(&ds.name).await;
+    }
+    if let Some(ph) = &state.proxy_handler {
+        ph.rebuild_contexts_for_datasource(&ds.name);
     }
 
     let policy_names: HashMap<Uuid, String> = [(p.id, p.name.clone())].into_iter().collect();
@@ -824,6 +833,9 @@ pub async fn remove_assignment(
     if let Some(hook) = &state.policy_hook {
         hook.invalidate_datasource(&ds.name).await;
     }
+    if let Some(ph) = &state.proxy_handler {
+        ph.rebuild_contexts_for_datasource(&ds.name);
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -870,6 +882,7 @@ mod tests {
             master_key: [0u8; 32],
             job_store: Arc::new(Mutex::new(discovery_job::JobStore::new())),
             policy_hook: None,
+            proxy_handler: None,
         }
     }
 

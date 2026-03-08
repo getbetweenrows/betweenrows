@@ -5,6 +5,7 @@ use crate::hooks::{QueryHook, policy::PolicyHook, read_only::ReadOnlyHook};
 use arrow_pg::datatypes::arrow_schema_to_pg_fields;
 use arrow_pg::datatypes::df::encode_dataframe;
 use async_trait::async_trait;
+use dashmap::DashMap;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 use futures::Sink;
@@ -25,13 +26,44 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use std::fmt::Debug;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Per-connection context entry. Stores enough metadata to rebuild the SessionContext
+/// in-place when policy changes invalidate the cached schema.
+struct ConnectionEntry {
+    ctx: Arc<SessionContext>,
+    user_id: uuid::Uuid,
+    datasource_name: String,
+}
+
+/// Per-connection shared state. Wrapped in Arc so all handler clones share the same maps.
+struct ConnectionStore {
+    /// Per-connection SessionContext keyed by connection ID.
+    connection_contexts: DashMap<u64, ConnectionEntry>,
+    /// Handoff: accept loop → on_startup. Maps peer SocketAddr → connection ID.
+    pending_conn_ids: DashMap<SocketAddr, u64>,
+    /// Monotonic counter for generating unique connection IDs.
+    next_connection_id: AtomicU64,
+}
+
+impl ConnectionStore {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            connection_contexts: DashMap::new(),
+            pending_conn_ids: DashMap::new(),
+            next_connection_id: AtomicU64::new(0),
+        })
+    }
+}
 
 pub struct ProxyHandler {
     engine_cache: Arc<EngineCache>,
     hooks: Vec<Arc<dyn QueryHook>>,
     query_parser: Arc<NoopQueryParser>,
     auth: Arc<Auth>,
+    conn_store: Arc<ConnectionStore>,
 }
 
 impl ProxyHandler {
@@ -49,37 +81,116 @@ impl ProxyHandler {
             hooks,
             query_parser: Arc::new(NoopQueryParser::new()),
             auth,
+            conn_store: ConnectionStore::new(),
         }
     }
 
-    /// Get the SessionContext for the current connection's data source.
+    /// Allocate a new connection ID (without registering a peer address).
+    /// Used as a fallback when peer_addr is unavailable.
+    pub fn alloc_connection_id(&self) -> u64 {
+        self.conn_store
+            .next_connection_id
+            .fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Allocate a new connection ID and register it in pending_conn_ids keyed by peer address.
+    /// Called from the accept loop before spawning the connection task.
+    pub fn register_connection(&self, peer_addr: SocketAddr) -> u64 {
+        let conn_id = self
+            .conn_store
+            .next_connection_id
+            .fetch_add(1, Ordering::Relaxed);
+        self.conn_store.pending_conn_ids.insert(peer_addr, conn_id);
+        conn_id
+    }
+
+    /// Remove connection state after the connection closes.
+    pub fn cleanup_connection(&self, conn_id: u64, peer_addr: Option<SocketAddr>) {
+        self.conn_store.connection_contexts.remove(&conn_id);
+        if let Some(addr) = peer_addr {
+            self.conn_store.pending_conn_ids.remove(&addr);
+        }
+    }
+
+    /// Rebuild the per-user `SessionContext` for all active connections on the given datasource.
+    ///
+    /// Called after a policy mutation so that connected users immediately see the updated schema
+    /// (e.g. a newly-denied column disappears, or a re-enabled column reappears) without needing
+    /// to reconnect. Rebuilding is done in the background via `tokio::spawn` so this method
+    /// returns immediately.
+    pub fn rebuild_contexts_for_datasource(&self, datasource: &str) {
+        let entries: Vec<(u64, uuid::Uuid, String)> = self
+            .conn_store
+            .connection_contexts
+            .iter()
+            .filter(|e| e.value().datasource_name == datasource)
+            .map(|e| {
+                (
+                    *e.key(),
+                    e.value().user_id,
+                    e.value().datasource_name.clone(),
+                )
+            })
+            .collect();
+
+        for (conn_id, user_id, ds_name) in entries {
+            let engine_cache = self.engine_cache.clone();
+            let conn_store = self.conn_store.clone();
+            tokio::spawn(async move {
+                match engine_cache.build_user_context(user_id, &ds_name).await {
+                    Ok(new_ctx) => {
+                        if let Some(mut entry) = conn_store.connection_contexts.get_mut(&conn_id) {
+                            entry.ctx = new_ctx;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            conn_id,
+                            "Failed to rebuild SessionContext after policy change"
+                        );
+                    }
+                }
+            });
+        }
+    }
+
+    /// Get the per-connection SessionContext by looking up conn_id stored in client metadata.
     async fn get_ctx<C>(&self, client: &C) -> PgWireResult<Arc<SessionContext>>
     where
         C: ClientInfo,
     {
-        let datasource = client
+        let conn_id_str = client
             .metadata()
-            .get("datasource")
+            .get("conn_id")
             .cloned()
             .unwrap_or_default();
 
-        if datasource.is_empty() {
+        if conn_id_str.is_empty() {
             return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
                 "ERROR".to_owned(),
                 "08000".to_owned(),
-                "No data source selected — specify a database name in your connection string"
-                    .to_owned(),
+                "Connection not initialized — authentication may have failed".to_owned(),
             ))));
         }
 
-        let start = std::time::Instant::now();
-        let ctx = self
-            .engine_cache
-            .get_context(&datasource)
-            .await
-            .map_err(|e| PgWireError::ApiError(Box::new(std::io::Error::other(e.to_string()))))?;
-        tracing::debug!(datasource = %datasource, elapsed = ?start.elapsed(), "SessionContext ready");
-        Ok(ctx)
+        let conn_id: u64 = conn_id_str.parse().map_err(|_| {
+            PgWireError::ApiError(Box::new(std::io::Error::other(
+                "Invalid conn_id in metadata",
+            )))
+        })?;
+
+        self.conn_store
+            .connection_contexts
+            .get(&conn_id)
+            .map(|entry| entry.value().ctx.clone())
+            .ok_or_else(|| {
+                PgWireError::UserError(Box::new(ErrorInfo::new(
+                    "ERROR".to_owned(),
+                    "08000".to_owned(),
+                    "Session context not found — please reconnect".to_owned(),
+                )))
+            })
     }
 }
 
@@ -157,6 +268,7 @@ impl Clone for ProxyHandler {
             hooks: self.hooks.clone(),
             query_parser: self.query_parser.clone(),
             auth: self.auth.clone(),
+            conn_store: self.conn_store.clone(), // Arc::clone — shares state
         }
     }
 }
@@ -249,27 +361,61 @@ impl StartupHandler for ProxyHandler {
                             .metadata_mut()
                             .insert("datasource".to_owned(), datasource_name.clone());
 
+                        // Retrieve the connection ID registered at accept time
+                        let peer_addr = client.socket_addr();
+                        let conn_id = self
+                            .conn_store
+                            .pending_conn_ids
+                            .remove(&peer_addr)
+                            .map(|(_, id)| id)
+                            .ok_or_else(|| {
+                                PgWireError::ApiError(Box::new(std::io::Error::other(
+                                    "Connection ID not found — internal error",
+                                )))
+                            })?;
+
+                        // Build per-user filtered SessionContext inline (not in background).
+                        // This ensures the context is ready before the first query arrives,
+                        // and that metadata visibility is correct from the first query onward.
+                        let ctx = self
+                            .engine_cache
+                            .build_user_context(user.id, &datasource_name)
+                            .await
+                            .map_err(|e| {
+                                PgWireError::ApiError(Box::new(std::io::Error::other(
+                                    e.to_string(),
+                                )))
+                            })?;
+
+                        self.conn_store.connection_contexts.insert(
+                            conn_id,
+                            ConnectionEntry {
+                                ctx,
+                                user_id: user.id,
+                                datasource_name: datasource_name.clone(),
+                            },
+                        );
+                        client
+                            .metadata_mut()
+                            .insert("conn_id".to_owned(), conn_id.to_string());
+
                         tracing::info!(
                             username = %username,
                             tenant = %user.tenant,
                             datasource = %datasource_name,
-                            addr = %client.socket_addr(),
+                            conn_id = conn_id,
+                            addr = %peer_addr,
                             "Authenticated user"
                         );
 
                         finish_authentication(client, &DefaultServerParameterProvider::default())
                             .await?;
 
-                        // Pre-warm SessionContext + pool in the background so the
-                        // first user query doesn't pay the catalog-load latency.
+                        // Warm up the upstream pool in the background (amortises first-query latency)
                         let cache = self.engine_cache.clone();
                         let ds_name = datasource_name.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = cache.get_context(&ds_name).await {
-                                tracing::debug!(datasource = %ds_name, error = %e, "Context warmup failed (non-fatal)");
-                            } else {
-                                cache.warmup(&ds_name).await;
-                            }
+                            cache.warmup(&ds_name).await;
                         });
                     }
                     Err(e) => return Err(e),

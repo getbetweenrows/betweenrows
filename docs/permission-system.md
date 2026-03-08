@@ -7,17 +7,19 @@ BetweenRows has a policy-based permission system that controls what data users c
 Permissions are defined as **policies**. A policy is a named, reusable unit that contains one or more **obligations** — rules that specify what transformation to apply to a query. Policies are then **assigned** to a datasource (optionally scoped to a specific user).
 
 When a user runs a query:
-1. The proxy loads all policies assigned to the datasource for that user.
-2. Any `deny` policies short-circuit with an error.
-3. `permit` policies are applied — their obligations rewrite the query in-flight (row filters, column masks, column access controls).
+1. The proxy loads all **enabled** policies assigned to the datasource for that user.
+2. `deny` policies are evaluated first. A `row_filter` match on a deny policy rejects the query with an error. `column_access deny` obligations on deny policies are collected alongside those from permit policies (step 3).
+3. `permit` policies are applied — their obligations rewrite the query in-flight (row filters, column masks, column access controls). Column denies from both permit and deny policies are combined.
 4. The rewritten query executes against the upstream database.
 
 ## Policy effects
 
 - **permit** — applies obligations to the query (row filtering, masking, etc.)
-- **deny** — blocks the query with an error. Useful for blocking access to sensitive datasources entirely.
+- **deny** — primarily used to block access with an error. Can also carry `column_access deny` obligations to strip specific columns from results.
 
-Deny policies are checked first and short-circuit. If any deny policy matches, the query is rejected immediately.
+Deny policies are evaluated before permit policies. If a deny policy has a matching `row_filter` obligation, the query is rejected immediately with an error. `column_access deny` obligations on deny policies strip columns from results just like they do on permit policies — they do not cause an error.
+
+> **`is_enabled` flag**: only enabled policies are enforced. Disabling (or enabling) a policy removes (or adds) all its effects immediately — both for query-time enforcement and for schema visibility — without requiring a reconnect.
 
 ## Obligation types
 
@@ -66,7 +68,9 @@ Removes the specified columns from query results entirely.
 }
 ```
 
-Denied columns are unioned across all matching policies — if any policy denies a column, it is removed.
+Denied columns are unioned across all matching **enabled** policies, regardless of effect — if any enabled policy (permit or deny) denies a column, it is removed from the result. The column is also hidden from schema metadata (`information_schema.columns`) on the user's connection.
+
+If the query selects **only** denied columns (e.g. `SELECT ssn FROM customers`), the proxy returns SQLSTATE `42501` (insufficient privilege) with a message identifying the restricted columns rather than returning empty rows.
 
 ## Template variables
 
@@ -127,8 +131,37 @@ Each policy assignment has a `priority` (integer, lower = higher precedence, def
 |---|---|
 | Multiple permit policies, same table | Row filters are OR'd |
 | Multiple column masks, same column | Lowest priority number wins |
-| column_access deny from any policy | Column is always removed |
+| column_access deny from any enabled policy (permit or deny) | Column is always removed |
 | Equal priority, user-specific vs wildcard | User-specific assignment wins |
+
+## Policy design guidelines
+
+### When to create a new policy
+
+- The rules serve different **roles or use cases** (e.g., "admin access", "support read-only")
+- You need to **mix/match** these rules across different datasources
+- The rules have **different effects** (mixing permit and deny in one policy gets confusing)
+
+### When to add obligations to existing policy
+
+- The rules are **tightly related** to the same purpose
+- They always need to **apply together**
+- They're for the **same role or user type**
+
+### Practical heuristics
+
+| Scenario | Recommendation |
+|----------|----------------|
+| "Admins can see everything" | Single policy with multiple obligations |
+| "Support can read, but mask SSN" | Two obligations (row_filter + column_mask) in one policy |
+| "Finance can see costs, others can't" | Separate policy for cost visibility rules |
+| Same rule needed on multiple datasources | Likely a separate policy to reuse |
+
+### General advice
+
+Favor **smaller, composable policies** over monolithic ones. Your system supports policy assignment with priority, so you can layer policies. This makes it easier to debug ("why can't user X see this?") when each policy has a clear, narrow purpose.
+
+Start with simple policies and split them when they become hard to reason about.
 
 ## Access mode
 

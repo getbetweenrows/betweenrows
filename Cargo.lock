@@ -3809,6 +3809,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "dashmap",
  "datafusion",
  "datafusion-expr",
  "datafusion-functions-json",

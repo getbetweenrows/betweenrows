@@ -20,6 +20,8 @@ When a user runs a query:
 Deny policies are evaluated before permit policies. If a deny policy has a matching `row_filter` obligation, the query is rejected immediately with an error. `column_access deny` obligations on deny policies strip columns from results just like they do on permit policies — they do not cause an error.
 
 > **`is_enabled` flag**: only enabled policies are enforced. Disabling (or enabling) a policy removes (or adds) all its effects immediately — both for query-time enforcement and for schema visibility — without requiring a reconnect.
+>
+> Because a policy can be assigned to **multiple datasources**, disabling it drops its effects on **all** of them at once. If you only want to stop a policy from applying to one specific datasource, the correct action is to **remove the policy assignment** for that datasource rather than disabling the policy — removing an assignment leaves the policy intact and active on any other datasources it is assigned to.
 
 ## Obligation types
 
@@ -167,14 +169,70 @@ Start with simple policies and split them when they become hard to reason about.
 
 Each datasource has an `access_mode`:
 
-- **open** (default) — queries with no matching policies execute without restriction. Useful for development datasources.
-- **policy_required** — tables with no matching permit policy return empty results. Use this in production to ensure no data is accessible without an explicit policy.
+- **open** (default) — behaves as if an implicit "allow all" permit policy exists. Tables are accessible even without an explicit permit policy. However, deny policies are always enforced on top: a `row_filter` on a deny policy rejects the query; `column_access deny` strips columns. Think of it as "default allow, explicit deny." Useful for development datasources.
+- **policy_required** — explicit grant only. Tables with no matching permit policy return empty results and are hidden from schema metadata. Deny policies apply on top. Think of it as "default deny, explicit grant." Use this in production to ensure no data is accessible without an intentional policy.
+
+> **Note:** BetweenRows is an explicit-access-policy system. `open` mode is a convenience for lower environments (dev, staging) when you want to give users quick access without managing policies upfront — it does not disable the policy engine. Deny policies, column masks, and row filters from permit policies all still apply. For production, always use `policy_required` to ensure no data is accessible without an intentional policy.
+
+## Visibility follows access
+
+What a user can see in schema metadata mirrors exactly what they can query. This principle applies at two levels:
+
+- **Table visibility** — in `policy_required` mode, tables without a matching permit policy are hidden from `information_schema.tables` and do not appear in schema introspection. A user cannot discover a table they cannot access.
+- **Column visibility** — columns denied via `column_access deny` are hidden from `information_schema.columns` on the user's connection, not just stripped from query results. This prevents users from discovering the existence of sensitive columns.
+
+This means schema metadata is never a leakage vector: if a user cannot query it, they cannot see it. Toggling `is_enabled` on a policy updates both query-time enforcement and schema visibility immediately — no reconnect required.
+
+**Access mode impact on visibility:**
+- `open`: all tables are visible in metadata; only `column_access deny` obligations affect column visibility
+- `policy_required`: only tables referenced by a matching permit obligation appear; denied columns are also stripped
+
+## Virtual schema architecture
+
+The proxy uses a two-layer design to serve each user a schema that exactly matches their access rights.
+
+```
+Upstream DB → [discover] → Baseline Catalog (cached, shared)
+                                    ↓
+                          User connects + policies
+                                    ↓
+                          Per-user virtual schema (filtered)
+                                    ↓
+                          SessionContext (per-connection)
+```
+
+### 1. Baseline catalog
+
+A cached, per-datasource snapshot of the upstream schema (tables, columns, Arrow types). Shared across all connections to the same datasource. Rebuilt on catalog re-discovery, not per-query. This keeps connect-time latency low — policy filtering operates on the cached catalog, not on live upstream queries.
+
+### 2. Per-user virtual schema
+
+Derived at connect time by applying policies to the baseline catalog:
+
+1. Load all policy assignments for this datasource + user
+2. In `policy_required` mode: only tables referenced by a permit obligation are included
+3. Denied columns from any enabled policy are stripped from table schemas
+4. A filtered `SessionContext` is built with only the visible tables and columns
+
+Each connection gets its own context; the baseline catalog and connection pool are shared.
+
+### 3. Live updates
+
+When a policy is mutated (create, update, delete, enable/disable) via the admin API:
+
+- The PolicyHook's cached obligations are invalidated (query-time enforcement)
+- All active connections on the affected datasource have their SessionContexts rebuilt in the background (schema visibility)
+- Both layers update together — no reconnect required, no stale window
+- Disabling a policy removes all its effects immediately; re-enabling restores them
+- Rebuilds happen concurrently per-connection; failures log a warning but do not disconnect users
 
 ## Management vs. data permissions
 
-`is_admin` grants access to the admin API and UI only. It does **not** grant any data access through the proxy. An admin who needs to query data must have an explicit policy assigned, just like any other user.
+`is_admin` controls admin API and UI access only — it is a management plane concern. Data plane access (querying through the proxy) requires explicit policy assignment to a specific datasource.
 
-This is intentional: separating management and data permissions prevents accidental data exposure through admin accounts.
+An admin with no policy assignments sees **zero data** through the proxy — this is by design. This prevents the common pitfall where admin accounts have implicit god-mode data access.
+
+Even creating a datasource as an admin does not grant you query access to it — you must assign a policy. This separation ensures that management operations (configuring the proxy, managing users) are completely decoupled from data access decisions.
 
 ## YAML policy-as-code
 

@@ -70,12 +70,21 @@
 - **Use case**: `columns: ["*"]` combined with `schema: "*"` / `table: "orders"` would deny all columns in a table, effectively making it invisible at the column-metadata level without needing `policy_required` mode.
 - **Implementation**: check for `"*"` in the columns list inside the `column_access` deny block in `compute_user_visibility()` (`engine/mod.rs`) and `PolicyHook` (`hooks/policy.rs`). If present, expand to all column names from the matched table's Arrow schema.
 
-### Schema-level Deny Obligation (`schema_access: deny`)
+### Schema & Table-level Deny Obligation (`object_access: deny`)
 
-- **Problem**: In `open` mode with a global tenant-isolation policy (wildcard `row_filter`), there is no way to hide a specific schema from a specific user without switching the entire datasource to `policy_required` mode.
-- **Current workaround**: Switch to `policy_required` — but this forces every user to have explicit permit assignments for every table they need.
-- **Proposed**: Add a new obligation type `schema_access: deny` that feeds into `compute_user_visibility()` at connect time (alongside the existing `column_access: deny`). A deny entry for `schema: "analytics"` would cause that schema to be excluded from the user's filtered `SessionContext` — invisible in `information_schema.schemata`, sidebar, and query execution.
-- This lets operators stack a targeted schema-hide on top of an `open`-mode datasource without restructuring all assignments.
+- **Problem**: In `open` mode with a global tenant-isolation policy (wildcard `row_filter`), there is no way to hide a specific schema or table from a specific user without switching the entire datasource to `policy_required` mode. `column_access: deny` hides individual columns within a table but cannot hide entire schemas or tables from the catalog.
+- **Current workaround**: Switch to `policy_required` — but this forces every user to have explicit permit assignments for every schema and table they need.
+- **What this is NOT**: This is not about hiding columns (that's `column_access: deny`). This is about hiding entire schemas or entire tables from the catalog — they become invisible in `information_schema.schemata`/`information_schema.tables`, SQL client sidebars, and query execution.
+- **Proposed**: Add a new obligation type that feeds into `compute_user_visibility()` at connect time (alongside the existing `column_access: deny`):
+  - **Schema deny**: `schema: "analytics"` → entire schema and all its tables are excluded from the user's filtered `SessionContext`
+  - **Table deny**: `schema: "public", table: "payments"` → specific table is excluded while the rest of the schema remains visible
+- **Use cases**:
+  - Hide an internal `analytics` schema from external partners in `open` mode
+  - Hide a `payments` table from support agents who only need `orders` and `customers`
+  - Combine with glob patterns (if implemented): hide all `raw_*` schemas from non-engineering users
+- This lets operators stack targeted schema/table hiding on top of an `open`-mode datasource without restructuring all assignments.
+
+> **See also:** DS-14 (schema-level deny), DS-15 (table-level deny) in `permission_stories.md`
 
 ## UI/UX Improvements
 

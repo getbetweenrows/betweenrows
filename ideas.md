@@ -87,6 +87,115 @@
 
 > **See also:** DS-14 (schema-level deny), DS-15 (table-level deny) in `permission_stories.md`
 
+### Validate `deny` + `column_mask` Combination
+
+- **Problem**: The codebase silently ignores `column_mask` obligations on deny-effect policies. The `PolicyHook` only processes `column_mask` from permit policies, so if a user creates a deny policy with a `column_mask` obligation, it has no effect — the column is not masked.
+- **Recommendation**: Add validation in both API and UI to prevent this invalid combination:
+  - **API**: Reject policy creation/update if `effect: "deny"` and `obligation_type: "column_mask"` are both present. Return a clear validation error.
+  - **UI**: When "deny" effect is selected, hide `column_mask` from the available obligation types in the policy creation form. Show a tooltip or help text explaining why (e.g., "Column masking is not supported on deny policies").
+
+### Conditional Column Masking
+
+- **Use case**: Mask sensitive columns only when certain user attributes match a condition. For example:
+  - Mask `salary` when `user.team != 'finance'`
+  - Mask `ssn` when `user.role != 'admin'`
+  - Mask `customer_email` when `user.region != user.customer_region`
+- **Proposed syntax**:
+  ```json
+  {
+    "schema": "hr",
+    "table": "employees",
+    "column": "salary",
+    "mask_expression": "'***'",
+    "condition": "user.team != 'finance'"
+  }
+  ```
+- **Behavior**: If the condition evaluates to true, apply the mask. If false, return the original column value.
+- **Implementation**: Extend `ColumnMaskDef` with an optional `condition` field. At query time, evaluate the condition (similar to how `{user.*}` variables are substituted) and only apply the mask expression if true.
+- **Alternative**: Could also support "mask else original" semantics where a different mask is applied when condition is false, but the simple conditional masking covers most use cases.
+
+### Conditional Obligations (All Types)
+
+Should every obligation type support conditional application? This would allow policies that activate only under certain conditions:
+
+| Obligation Type | Conditional Use Case | Complexity |
+|-----------------|---------------------|------------|
+| `row_filter` | Filter rows only for non-admin users | Low - filter_expression IS the condition |
+| `column_mask` | Mask sensitive data for non-permissioned users | Medium - proposed above |
+| `column_access deny` | Hide columns from non-admin users | Medium |
+| `object_access deny` | Hide schemas/tables from certain teams | Medium |
+
+**Option A: Per-obligation condition field (recommended)**
+
+Each obligation type gets an optional `condition` field:
+
+```json
+// Row filter - condition is redundant, filter_expression IS the condition
+{
+  "obligation_type": "row_filter",
+  "condition": "user.role != 'admin'",  // redundant, but consistent
+  "definition": { "schema": "orders", "table": "*", "filter_expression": "tenant_id = {user.tenant}" }
+}
+
+// Column mask - condition adds fine-grained control
+{
+  "obligation_type": "column_mask",
+  "condition": "user.role != 'admin'",
+  "definition": { "schema": "hr", "table": "employees", "column": "ssn", "mask_expression": "'***-**-****'" }
+}
+
+// Column access deny - hide columns conditionally
+{
+  "obligation_type": "column_access",
+  "condition": "user.clearance_level < 5",
+  "definition": { "schema": "secret", "table": "files", "action": "deny", "columns": ["content"] }
+}
+
+// Object access deny - hide tables conditionally  
+{
+  "obligation_type": "object_access",
+  "condition": "user.team != 'executive'",
+  "definition": { "schema": "analytics", "action": "deny" }
+}
+```
+
+**Option B: Condition IN the obligation definition**
+
+Embed the condition inside the definition object rather than as a top-level field. More compact but less consistent across types.
+
+**Option C: Split into two policies**
+
+Current workaround: Create separate policies for each condition. For example:
+- Policy 1: `row_filter` for regular users
+- Policy 2: No obligations for admins (implicit allow)
+
+This works but creates policy explosion when combining multiple conditions.
+
+**Recommendation**: Go with **Option A** - add optional `condition` field to all obligation types. This provides:
+- Consistency across all obligation types
+- Clear semantics: obligation only applies when condition is true
+- Future-proof: easy to extend with more complex condition expressions
+- Backward compatible: condition is optional, existing policies work unchanged
+
+**Condition expression syntax**:
+- Reuse same expression parser as `filter_expression` / `mask_expression`
+- Available variables: `{user.*}` substitutions (tenant, username, id, role, team, etc.)
+- Operators: `=`, `!=`, `<`, `>`, `<=`, `>=`, `AND`, `OR`, `NOT`, `IN`
+- Examples: `user.role = 'admin'`, `user.team NOT IN ('sales', 'marketing')`, `user.clearance_level >= 3`
+
+**Priority when multiple conditions match**:
+- If multiple policies have conditions that all evaluate to true, apply all obligations (AND semantics, same as now)
+- If a condition evaluates to false, that obligation is skipped
+- Order: evaluate all conditions first, then apply matching obligations
+
+**Implementation plan**:
+1. Add `condition` field to `Obligation` struct (optional, nullable)
+2. Add condition evaluation helper (reuses existing `{user.*}` substitution logic)
+3. Update `ObligationEffects::collect()` to check condition before including each obligation
+4. Update tests to cover conditional obligations
+
+> **See also:** Related to DM-03 (mask vs. hide decision), DM-04 (canary rollout for testing policies on subset of users)
+
 ## UI/UX Improvements
 
 ### User Name, Datasource Name, Policy Name Validation
@@ -239,6 +348,13 @@ Given complexity of new policy system (interaction with DataFusion and PostgreSQ
 - 2026-03-08: Column masking obligation doesn't work - tested with SSN column, still see the whole value instead of masked
 - 2026-03-08: Row filter policy interaction bug - when two separate row filter policies are enabled (e.g., tenant filter on tenant='foo' AND state filter on state!='WY'), the result contains more rows than either policy alone. Both tenant 'foo' rows AND non-WY state rows appear, rather than rows satisfying BOTH conditions.
 - Sometimes SQL queries take long time and cause UI to hang - need performance testing, may be missing indexes
+
+### Git Commit Hook Improvements
+
+- Current: pre-commit hook runs `cargo fmt`, `cargo clippy`, `npm run typecheck`, `npm run test:run` on ALL changes (staged + unstaged)
+- Problem: Uncommitted unstaged changes cause false failures - hook fails because of code in files you haven't committed yet
+- Proposed: Modify hook to only check staged changes using `git diff --staged` or `git diff --cached`
+- This preserves ability to have WIP changes without them interfering with the commit process
 
 ## Frontend Architecture Guideline: Future-Proofing UI
 

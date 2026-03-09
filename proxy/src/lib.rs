@@ -10,4 +10,5 @@ pub mod engine;
 pub mod entity;
 pub mod handler;
 pub mod hooks;
+pub mod policy_match;
 pub mod server;

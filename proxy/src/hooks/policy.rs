@@ -135,7 +135,7 @@ fn mangle_vars(template: &str, vars: &UserVars) -> (String, Vec<(String, String)
 
 /// Convert a sqlparser AST expression to a DataFusion Expr.
 /// Handles: identifiers (column refs or placeholder vars), literals, binary ops,
-/// IS NULL, IS NOT NULL, NOT, BETWEEN, LIKE, IN LIST, and scalar functions.
+/// IS NULL, IS NOT NULL, NOT, BETWEEN, LIKE, IN LIST, CAST, and scalar functions.
 ///
 /// Pass `Some(ctx)` as `registry` to enable full scalar function lookup (required for
 /// column mask expressions). Pass `None` for row filter expressions where only
@@ -289,7 +289,12 @@ fn sql_ast_to_df_expr(
                         ))),
                     })
                     .collect::<datafusion::error::Result<Vec<_>>>()?,
-                _ => vec![],
+                FunctionArguments::None => vec![],
+                other => {
+                    return Err(datafusion::error::DataFusionError::Plan(format!(
+                        "Unsupported function arguments in mask/filter expression: {other:?}"
+                    )));
+                }
             };
 
             if let Some(reg) = registry {
@@ -311,6 +316,36 @@ fn sql_ast_to_df_expr(
                     ))),
                 }
             }
+        }
+        SqlExpr::Cast {
+            expr, data_type, ..
+        } => {
+            use datafusion::arrow::datatypes::DataType as ArrowType;
+            use datafusion::sql::sqlparser::ast::DataType as SqlDataType;
+            let inner = sql_ast_to_df_expr(expr, var_values, registry)?;
+            let arrow_type = match data_type {
+                SqlDataType::Varchar(_)
+                | SqlDataType::Text
+                | SqlDataType::Char(_)
+                | SqlDataType::String(_) => ArrowType::Utf8,
+                SqlDataType::SmallInt(_) => ArrowType::Int16,
+                SqlDataType::Integer(_) | SqlDataType::Int(_) => ArrowType::Int32,
+                SqlDataType::BigInt(_) => ArrowType::Int64,
+                SqlDataType::Float(_) | SqlDataType::Float4 | SqlDataType::Real => {
+                    ArrowType::Float32
+                }
+                SqlDataType::Double(_)
+                | SqlDataType::DoublePrecision
+                | SqlDataType::Float8
+                | SqlDataType::Float64 => ArrowType::Float64,
+                SqlDataType::Boolean => ArrowType::Boolean,
+                other => {
+                    return Err(datafusion::error::DataFusionError::Plan(format!(
+                        "Unsupported CAST target type in mask/filter expression: {other:?}"
+                    )));
+                }
+            };
+            Ok(datafusion::logical_expr::cast(inner, arrow_type))
         }
         other => Err(datafusion::error::DataFusionError::Plan(format!(
             "Unsupported expression type in filter: {other:?}"
@@ -704,7 +739,7 @@ impl PolicyError {
 
 /// Collected effects from all policies — separates "what to apply" from "how to apply it".
 struct ObligationEffects {
-    /// Combined row filter per (df_schema, table): AND within a policy, OR across policies.
+    /// Combined row filter per (df_schema, table): AND within a policy, AND across policies.
     row_filters: HashMap<(String, String), datafusion::logical_expr::Expr>,
     /// Column mask expressions keyed by column name. First (highest priority) wins.
     column_masks: HashMap<String, datafusion::logical_expr::Expr>,
@@ -2179,7 +2214,6 @@ mod tests {
             "ssn should be present (masked, not denied): {cols:?}"
         );
         // Verify all SSN values are the mask value, not original data.
-        use datafusion::arrow::array::StringArray;
         let ssn_idx = batches[0].schema().index_of("ssn").unwrap();
         let ssn_array = batches[0]
             .column(ssn_idx)
@@ -2220,7 +2254,6 @@ mod tests {
         assert!(had_effects);
         let batches = exec_plan(&ctx, result_plan).await;
         assert_eq!(total_rows(&batches), 3, "Only acme rows expected");
-        use datafusion::arrow::array::StringArray;
         let ssn_idx = batches[0].schema().index_of("ssn").unwrap();
         let ssn_array = batches[0]
             .column(ssn_idx)

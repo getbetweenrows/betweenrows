@@ -638,28 +638,7 @@ async fn create_session_context_from_catalog(
 }
 
 // ---------- visibility matching ----------
-
-/// Check whether an obligation's schema/table matches a given (df_alias, table_name) pair.
-/// Uses the same semantics as `PolicyHook::matches_schema_table()` to ensure consistency.
-fn visibility_matches(
-    obl_schema: &str,
-    obl_table: &str,
-    df_alias: &str,
-    table: &str,
-    df_to_upstream: &HashMap<String, String>,
-) -> bool {
-    if obl_table != "*" && obl_table != table {
-        return false;
-    }
-    if obl_schema == "*" {
-        return true;
-    }
-    let upstream = df_to_upstream
-        .get(df_alias)
-        .map(|s| s.as_str())
-        .unwrap_or(df_alias);
-    obl_schema == upstream
-}
+// Delegated to crate::policy_match::matches_schema_table (single source of truth).
 
 // ---------- engine cache ----------
 
@@ -940,7 +919,7 @@ impl EngineCache {
                 if let Some((obl_schema, obl_table)) = schema_table {
                     for (df_alias, vs) in &catalog.schemas {
                         for table_name in vs.tables.keys() {
-                            if visibility_matches(
+                            if crate::policy_match::matches_schema_table(
                                 obl_schema,
                                 obl_table,
                                 df_alias,
@@ -965,7 +944,7 @@ impl EngineCache {
             {
                 for (df_alias, vs) in &catalog.schemas {
                     for table_name in vs.tables.keys() {
-                        if visibility_matches(
+                        if crate::policy_match::matches_schema_table(
                             obl_schema,
                             obl_table,
                             df_alias,

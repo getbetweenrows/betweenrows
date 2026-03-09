@@ -64,7 +64,7 @@ Policy CRUD handlers also call `state.proxy_handler.rebuild_contexts_for_datasou
 `PolicyHook` replaces the old hardcoded `RLSHook`. It loads policies from the DB, caches per `(datasource_id, username)` for 60 seconds, and applies three obligation types:
 
 - **row_filter** — `Filter(expr)` node injected below the matching `TableScan` via `transform_up`. Template variables (`{user.tenant}`, `{user.username}`, `{user.id}`) are substituted as `Expr::Literal` after parsing — never interpolated as raw SQL.
-- **column_mask** — replaces the column `Expr` in the top-level `Projection` with an aliased mask expression. Async-parsed before `transform_up` via `ctx.sql("SELECT {mask} AS {col} FROM ...")`.
+- **column_mask** — replaces the column `Expr` in the top-level `Projection` with an aliased mask expression. Parsed synchronously via `sql_ast_to_df_expr(..., Some(ctx))` — sqlparser converts the mask template to a DataFusion `Expr` using the session's `FunctionRegistry` for built-in function lookup (RIGHT, LEFT, UPPER, LOWER, CONCAT, COALESCE, etc.). No standalone SQL plan is created.
 - **column_access deny** — strips denied columns from the top-level `Projection`. Wildcards (`schema: "*"`, `table: "*"`) match any schema/table.
 
 **Deny policies** short-circuit on the first match — query is rejected with a descriptive error before plan execution.

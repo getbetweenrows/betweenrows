@@ -26,6 +26,7 @@
 - Policy creation can be hard without deep understanding
 - Consider: policy templates, policy examples, or AI-assisted policy creation
 - Allow create (paste) and/or import policy from json/yaml, as a way to help users to quickly copy polices from testing env to prod env.
+- auto scan upstream tables, fetch a few rows, then use LLM to suggest a bunch of policies, users can pick to add/enable them, and/or future tweak them manually or by iterating with LLM.
 
 ### Performance of PolicyHook
 
@@ -235,6 +236,8 @@ Given complexity of new policy system (interaction with DataFusion and PostgreSQ
 - 2026-03-04: DataFusion query error - table 'postgres.pg_catalog.pg_statio_user_tables' not found
 - 2026-03-04: DataFusion query error - table 'postgres.information_schema.table_constraints' not found
 - 2026-03-04: DataFusion query error - Invalid function 'quote_ident'. Did you mean 'date_bin'?
+- 2026-03-08: Column masking obligation doesn't work - tested with SSN column, still see the whole value instead of masked
+- 2026-03-08: Row filter policy interaction bug - when two separate row filter policies are enabled (e.g., tenant filter on tenant='foo' AND state filter on state!='WY'), the result contains more rows than either policy alone. Both tenant 'foo' rows AND non-WY state rows appear, rather than rows satisfying BOTH conditions.
 - Sometimes SQL queries take long time and cause UI to hang - need performance testing, may be missing indexes
 
 ## Frontend Architecture Guideline: Future-Proofing UI

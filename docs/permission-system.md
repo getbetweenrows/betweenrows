@@ -40,7 +40,7 @@ Injects a `WHERE` clause into queries that touch the specified table.
 Use `"schema": "*"` and/or `"table": "*"` to match all schemas or tables.
 
 Multiple `row_filter` obligations on the **same policy** targeting the same table are **AND**ed together.
-`row_filter` obligations from **different permit policies** are **OR**ed together — any permit match grants access.
+`row_filter` obligations from **different permit policies** are also **AND**ed together — each policy adds a restriction, and users see the intersection of all matching policies.
 
 ### column_mask
 
@@ -131,7 +131,7 @@ Each policy assignment has a `priority` (integer, lower = higher precedence, def
 
 | Situation | Resolution |
 |---|---|
-| Multiple permit policies, same table | Row filters are OR'd |
+| Multiple permit policies, same table | Row filters are AND'd (intersection) |
 | Multiple column masks, same column | Lowest priority number wins |
 | column_access deny from any enabled policy (permit or deny) | Column is always removed |
 | Equal priority, user-specific vs wildcard | User-specific assignment wins |

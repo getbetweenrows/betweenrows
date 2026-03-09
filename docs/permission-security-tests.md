@@ -224,3 +224,49 @@ async fn policy_required_no_policy_returns_empty() { ... }
 **Defense**: `PolicyHook` now checks for an empty `new_exprs` after column stripping and returns SQLSTATE `42501` (insufficient_privilege) listing the denied columns, before attempting to build the projection.
 
 **Test**: Create a policy with `column_access deny` on `ssn`. Run `SELECT ssn FROM customers`. Verify the response is an error with SQLSTATE `42501` and not an empty result set.
+
+---
+
+### 16. `column_mask` obligation accepted on a `deny`-effect policy
+
+**Vector**: Admin creates a `deny`-effect policy with a `column_mask` obligation, expecting the column to be masked. Because `PolicyHook` only applies `column_mask` from permit policies, the mask silently has no effect — the column's real value is returned.
+
+**Defense**: `validate_no_deny_column_mask()` in `policy_handlers.rs` is called in both `create_policy` and `update_policy`. If `effect = "deny"` and any obligation has `obligation_type = "column_mask"`, the API returns HTTP `422 Unprocessable Entity` before the record is written. The admin UI hides `column_mask` from the obligation type picker when `deny` is selected and auto-removes any existing `column_mask` obligations when the effect is switched to `deny`.
+
+**Test**:
+- `create_deny_column_mask_rejected_422` — POST a deny policy with `column_mask` → `422`.
+- `update_effect_to_deny_with_existing_column_mask_rejected_422` — create a permit policy with `column_mask`, then PATCH effect to `deny` → `422`.
+- `update_obligations_column_mask_on_deny_policy_rejected_422` — create a deny policy, then PATCH obligations to add `column_mask` → `422`.
+
+---
+
+### 17. `object_access deny` — schema hidden at query time
+
+**Vector**: Admin creates an `object_access deny` obligation on schema `analytics`, expecting all tables in that schema to be invisible to the assigned user. Without the implementation, the user can still see and query `analytics.*` tables.
+
+**Defense**: `compute_user_visibility()` in `engine/mod.rs` parses `object_access` obligations and populates `denied_schemas`. `build_user_context()` skips entire schemas that appear in `denied_schemas` when building the user's filtered `SessionContext`. This applies in both `open` and `policy_required` modes.
+
+**Test**:
+- Unit: `engine::tests::test_disabled_policy_column_deny_not_applied` (existing) — verify disabled policy does not populate denied sets.
+- Integration: Create a deny policy with `object_access { schema: "analytics", action: "deny" }`. Assign to datasource for a test user. Connect as that user and run `SELECT * FROM information_schema.schemata`. Verify `analytics` is absent. Run `SELECT * FROM analytics.reports`. Verify a "schema not found" error (not data rows).
+
+---
+
+### 18. `object_access deny` — table hidden at query time
+
+**Vector**: Admin creates an `object_access deny` obligation on table `public.payments`, expecting that table to be invisible to the assigned user while the rest of `public` remains accessible.
+
+**Defense**: `compute_user_visibility()` populates `denied_tables` with `(df_alias, table_name)` pairs. `build_user_context()` skips tables in `denied_tables` when building the virtual schema, leaving all other tables in the schema visible.
+
+**Test**:
+- Integration: Create a deny policy with `object_access { schema: "public", table: "payments", action: "deny" }`. Assign to datasource. Connect as that user and run `SELECT * FROM information_schema.tables WHERE table_schema = 'public'`. Verify `payments` is absent but `orders` and `customers` are present. Run `SELECT * FROM payments`. Verify a "table not found" error.
+
+---
+
+### 19. Glob pattern matching bypassed with unexpected table name
+
+**Vector**: Admin creates a `row_filter` with `table: "raw_*"` intending to filter all tables whose names start with `raw_`. If matching is exact only, tables like `raw_events` and `raw_orders` are not filtered, leaking rows.
+
+**Defense**: `matches_pattern()` in `policy_match.rs` supports prefix glob: if the pattern ends with `*`, it uses `starts_with(prefix)` matching. `matches_schema_table()` delegates to `matches_pattern()` for both schema and table fields. The same function is used by both `PolicyHook` (query-time) and `compute_user_visibility()` (connect-time), ensuring consistent semantics.
+
+**Test**: 14 unit tests in `proxy/src/policy_match.rs` cover exact match, `*` wildcard, prefix glob on table, prefix glob on schema, combined globs, alias resolution, and non-matching cases (`orders_raw` does not match `raw_*`).

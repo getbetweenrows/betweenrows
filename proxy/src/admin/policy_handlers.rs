@@ -18,14 +18,31 @@ use crate::entity::{
 use super::{
     AdminState, ApiErr,
     dto::{
-        AssignPolicyRequest, CreatePolicyRequest, ListPoliciesQuery, ObligationResponse,
-        PaginatedResponse, PolicyAssignmentResponse, PolicyResponse, UpdatePolicyRequest,
-        validate_policy_name,
+        AssignPolicyRequest, CreatePolicyRequest, ListPoliciesQuery, ObligationRequest,
+        ObligationResponse, PaginatedResponse, PolicyAssignmentResponse, PolicyResponse,
+        UpdatePolicyRequest, validate_policy_name,
     },
     jwt::AdminClaims,
 };
 
 // ---------- helpers ----------
+
+/// Returns an error message if a deny-effect policy has any column_mask obligations.
+/// column_mask on a deny policy is silently ignored at query time, so we reject it early.
+fn validate_no_deny_column_mask(
+    effect: &str,
+    obligations: &[ObligationRequest],
+) -> Option<&'static str> {
+    if effect == "deny"
+        && obligations
+            .iter()
+            .any(|o| o.obligation_type == "column_mask")
+    {
+        Some("column_mask obligations are not supported on deny-effect policies")
+    } else {
+        None
+    }
+}
 
 fn obligation_response(m: &policy_obligation::Model) -> Result<ObligationResponse, ApiErr> {
     let definition: serde_json::Value =
@@ -269,6 +286,11 @@ pub async fn create_policy(
         ));
     }
 
+    // Validate deny + column_mask combination
+    if let Some(err) = validate_no_deny_column_mask(&body.effect, &body.obligations) {
+        return Err(ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, err));
+    }
+
     let now = Utc::now().naive_utc();
     let policy_id = Uuid::now_v7();
     let txn = state.db.begin().await.map_err(ApiErr::internal)?;
@@ -437,6 +459,30 @@ pub async fn update_policy(
             "Policy version conflict: expected {}, got {}",
             p.version, body.version
         )));
+    }
+
+    // Validate deny + column_mask combination
+    let final_effect = body.effect.as_deref().unwrap_or(&p.effect);
+    if let Some(ref new_obls) = body.obligations {
+        if let Some(err) = validate_no_deny_column_mask(final_effect, new_obls) {
+            return Err(ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, err));
+        }
+    } else if final_effect == "deny" {
+        // No new obligations provided but effect is (or stays) deny — check existing ones
+        let current_obls = policy_obligation::Entity::find()
+            .filter(policy_obligation::Column::PolicyId.eq(id))
+            .all(&state.db)
+            .await
+            .map_err(ApiErr::internal)?;
+        if current_obls
+            .iter()
+            .any(|m| m.obligation_type == "column_mask")
+        {
+            return Err(ApiErr::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "column_mask obligations are not supported on deny-effect policies",
+            ));
+        }
     }
 
     let now = Utc::now().naive_utc();
@@ -1098,6 +1144,244 @@ mod tests {
                         "effect": "allow",
                         "is_enabled": true,
                         "obligations": []
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn create_deny_column_mask_rejected_422() {
+        let db = setup_db().await;
+        let admin_id = Uuid::now_v7();
+        insert_user(&db, admin_id, "admin").await;
+
+        let token = admin_token(admin_id);
+        let res = make_router(make_state(db))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "bad-deny-mask",
+                        "effect": "deny",
+                        "is_enabled": true,
+                        "obligations": [
+                            {
+                                "obligation_type": "column_mask",
+                                "definition": {"schema": "*", "table": "*", "column": "ssn", "mask_expression": "'***'"}
+                            }
+                        ]
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn create_deny_row_filter_ok() {
+        let db = setup_db().await;
+        let admin_id = Uuid::now_v7();
+        insert_user(&db, admin_id, "admin").await;
+
+        let token = admin_token(admin_id);
+        let res = make_router(make_state(db))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "deny-row-filter",
+                        "effect": "deny",
+                        "is_enabled": true,
+                        "obligations": [
+                            {
+                                "obligation_type": "row_filter",
+                                "definition": {"schema": "*", "table": "*", "filter_expression": "1=0"}
+                            }
+                        ]
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn create_deny_column_access_ok() {
+        let db = setup_db().await;
+        let admin_id = Uuid::now_v7();
+        insert_user(&db, admin_id, "admin").await;
+
+        let token = admin_token(admin_id);
+        let res = make_router(make_state(db))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "deny-col-access",
+                        "effect": "deny",
+                        "is_enabled": true,
+                        "obligations": [
+                            {
+                                "obligation_type": "column_access",
+                                "definition": {"schema": "*", "table": "*", "columns": ["ssn"], "action": "deny"}
+                            }
+                        ]
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn create_permit_column_mask_ok() {
+        let db = setup_db().await;
+        let admin_id = Uuid::now_v7();
+        insert_user(&db, admin_id, "admin").await;
+
+        let token = admin_token(admin_id);
+        let res = make_router(make_state(db))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "permit-mask",
+                        "effect": "permit",
+                        "is_enabled": true,
+                        "obligations": [
+                            {
+                                "obligation_type": "column_mask",
+                                "definition": {"schema": "*", "table": "*", "column": "ssn", "mask_expression": "'***'"}
+                            }
+                        ]
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn update_effect_to_deny_with_existing_column_mask_rejected_422() {
+        let db = setup_db().await;
+        let admin_id = Uuid::now_v7();
+        insert_user(&db, admin_id, "admin").await;
+
+        let token = admin_token(admin_id);
+        // Create a permit policy with column_mask obligation
+        let create_res = make_router(make_state(db.clone()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "permit-with-mask",
+                        "effect": "permit",
+                        "is_enabled": true,
+                        "obligations": [
+                            {
+                                "obligation_type": "column_mask",
+                                "definition": {"schema": "*", "table": "*", "column": "ssn", "mask_expression": "'***'"}
+                            }
+                        ]
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let policy_body = body_json(create_res).await;
+        let policy_id = policy_body["id"].as_str().unwrap().to_string();
+
+        // Now try to change effect to deny (without providing new obligations)
+        let res = make_router(make_state(db))
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/policies/{policy_id}"))
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "version": 1,
+                        "effect": "deny"
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn update_obligations_column_mask_on_deny_policy_rejected_422() {
+        let db = setup_db().await;
+        let admin_id = Uuid::now_v7();
+        insert_user(&db, admin_id, "admin").await;
+
+        let token = admin_token(admin_id);
+        // Create a deny policy with no obligations
+        let create_res = make_router(make_state(db.clone()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "deny-no-obls",
+                        "effect": "deny",
+                        "is_enabled": true,
+                        "obligations": []
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let policy_body = body_json(create_res).await;
+        let policy_id = policy_body["id"].as_str().unwrap().to_string();
+
+        // Try to add a column_mask obligation to a deny policy
+        let res = make_router(make_state(db))
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/policies/{policy_id}"))
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "version": 1,
+                        "obligations": [
+                            {
+                                "obligation_type": "column_mask",
+                                "definition": {"schema": "*", "table": "*", "column": "ssn", "mask_expression": "'***'"}
+                            }
+                        ]
                     })))
                     .unwrap(),
             )

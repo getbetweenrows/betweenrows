@@ -1,4 +1,4 @@
-# Ideas
+# Roadmap
 
 ## Policy System
 
@@ -55,7 +55,7 @@
 
 > **See also:** DM-05 (verbose mode to explain why row filtered/masked), DM-04 (canary rollout for testing policies on subset of users)
 
-### Glob Pattern Matching for Schema/Table/Column Names in Obligations
+### Glob Pattern Matching for Schema/Table/Column Names in Obligations ✅ **Completed 2026-03-09**
 
 - **Current**: obligation `schema`/`table`/`column` fields support exact match or `*` (match all). No prefix/suffix patterns.
 - **Use case**: naming conventions are common — `raw_*` schemas, `tmp_*` tables, `*_id` columns. Forcing a separate obligation per object is verbose and fragile (breaks when new tables are added).
@@ -71,7 +71,7 @@
 - **Use case**: `columns: ["*"]` combined with `schema: "*"` / `table: "orders"` would deny all columns in a table, effectively making it invisible at the column-metadata level without needing `policy_required` mode.
 - **Implementation**: check for `"*"` in the columns list inside the `column_access` deny block in `compute_user_visibility()` (`engine/mod.rs`) and `PolicyHook` (`hooks/policy.rs`). If present, expand to all column names from the matched table's Arrow schema.
 
-### Schema & Table-level Deny Obligation (`object_access: deny`)
+### Schema & Table-level Deny Obligation (`object_access: deny`) ✅ **Completed 2026-03-09**
 
 - **Problem**: In `open` mode with a global tenant-isolation policy (wildcard `row_filter`), there is no way to hide a specific schema or table from a specific user without switching the entire datasource to `policy_required` mode. `column_access: deny` hides individual columns within a table but cannot hide entire schemas or tables from the catalog.
 - **Current workaround**: Switch to `policy_required` — but this forces every user to have explicit permit assignments for every schema and table they need.
@@ -87,7 +87,7 @@
 
 > **See also:** DS-14 (schema-level deny), DS-15 (table-level deny) in `permission_stories.md`
 
-### Validate `deny` + `column_mask` Combination
+### Validate `deny` + `column_mask` Combination ✅ **Completed 2026-03-09**
 
 - **Problem**: The codebase silently ignores `column_mask` obligations on deny-effect policies. The `PolicyHook` only processes `column_mask` from permit policies, so if a user creates a deny policy with a `column_mask` obligation, it has no effect — the column is not masked.
 - **Recommendation**: Add validation in both API and UI to prevent this invalid combination:
@@ -345,8 +345,8 @@ Given complexity of new policy system (interaction with DataFusion and PostgreSQ
 - 2026-03-04: DataFusion query error - table 'postgres.pg_catalog.pg_statio_user_tables' not found
 - 2026-03-04: DataFusion query error - table 'postgres.information_schema.table_constraints' not found
 - 2026-03-04: DataFusion query error - Invalid function 'quote_ident'. Did you mean 'date_bin'?
-- 2026-03-08: Column masking obligation doesn't work - tested with SSN column, still see the whole value instead of masked
-- 2026-03-08: Row filter policy interaction bug - when two separate row filter policies are enabled (e.g., tenant filter on tenant='foo' AND state filter on state!='WY'), the result contains more rows than either policy alone. Both tenant 'foo' rows AND non-WY state rows appear, rather than rows satisfying BOTH conditions.
+- 2026-03-08: Column masking obligation doesn't work ✅ **Completed 2026-03-08** - tested with SSN column, still see the whole value instead of masked
+- 2026-03-08: Row filter policy interaction bug ✅ **Completed 2026-03-08** - when two separate row filter policies are enabled (e.g., tenant filter on tenant='foo' AND state filter on state!='WY'), the result contains more rows than either policy alone. Both tenant 'foo' rows AND non-WY state rows appear, rather than rows satisfying BOTH conditions.
 - Sometimes SQL queries take long time and cause UI to hang - need performance testing, may be missing indexes
 
 ### Git Commit Hook Improvements
@@ -415,7 +415,7 @@ Benefit: This ensures that if we need to override a "v1" style for a specific ed
 
 Specific areas identified from 2026-03-08 bug fixes — worth revisiting in a dedicated refactoring pass:
 
-#### Duplicated matching logic
+#### Duplicated matching logic ✅ **Completed 2026-03-08**
 
 `matches_schema_table()` in `hooks/policy.rs` and `visibility_matches()` in `engine/mod.rs` implement the same schema/table wildcard matching predicate. They were written independently and must be kept in sync by hand. A shared utility (e.g., `engine::policy_match::matches_schema_table`) should replace both.
 

@@ -467,6 +467,8 @@ The following stories are implemented in the current release via the policy syst
 | CC-03 | ✅ | Per-table row_filter + column_mask applied in a single JOIN query |
 | AU-01 | ✅ | `GET /api/v1/audit/queries` with pagination and filtering |
 | AU-03 | ⏸ Deferred | Design decision pending: import should call the REST API via HTTP (not bypass it with direct DB writes), so that validation, version snapshots, cache invalidation, and effect validation are handled by the existing handlers. Requires adding `reqwest`, storing the admin base URL in `AdminState`, and forwarding the Bearer token. Export is straightforward but deferred together with import for consistency. |
+| DS-14 | ✅ | `object_access deny` obligation with no `table` field (schema-level); populates `denied_schemas` in `compute_user_visibility()`; schema excluded from virtual `SessionContext` in both open and policy_required modes |
+| DS-15 | ✅ | `object_access deny` obligation with `schema` + `table` field (table-level); populates `denied_tables`; table excluded from virtual `SessionContext` while rest of schema remains visible |
 
 **Key design decisions for P0:**
 - Policies assign directly to users or all users (`user_id = NULL`). No roles/groups.
@@ -476,6 +478,8 @@ The following stories are implemented in the current release via the policy syst
 - Disabled policies (`is_enabled: false`) are fully inert — no query-time enforcement, no schema hiding.
 - Version snapshots for audit: every policy mutation increments `version` and creates a `policy_version` snapshot.
 - Template variables (`{user.tenant}`, etc.) use parse-then-substitute — immune to injection.
+- `schema`/`table` fields support `"*"` (match-all) and prefix globs (e.g. `"raw_*"`) in all obligation types. Matching logic lives in `policy_match.rs` and is shared by `PolicyHook` and `compute_user_visibility()`.
+- `column_mask` on deny-effect policies is rejected at the API level (`422`) and hidden in the UI. Only `column_access` and `object_access` obligations are valid on deny policies.
 
 ### P1 (Deferred)
 

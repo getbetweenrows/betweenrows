@@ -74,6 +74,35 @@ Denied columns are unioned across all matching **enabled** policies, regardless 
 
 If the query selects **only** denied columns (e.g. `SELECT ssn FROM customers`), the proxy returns SQLSTATE `42501` (insufficient privilege) with a message identifying the restricted columns rather than returning empty rows.
 
+### object_access (deny)
+
+Hides entire schemas or individual tables from a user's virtual catalog — they become invisible in `information_schema.schemata`/`information_schema.tables`, SQL client sidebars, and query execution.
+
+**Schema-level deny** — omit `table` or set it to `"*"`:
+
+```json
+{
+  "schema": "analytics",
+  "action": "deny"
+}
+```
+
+**Table-level deny** — specify both `schema` and `table`:
+
+```json
+{
+  "schema": "public",
+  "table": "payments",
+  "action": "deny"
+}
+```
+
+`object_access` deny obligations are enforced in **both** `open` and `policy_required` modes. They are applied at connect time when building the user's virtual `SessionContext`, and take effect immediately (without reconnect) when a policy is mutated via the admin API.
+
+Unlike `column_access deny` (which strips columns from results), `object_access deny` hides the schema or table entirely — queries against a denied schema/table return a "not found" error as if the object does not exist.
+
+> **`column_mask` on deny policies is invalid.** The API returns `422 Unprocessable Entity` if you attempt to create or update a `deny`-effect policy with a `column_mask` obligation. The UI hides `column_mask` from the available obligation types when `deny` is selected. Only `column_access` and `object_access` obligations are supported on deny policies.
+
 ## Template variables
 
 Filter and mask expressions can reference the authenticated user's attributes:
@@ -95,7 +124,7 @@ becomes (at query time, for a user with tenant `acme`):
 organization_id = 'acme'
 ```
 
-## Wildcards
+## Wildcards and glob patterns
 
 `"schema": "*"` matches all schemas. `"table": "*"` matches all tables. You can combine them:
 
@@ -104,6 +133,23 @@ organization_id = 'acme'
 ```
 
 This would apply to every table in every schema in the datasource. Useful for full-access policies assigned to admins.
+
+**Prefix glob patterns** (`prefix*`) are also supported for both `schema` and `table` fields. A trailing `*` matches any value that starts with the given prefix:
+
+```json
+{ "schema": "raw_*", "table": "*", "filter_expression": "1=1" }
+```
+
+This matches `raw_events`, `raw_orders`, `raw_customers`, etc. Useful for naming-convention-based policies without listing every table individually.
+
+| Pattern | Matches | Does not match |
+|---------|---------|----------------|
+| `"*"` | everything | — |
+| `"public"` | `public` only | `public2`, `private` |
+| `"raw_*"` | `raw_orders`, `raw_events` | `orders_raw`, `orders` |
+| `"analytics_*"` | `analytics_dev`, `analytics_prod` | `public`, `raw_analytics` |
+
+Glob support applies to all obligation types: `row_filter`, `column_mask`, `column_access`, and `object_access`.
 
 ## Join-based row filters
 
@@ -339,6 +385,29 @@ Admin gets unrestricted access to all tables:
       filter_expression: "1=1"
 ```
 Assign this policy to the datasource with `user: admin_username`.
+
+### Hide a schema from a user (DS-14)
+Hide the `analytics` schema entirely from external partners while leaving other schemas accessible:
+```yaml
+- name: hide-analytics-schema
+  effect: deny
+  obligations:
+    - type: object_access
+      schema: analytics
+      action: deny
+```
+
+### Hide a table from a user (DS-15)
+Hide the `payments` table from support agents who only need `orders` and `customers`:
+```yaml
+- name: hide-payments-table
+  effect: deny
+  obligations:
+    - type: object_access
+      schema: public
+      table: payments
+      action: deny
+```
 
 ### Policy-required lockdown (CC-01)
 Set `access_mode: "policy_required"` on the datasource. Without an assigned permit policy, all tables return empty results.

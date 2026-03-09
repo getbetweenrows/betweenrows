@@ -150,7 +150,9 @@ betweenrows/
 ├── migration/src/                    SeaORM migrations (7 total)
 ├── docs/                             User-facing documentation
 │   ├── permission-system.md          Policy system user guide
-│   └── permission-security-tests.md  Security test plan
+│   ├── permission-security-tests.md  Security test plan
+│   ├── permission-stories.md         Detailed permission use cases
+│   └── roadmap.md                    Project roadmap and backlog
 ├── scripts/demo_ecommerce/           Demo schema + seed data
 ├── admin-ui/                         React admin console
 │   └── src/

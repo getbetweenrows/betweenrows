@@ -314,6 +314,18 @@ struct VisibilityFilter {
     visible_tables: Option<HashSet<(String, String)>>,
     /// Columns to hide: (df_alias, table_name, column_name).
     denied_columns: HashSet<(String, String, String)>,
+    /// Entire schemas to hide (df_alias). Applied in both open and policy_required modes.
+    denied_schemas: HashSet<String>,
+    /// Individual tables to hide: (df_alias, table_name). Applied in both modes.
+    denied_tables: HashSet<(String, String)>,
+}
+
+/// Parsed definition for an `object_access` obligation.
+#[derive(Debug, serde::Deserialize)]
+struct ObjectAccessDef {
+    schema: String,
+    table: Option<String>,
+    action: String,
 }
 
 // ---------- lazy pool ----------
@@ -861,6 +873,8 @@ impl EngineCache {
                     filter: Some(VisibilityFilter {
                         visible_tables: Some(HashSet::new()),
                         denied_columns: HashSet::new(),
+                        denied_schemas: HashSet::new(),
+                        denied_tables: HashSet::new(),
                     }),
                 });
             }
@@ -897,6 +911,8 @@ impl EngineCache {
 
         let mut visible_tables: HashSet<(String, String)> = HashSet::new();
         let mut denied_columns: HashSet<(String, String, String)> = HashSet::new();
+        let mut denied_schemas: HashSet<String> = HashSet::new();
+        let mut denied_tables: HashSet<(String, String)> = HashSet::new();
 
         for obl in &obligations {
             let def: serde_json::Value = serde_json::from_str(&obl.definition).unwrap_or_default();
@@ -966,22 +982,70 @@ impl EngineCache {
             }
         }
 
+        // object_access deny — applies in both open and policy_required modes
+        for obl in &obligations {
+            if obl.obligation_type != "object_access" {
+                continue;
+            }
+            let def: ObjectAccessDef = match serde_json::from_str(&obl.definition) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            if def.action != "deny" {
+                continue;
+            }
+            // treat absent or "*" table as schema-level deny
+            let table_opt = def.table.as_deref().filter(|t| *t != "*");
+            match table_opt {
+                None => {
+                    for df_alias in catalog.schemas.keys() {
+                        if crate::policy_match::matches_schema_only(
+                            &def.schema,
+                            df_alias,
+                            &df_to_upstream,
+                        ) {
+                            denied_schemas.insert(df_alias.clone());
+                        }
+                    }
+                }
+                Some(tbl) => {
+                    for (df_alias, vs) in &catalog.schemas {
+                        for table_name in vs.tables.keys() {
+                            if crate::policy_match::matches_schema_table(
+                                &def.schema,
+                                tbl,
+                                df_alias,
+                                table_name,
+                                &df_to_upstream,
+                            ) {
+                                denied_tables.insert((df_alias.clone(), table_name.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if catalog.access_mode == "policy_required" {
             Ok(UserVisibility {
                 filter: Some(VisibilityFilter {
                     visible_tables: Some(visible_tables),
                     denied_columns,
+                    denied_schemas,
+                    denied_tables,
                 }),
             })
         } else {
-            // Open mode: only filter if there are denied columns
-            if denied_columns.is_empty() {
+            // Open mode: only filter if there are any denies
+            if denied_columns.is_empty() && denied_schemas.is_empty() && denied_tables.is_empty() {
                 Ok(UserVisibility { filter: None })
             } else {
                 Ok(UserVisibility {
                     filter: Some(VisibilityFilter {
                         visible_tables: None,
                         denied_columns,
+                        denied_schemas,
+                        denied_tables,
                     }),
                 })
             }
@@ -1030,10 +1094,23 @@ impl EngineCache {
             if let Some(filter) = &visibility.filter {
                 let mut schemas = HashMap::new();
                 for (df_alias, vs) in &catalog.schemas {
+                    // Schema-level object_access deny
+                    if filter.denied_schemas.contains(df_alias) {
+                        continue;
+                    }
+
                     let tables: HashMap<String, VirtualCatalogTable> = vs
                         .tables
                         .iter()
                         .filter_map(|(table_name, table)| {
+                            // Table-level object_access deny
+                            if filter
+                                .denied_tables
+                                .contains(&(df_alias.clone(), table_name.clone()))
+                            {
+                                return None;
+                            }
+
                             // Table visibility check
                             if filter.visible_tables.as_ref().is_some_and(|visible_set| {
                                 !visible_set.contains(&(df_alias.clone(), table_name.clone()))

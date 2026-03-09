@@ -6,6 +6,7 @@ const OBLIGATION_TYPES = [
   { value: 'row_filter', label: 'Row Filter' },
   { value: 'column_mask', label: 'Column Mask' },
   { value: 'column_access', label: 'Column Access' },
+  { value: 'object_access', label: 'Object Access (Deny Schema/Table)' },
 ]
 
 interface ObligationFormState {
@@ -33,16 +34,24 @@ function emptyObligation(): ObligationFormState {
 }
 
 function obligationToRequest(o: ObligationFormState): ObligationRequest {
-  const base = { schema: o.schema || '*', table: o.table || '*' }
   if (o.obligation_type === 'row_filter') {
+    const base = { schema: o.schema || '*', table: o.table || '*' }
     return { obligation_type: 'row_filter', definition: { ...base, filter_expression: o.filter_expression } }
   }
   if (o.obligation_type === 'column_mask') {
+    const base = { schema: o.schema || '*', table: o.table || '*' }
     return {
       obligation_type: 'column_mask',
       definition: { ...base, column: o.column, mask_expression: o.mask_expression },
     }
   }
+  if (o.obligation_type === 'object_access') {
+    const def: Record<string, unknown> = { schema: o.schema || '*', action: 'deny' }
+    if (o.table && o.table !== '' && o.table !== '*') def.table = o.table
+    return { obligation_type: 'object_access', definition: def }
+  }
+  // default: column_access
+  const base = { schema: o.schema || '*', table: o.table || '*' }
   return {
     obligation_type: 'column_access',
     definition: {
@@ -58,7 +67,7 @@ function responseToFormState(obl: { obligation_type: string; definition: Record<
   return {
     obligation_type: obl.obligation_type,
     schema: String(d.schema ?? '*'),
-    table: String(d.table ?? '*'),
+    table: String(d.table ?? ''),
     filter_expression: String(d.filter_expression ?? ''),
     column: String(d.column ?? ''),
     columns: Array.isArray(d.columns) ? (d.columns as string[]).join(', ') : String(d.columns ?? ''),
@@ -92,6 +101,17 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
   const [obligations, setObligations] = useState<ObligationFormState[]>(
     initial?.obligations?.map(responseToFormState) ?? [],
   )
+
+  const availableObligationTypes = effect === 'deny'
+    ? OBLIGATION_TYPES.filter(t => t.value !== 'column_mask')
+    : OBLIGATION_TYPES
+
+  function handleEffectChange(newEffect: 'permit' | 'deny') {
+    setEffect(newEffect)
+    if (newEffect === 'deny') {
+      setObligations(prev => prev.filter(o => o.obligation_type !== 'column_mask'))
+    }
+  }
 
   function addObligation() {
     setObligations((prev) => [...prev, emptyObligation()])
@@ -160,12 +180,15 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
           <label className="block text-sm font-medium text-gray-700 mb-1">Effect</label>
           <select
             value={effect}
-            onChange={(e) => setEffect(e.target.value as 'permit' | 'deny')}
+            onChange={(e) => handleEffectChange(e.target.value as 'permit' | 'deny')}
             className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
             <option value="permit">Permit</option>
             <option value="deny">Deny</option>
           </select>
+          {effect === 'deny' && (
+            <p className="text-xs text-amber-600 mt-1">Column masking is not available on deny policies.</p>
+          )}
         </div>
 
         <div className="flex items-center gap-3 pt-6">
@@ -228,7 +251,7 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
                       onChange={(e) => updateObligation(idx, 'obligation_type', e.target.value)}
                       className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                     >
-                      {OBLIGATION_TYPES.map((t) => (
+                      {availableObligationTypes.map((t) => (
                         <option key={t.value} value={t.value}>
                           {t.label}
                         </option>
@@ -241,21 +264,32 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
                       type="text"
                       value={obl.schema}
                       onChange={(e) => updateObligation(idx, 'schema', e.target.value)}
-                      placeholder="* or public"
+                      placeholder={obl.obligation_type === 'object_access' ? 'analytics' : '* or public'}
                       className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                     />
-                    <p className="text-xs text-gray-400 mt-1">Use <code className="bg-gray-100 px-1 rounded">*</code> to match all schemas.</p>
+                    <p className="text-xs text-gray-400 mt-1">
+                      {obl.obligation_type === 'object_access'
+                        ? <>Use <code className="bg-gray-100 px-1 rounded">prefix*</code> for glob matching.</>
+                        : <>Use <code className="bg-gray-100 px-1 rounded">*</code> to match all schemas.</>}
+                    </p>
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Table</label>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                      Table
+                      {obl.obligation_type === 'object_access' && (
+                        <span className="text-gray-400 font-normal ml-1">(optional)</span>
+                      )}
+                    </label>
                     <input
                       type="text"
                       value={obl.table}
                       onChange={(e) => updateObligation(idx, 'table', e.target.value)}
-                      placeholder="* or orders"
+                      placeholder={obl.obligation_type === 'object_access' ? 'leave blank for entire schema' : '* or orders'}
                       className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                     />
-                    <p className="text-xs text-gray-400 mt-1">Use <code className="bg-gray-100 px-1 rounded">*</code> to match all tables.</p>
+                    {obl.obligation_type !== 'object_access' && (
+                      <p className="text-xs text-gray-400 mt-1">Use <code className="bg-gray-100 px-1 rounded">*</code> to match all tables.</p>
+                    )}
                   </div>
                 </div>
 
@@ -322,6 +356,13 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
                       Combined with <code className="bg-gray-100 px-1 rounded">schema: *</code> and <code className="bg-gray-100 px-1 rounded">table: *</code> to deny a column across all tables. The table itself remains visible — only the column is hidden.
                     </p>
                   </div>
+                )}
+
+                {obl.obligation_type === 'object_access' && (
+                  <p className="text-xs text-gray-500 mt-1">
+                    Hides the entire schema (when Table is blank) or a specific table from the user's session.
+                    Takes effect in both <em>open</em> and <em>policy-required</em> datasource modes.
+                  </p>
                 )}
               </div>
             ))}

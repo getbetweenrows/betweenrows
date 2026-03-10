@@ -1,13 +1,53 @@
 use std::collections::HashMap;
 
+// ---------- obligation definitions ----------
+
+/// Parsed definition for a `row_filter` obligation.
+#[derive(Debug, serde::Deserialize, Clone)]
+pub struct RowFilterDef {
+    pub schema: String,
+    pub table: String,
+    pub filter_expression: String,
+}
+
+/// Parsed definition for a `column_mask` obligation.
+#[derive(Debug, serde::Deserialize, Clone)]
+pub struct ColumnMaskDef {
+    pub schema: String,
+    pub table: String,
+    pub column: String,
+    pub mask_expression: String,
+}
+
+/// Parsed definition for a `column_access` obligation.
+#[derive(Debug, serde::Deserialize, Clone)]
+pub struct ColumnAccessDef {
+    pub schema: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    pub action: String,
+}
+
+/// Parsed definition for an `object_access` obligation.
+#[derive(Debug, serde::Deserialize, Clone)]
+pub struct ObjectAccessDef {
+    pub schema: String,
+    pub table: Option<String>,
+    pub action: String,
+}
+
+// ---------- pattern matching ----------
+
 /// Check whether a pattern matches a value.
 ///
-/// Supports exact match, `"*"` (match-all), and prefix glob `"prefix*"`.
-fn matches_pattern(pattern: &str, value: &str) -> bool {
+/// Supports exact match, `"*"` (match-all), prefix glob `"prefix*"`, and suffix glob `"*suffix"`.
+pub fn matches_pattern(pattern: &str, value: &str) -> bool {
     if pattern == "*" {
         true
     } else if let Some(prefix) = pattern.strip_suffix('*') {
-        value.starts_with(prefix)
+        value.starts_with(prefix) // prefix* glob
+    } else if let Some(suffix) = pattern.strip_prefix('*') {
+        value.ends_with(suffix) // *suffix glob
     } else {
         pattern == value
     }
@@ -55,6 +95,52 @@ pub fn matches_schema_only(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- matches_pattern unit tests ---
+
+    #[test]
+    fn test_matches_pattern_wildcard_any() {
+        assert!(matches_pattern("*", "hello"));
+        assert!(matches_pattern("*", ""));
+        assert!(matches_pattern("*", "anything_at_all"));
+    }
+
+    #[test]
+    fn test_matches_pattern_prefix_glob() {
+        assert!(matches_pattern("user_*", "user_id"));
+        assert!(matches_pattern("user_*", "user_name"));
+        assert!(!matches_pattern("user_*", "id_user")); // suffix doesn't match prefix glob
+        assert!(!matches_pattern("user_*", "email"));
+    }
+
+    #[test]
+    fn test_matches_pattern_suffix_glob() {
+        assert!(matches_pattern("*_date", "created_date"));
+        assert!(matches_pattern("*_date", "updated_date"));
+        assert!(!matches_pattern("*_date", "date_created"));
+        assert!(!matches_pattern("*_date", "date")); // exact "_date" not matching "*_date" against "date"
+    }
+
+    #[test]
+    fn test_matches_pattern_exact() {
+        assert!(matches_pattern("email", "email"));
+        assert!(!matches_pattern("email", "emails"));
+        assert!(!matches_pattern("email", "Email"));
+    }
+
+    #[test]
+    fn test_matches_pattern_case_sensitive() {
+        // Postgres folds identifiers to lowercase — patterns are case-sensitive by design.
+        assert!(!matches_pattern("Email", "email"));
+        assert!(matches_pattern("Email", "Email"));
+    }
+
+    #[test]
+    fn test_matches_pattern_empty() {
+        assert!(matches_pattern("", ""));
+        assert!(matches_pattern("*", ""));
+        assert!(!matches_pattern("", "nonempty"));
+    }
 
     #[test]
     fn test_exact_match() {

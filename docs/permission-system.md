@@ -151,6 +151,34 @@ This matches `raw_events`, `raw_orders`, `raw_customers`, etc. Useful for naming
 
 Glob support applies to all obligation types: `row_filter`, `column_mask`, `column_access`, and `object_access`.
 
+### Column glob patterns (`columns` field)
+
+The `columns` field of `column_access` obligations also supports glob patterns:
+
+| Column pattern | Denies | Keeps |
+|----------------|--------|-------|
+| `["*"]` | all columns in the matched table | — |
+| `["secret_*"]` | `secret_key`, `secret_token` | `email`, `id`, `ssn` |
+| `["*_name"]` | `first_name`, `last_name` | `email`, `id`, `created_at` |
+| `["ssn"]` | `ssn` only (exact match) | all others |
+| `["*_at", "secret_*"]` | `created_at`, `secret_key`, `secret_token` | `email`, `id`, `ssn` |
+
+Both prefix globs (`col_*`) and suffix globs (`*_col`) are supported for column names. Patterns are **case-sensitive** — this matches PostgreSQL's default behaviour of folding identifiers to lowercase. Glob matching for columns is applied at schema-metadata build time (connect) and at query-time projection (execute), so denied columns are hidden from both `information_schema.columns` and `SELECT` results.
+
+## Known limitations
+
+### Column deny is not table-qualified at query time
+
+`column_access deny` obligations identify denied columns by **name only**, not by `schema.table.column`. In a query that JOINs two tables both containing a column named `id`, a deny on `id` in `table_a` will also strip `id` from `table_b` in the same result set.
+
+The column is correctly hidden from schema metadata (`information_schema.columns`) on a per-table basis at connect time. Query-time stripping in `SELECT *` or explicit projections is name-based across the full projection.
+
+*Workaround:* use more specific column names to avoid collisions (e.g. `orders_id` instead of `id`), or restrict access at the table level with `object_access deny` when full table hiding is needed.
+
+### `object_access deny` uses the upstream (source) schema name, not the alias
+
+If a schema has been aliased in the datasource configuration, the `object_access deny` obligation must use the original upstream schema name — not the display alias. Using the alias will silently fail to deny access.
+
 ## Join-based row filters
 
 For tables that don't directly contain a tenant column, use `join_through` to filter via a parent table:

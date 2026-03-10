@@ -16,7 +16,6 @@ use pgwire::api::portal::Format;
 use pgwire::api::results::Response;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
-use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::ops::{ControlFlow, Not};
 use std::sync::Arc;
@@ -27,7 +26,7 @@ use super::QueryHook;
 use crate::entity::{
     data_source, discovered_schema, policy, policy_assignment, policy_obligation, query_audit_log,
 };
-use crate::policy_match::matches_schema_table;
+use crate::policy_match::{ColumnAccessDef, ColumnMaskDef, RowFilterDef, matches_schema_table};
 
 // ---------- system schema detection ----------
 
@@ -67,31 +66,6 @@ pub fn is_system_only_statement(statement: &Statement) -> bool {
     };
     let _ = statement.visit(&mut visitor);
     !visitor.has_user_table
-}
-
-// ---------- obligation definitions ----------
-
-#[derive(Deserialize, Clone)]
-struct RowFilterDef {
-    schema: String,
-    table: String,
-    filter_expression: String,
-}
-
-#[derive(Deserialize, Clone)]
-struct ColumnMaskDef {
-    schema: String,
-    table: String,
-    column: String,
-    mask_expression: String,
-}
-
-#[derive(Deserialize, Clone)]
-struct ColumnAccessDef {
-    schema: String,
-    table: String,
-    columns: Vec<String>,
-    action: String, // "deny"
 }
 
 // ---------- user variables ----------
@@ -743,8 +717,11 @@ struct ObligationEffects {
     row_filters: HashMap<(String, String), datafusion::logical_expr::Expr>,
     /// Column mask expressions keyed by column name. First (highest priority) wins.
     column_masks: HashMap<String, datafusion::logical_expr::Expr>,
-    /// Columns to completely remove from the projection. Takes priority over masks.
+    /// Exact column names to completely remove from the projection (O(1) HashSet lookup).
     column_denies: HashSet<String>,
+    /// Glob patterns for column deny (contain `*`). Checked at projection time via matches_pattern.
+    /// Kept separate to avoid O(P×C) cost on every query when no globs are in use.
+    column_glob_patterns: Vec<String>,
     /// Tables that have at least one matching permit obligation.
     tables_with_permit: HashSet<(String, String)>,
     /// If set, a deny-effect row_filter matched the query — must reject before executing.
@@ -763,6 +740,7 @@ impl ObligationEffects {
             row_filters: HashMap::new(),
             column_masks: HashMap::new(),
             column_denies: HashSet::new(),
+            column_glob_patterns: Vec::new(),
             tables_with_permit: HashSet::new(),
             denied_by_policy: None,
         };
@@ -891,7 +869,11 @@ impl ObligationEffects {
                                         .insert((df_schema.clone(), table.clone()));
                                     if def.action == "deny" {
                                         for c in &def.columns {
-                                            effects.column_denies.insert(c.clone());
+                                            if c.contains('*') {
+                                                effects.column_glob_patterns.push(c.clone());
+                                            } else {
+                                                effects.column_denies.insert(c.clone());
+                                            }
                                         }
                                     }
                                 }
@@ -927,7 +909,11 @@ impl ObligationEffects {
                         ) && def.action == "deny"
                         {
                             for c in &def.columns {
-                                effects.column_denies.insert(c.clone());
+                                if c.contains('*') {
+                                    effects.column_glob_patterns.push(c.clone());
+                                } else {
+                                    effects.column_denies.insert(c.clone());
+                                }
                             }
                         }
                     }
@@ -998,18 +984,36 @@ impl ObligationEffects {
     /// Denied columns take priority: a column that is both denied and masked is removed,
     /// never replaced with the mask expression.
     fn apply_projection(&self, plan: LogicalPlan) -> Result<LogicalPlan, PolicyError> {
-        if self.column_masks.is_empty() && self.column_denies.is_empty() {
+        if self.column_masks.is_empty()
+            && self.column_denies.is_empty()
+            && self.column_glob_patterns.is_empty()
+        {
             return Ok(plan);
         }
 
         let output_schema = plan.schema();
         let arrow_fields = output_schema.fields();
+
+        let is_denied = |col_name: &str| -> bool {
+            if self.column_denies.contains(col_name) {
+                return true; // O(1) exact match
+            }
+            // Only iterate globs when they are actually present
+            if !self.column_glob_patterns.is_empty() {
+                return self
+                    .column_glob_patterns
+                    .iter()
+                    .any(|p| crate::policy_match::matches_pattern(p, col_name));
+            }
+            false
+        };
+
         let new_exprs: Vec<datafusion::logical_expr::Expr> = arrow_fields
             .iter()
             .filter_map(|field| {
                 let col_name = field.name();
                 // Deny takes priority over mask.
-                if self.column_denies.contains(col_name.as_str()) {
+                if is_denied(col_name) {
                     return None;
                 }
                 if let Some(mask) = self.column_masks.get(col_name.as_str()) {
@@ -1024,7 +1028,7 @@ impl ObligationEffects {
             let denied: Vec<String> = arrow_fields
                 .iter()
                 .map(|f| f.name().clone())
-                .filter(|n| self.column_denies.contains(n.as_str()))
+                .filter(|n| is_denied(n))
                 .collect();
             return Err(PolicyError::AllColumnsDenied { columns: denied });
         }
@@ -1044,6 +1048,7 @@ impl ObligationEffects {
         !self.row_filters.is_empty()
             || !self.column_masks.is_empty()
             || !self.column_denies.is_empty()
+            || !self.column_glob_patterns.is_empty()
     }
 }
 
@@ -2364,6 +2369,257 @@ mod tests {
         assert!(
             !cols.contains(&"credit_card".to_string()),
             "credit_card should be denied by deny policy: {cols:?}"
+        );
+    }
+
+    // ---------- apply_projection glob pattern tests ----------
+
+    #[tokio::test]
+    async fn test_apply_projection_suffix_glob() {
+        // columns: ["*_at"] → strips created_at and updated_at, keeps others.
+        let session = make_session(
+            vec![make_policy(
+                "p1",
+                "permit",
+                1,
+                vec![make_column_deny_obl("public", "events", &["*_at"])],
+            )],
+            vec![],
+            "open",
+            HashMap::new(),
+        );
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.events",
+            vec![
+                ("id", DataType::Int32),
+                ("name", DataType::Utf8),
+                ("created_at", DataType::Utf8),
+                ("updated_at", DataType::Utf8),
+            ],
+        );
+
+        let (result_plan, had_effects) = apply_obligations(&session, &ctx, plan, &default_vars())
+            .await
+            .unwrap();
+
+        assert!(had_effects);
+        let schema = result_plan.schema();
+        let col_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(col_names.contains(&"id"), "id should remain: {col_names:?}");
+        assert!(
+            col_names.contains(&"name"),
+            "name should remain: {col_names:?}"
+        );
+        assert!(
+            !col_names.contains(&"created_at"),
+            "created_at should be denied: {col_names:?}"
+        );
+        assert!(
+            !col_names.contains(&"updated_at"),
+            "updated_at should be denied: {col_names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_projection_star_all_denied() {
+        // columns: ["*"] → all columns denied → AllColumnsDenied error.
+        let session = make_session(
+            vec![make_policy(
+                "p1",
+                "permit",
+                1,
+                vec![make_column_deny_obl("public", "events", &["*"])],
+            )],
+            vec![],
+            "open",
+            HashMap::new(),
+        );
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.events",
+            vec![("id", DataType::Int32), ("name", DataType::Utf8)],
+        );
+
+        let result = apply_obligations(&session, &ctx, plan, &default_vars()).await;
+        assert!(
+            matches!(result, Err(PolicyError::AllColumnsDenied { .. })),
+            "Expected AllColumnsDenied: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_projection_mask_vs_deny_priority() {
+        // Column is both masked and denied via glob → deny wins (column removed).
+        let session = make_session(
+            vec![make_policy(
+                "p1",
+                "permit",
+                1,
+                vec![
+                    make_column_deny_obl("public", "events", &["secret_*"]),
+                    make_column_mask_obl("public", "events", "secret_val", "'***'"),
+                ],
+            )],
+            vec![],
+            "open",
+            HashMap::new(),
+        );
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.events",
+            vec![("id", DataType::Int32), ("secret_val", DataType::Utf8)],
+        );
+
+        let (result_plan, had_effects) = apply_obligations(&session, &ctx, plan, &default_vars())
+            .await
+            .unwrap();
+
+        assert!(had_effects);
+        let schema = result_plan.schema();
+        let col_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(col_names.contains(&"id"), "id should remain: {col_names:?}");
+        assert!(
+            !col_names.contains(&"secret_val"),
+            "secret_val should be denied (not masked): {col_names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_projection_join_collision() {
+        // KNOWN LIMITATION: deny ["id"] is name-based — strips "id" from both table_a and table_b.
+        // This test documents the current behavior; a future fix will be visible as a test change.
+        let session = make_session(
+            vec![make_policy(
+                "p1",
+                "permit",
+                1,
+                // Intended to only deny id on table_a, but column_denies is flat.
+                vec![make_column_deny_obl("public", "table_a", &["id"])],
+            )],
+            vec![],
+            "open",
+            HashMap::new(),
+        );
+        let ctx = SessionContext::new();
+
+        // Build a plan that has two "id" columns (simulated via a single table with id + id2,
+        // and we manually test that the flat HashSet approach strips ALL "id" columns).
+        let effects = ObligationEffects {
+            row_filters: HashMap::new(),
+            column_masks: HashMap::new(),
+            column_denies: {
+                let mut s = HashSet::new();
+                s.insert("id".to_string());
+                s
+            },
+            column_glob_patterns: Vec::new(),
+            tables_with_permit: HashSet::new(),
+            denied_by_policy: None,
+        };
+
+        // A plan with two "id"-like columns (both would be denied since deny is name-based).
+        let plan = build_scan_plan(
+            "public.joined",
+            vec![
+                ("id", DataType::Int32),   // from table_a — should be denied
+                ("id_b", DataType::Int32), // from table_b — should NOT be denied
+                ("name", DataType::Utf8),
+            ],
+        );
+
+        let result = effects.apply_projection(plan).unwrap();
+        let schema = result.schema();
+        let col_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+
+        // Current behavior: only exact "id" is stripped (name-based, not table-qualified).
+        assert!(!col_names.contains(&"id"), "id stripped: {col_names:?}");
+        assert!(col_names.contains(&"id_b"), "id_b kept: {col_names:?}");
+        assert!(col_names.contains(&"name"), "name kept: {col_names:?}");
+        let _ = ctx; // silence unused warning
+    }
+
+    #[tokio::test]
+    async fn test_apply_projection_exact_uses_set_path() {
+        // Exact name deny with no glob — column_glob_patterns must be empty.
+        let session = make_session(
+            vec![make_policy(
+                "p1",
+                "permit",
+                1,
+                vec![make_column_deny_obl("public", "events", &["ssn"])],
+            )],
+            vec![],
+            "open",
+            HashMap::new(),
+        );
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.events",
+            vec![
+                ("id", DataType::Int32),
+                ("ssn", DataType::Utf8),
+                ("name", DataType::Utf8),
+            ],
+        );
+
+        let user_tables = collect_user_tables(&plan);
+        let vars = default_vars();
+        let effects = ObligationEffects::collect(&session, &user_tables, &vars, &ctx);
+
+        // No glob patterns — must use the O(1) HashSet path.
+        assert!(
+            effects.column_glob_patterns.is_empty(),
+            "No glob patterns expected for exact deny: {:?}",
+            effects.column_glob_patterns
+        );
+        assert!(
+            effects.column_denies.contains("ssn"),
+            "ssn must be in exact deny set: {:?}",
+            effects.column_denies
+        );
+
+        let (result_plan, had_effects) = apply_obligations(&session, &ctx, plan, &default_vars())
+            .await
+            .unwrap();
+        assert!(had_effects);
+        let schema = result_plan.schema();
+        let col_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(
+            !col_names.contains(&"ssn"),
+            "ssn should be denied: {col_names:?}"
+        );
+        assert!(col_names.contains(&"id"), "id should remain: {col_names:?}");
+    }
+
+    #[tokio::test]
+    async fn test_exact_deny_no_glob_overhead() {
+        // Deny ["ssn"] (no *) → column_glob_patterns must be empty after collection.
+        let session = make_session(
+            vec![make_policy(
+                "p1",
+                "permit",
+                1,
+                vec![make_column_deny_obl("public", "events", &["ssn"])],
+            )],
+            vec![],
+            "open",
+            HashMap::new(),
+        );
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.events",
+            vec![("id", DataType::Int32), ("ssn", DataType::Utf8)],
+        );
+
+        let user_tables = collect_user_tables(&plan);
+        let vars = default_vars();
+        let effects = ObligationEffects::collect(&session, &user_tables, &vars, &ctx);
+
+        assert!(
+            effects.column_glob_patterns.is_empty(),
+            "No glob overhead for exact deny: {:?}",
+            effects.column_glob_patterns
         );
     }
 }

@@ -320,13 +320,7 @@ struct VisibilityFilter {
     denied_tables: HashSet<(String, String)>,
 }
 
-/// Parsed definition for an `object_access` obligation.
-#[derive(Debug, serde::Deserialize)]
-struct ObjectAccessDef {
-    schema: String,
-    table: Option<String>,
-    action: String,
-}
+use crate::policy_match::ObjectAccessDef;
 
 // ---------- lazy pool ----------
 
@@ -949,31 +943,35 @@ impl EngineCache {
                 }
             }
 
-            // column_access deny from any policy hides columns from the schema
+            // column_access deny from any policy hides columns from the schema.
+            // Patterns are expanded against actual field names at build time so that
+            // glob patterns (*_name, secret_*) are resolved to exact column names here.
             if obl.obligation_type == "column_access"
-                && let (Some(obl_schema), Some(obl_table), Some("deny"), Some(cols)) = (
-                    def.get("schema").and_then(|v| v.as_str()),
-                    def.get("table").and_then(|v| v.as_str()),
-                    def.get("action").and_then(|v| v.as_str()),
-                    def.get("columns").and_then(|v| v.as_array()),
-                )
+                && let Ok(col_def) =
+                    serde_json::from_str::<crate::policy_match::ColumnAccessDef>(&obl.definition)
+                && col_def.action == "deny"
             {
                 for (df_alias, vs) in &catalog.schemas {
-                    for table_name in vs.tables.keys() {
+                    for (table_name, table) in &vs.tables {
                         if crate::policy_match::matches_schema_table(
-                            obl_schema,
-                            obl_table,
+                            &col_def.schema,
+                            &col_def.table,
                             df_alias,
                             table_name,
                             &df_to_upstream,
                         ) {
-                            for col_val in cols {
-                                if let Some(col) = col_val.as_str() {
-                                    denied_columns.insert((
-                                        df_alias.clone(),
-                                        table_name.clone(),
-                                        col.to_string(),
-                                    ));
+                            for col_pattern in &col_def.columns {
+                                for field in table.arrow_schema.fields() {
+                                    if crate::policy_match::matches_pattern(
+                                        col_pattern,
+                                        field.name(),
+                                    ) {
+                                        denied_columns.insert((
+                                            df_alias.clone(),
+                                            table_name.clone(),
+                                            field.name().clone(),
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -1876,14 +1874,40 @@ mod tests {
 
     fn make_catalog(ds_id: Uuid, ds_access_mode: &str) -> CachedCatalog {
         let mut tables = HashMap::new();
-        let arrow_schema = Arc::new(Schema::new(vec![Field::new("ssn", DataType::Utf8, true)]));
+
+        // employees: multiple columns including name, secret_, and _at suffix columns
+        let emp_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("first_name", DataType::Utf8, true),
+            Field::new("last_name", DataType::Utf8, true),
+            Field::new("email", DataType::Utf8, true),
+            Field::new("ssn", DataType::Utf8, true),
+            Field::new("secret_key", DataType::Utf8, true),
+            Field::new("secret_token", DataType::Utf8, true),
+            Field::new("created_at", DataType::Utf8, true),
+        ]));
         tables.insert(
             "employees".to_string(),
             VirtualCatalogTable {
                 table_name: "employees".to_string(),
-                arrow_schema,
+                arrow_schema: emp_schema,
             },
         );
+
+        // orders: separate table to test cross-table isolation
+        let ord_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("total", DataType::Float64, true),
+            Field::new("placed_at", DataType::Utf8, true),
+        ]));
+        tables.insert(
+            "orders".to_string(),
+            VirtualCatalogTable {
+                table_name: "orders".to_string(),
+                arrow_schema: ord_schema,
+            },
+        );
+
         let mut schemas = HashMap::new();
         schemas.insert(
             "public".to_string(),
@@ -1955,6 +1979,29 @@ mod tests {
         is_enabled: bool,
         effect: &str,
     ) {
+        insert_policy_with_custom_column_deny(
+            db,
+            ds_id,
+            user_id,
+            is_enabled,
+            effect,
+            "public",
+            "employees",
+            &["ssn"],
+        )
+        .await;
+    }
+
+    async fn insert_policy_with_custom_column_deny(
+        db: &sea_orm::DatabaseConnection,
+        ds_id: Uuid,
+        user_id: Uuid,
+        is_enabled: bool,
+        effect: &str,
+        schema: &str,
+        table: &str,
+        columns: &[&str],
+    ) {
         use crate::entity::{policy, policy_assignment, policy_obligation};
         use chrono::Utc;
         use sea_orm::ActiveModelTrait;
@@ -1979,10 +2026,10 @@ mod tests {
         .unwrap();
 
         let obl_def = serde_json::json!({
-            "schema": "public",
-            "table": "employees",
+            "schema": schema,
+            "table": table,
             "action": "deny",
-            "columns": ["ssn"]
+            "columns": columns
         })
         .to_string();
 
@@ -2069,5 +2116,375 @@ mod tests {
             "Expected 'ssn' in denied_columns, got: {:?}",
             denied
         );
+    }
+
+    // --- column glob expansion tests ---
+
+    fn denied_col_names(
+        denied: &std::collections::HashSet<(String, String, String)>,
+        table: &str,
+    ) -> Vec<String> {
+        let mut cols: Vec<String> = denied
+            .iter()
+            .filter(|(_, t, _)| t == table)
+            .map(|(_, _, c)| c.clone())
+            .collect();
+        cols.sort();
+        cols
+    }
+
+    #[tokio::test]
+    async fn test_column_deny_total_blackout() {
+        let db = setup_visibility_db().await;
+        let ds_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+
+        insert_test_user(&db, user_id).await;
+        insert_test_datasource(&db, ds_id).await;
+        insert_policy_with_custom_column_deny(
+            &db,
+            ds_id,
+            user_id,
+            true,
+            "deny",
+            "public",
+            "employees",
+            &["*"],
+        )
+        .await;
+
+        let cache = EngineCache::new(db, [0u8; 32]);
+        let catalog = make_catalog(ds_id, "open");
+        let vis = cache
+            .compute_user_visibility(user_id, &catalog)
+            .await
+            .unwrap();
+
+        let denied = vis
+            .filter
+            .expect("Expected visibility filter")
+            .denied_columns;
+        let emp_denied = denied_col_names(&denied, "employees");
+
+        // All 8 columns in employees should be denied
+        assert_eq!(
+            emp_denied,
+            vec![
+                "created_at",
+                "email",
+                "first_name",
+                "id",
+                "last_name",
+                "secret_key",
+                "secret_token",
+                "ssn"
+            ],
+            "Wildcard * should deny all columns: {emp_denied:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_column_deny_suffix_glob() {
+        let db = setup_visibility_db().await;
+        let ds_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+
+        insert_test_user(&db, user_id).await;
+        insert_test_datasource(&db, ds_id).await;
+        insert_policy_with_custom_column_deny(
+            &db,
+            ds_id,
+            user_id,
+            true,
+            "deny",
+            "public",
+            "employees",
+            &["*_name"],
+        )
+        .await;
+
+        let cache = EngineCache::new(db, [0u8; 32]);
+        let catalog = make_catalog(ds_id, "open");
+        let vis = cache
+            .compute_user_visibility(user_id, &catalog)
+            .await
+            .unwrap();
+
+        let denied = vis
+            .filter
+            .expect("Expected visibility filter")
+            .denied_columns;
+        let emp_denied = denied_col_names(&denied, "employees");
+
+        assert!(
+            emp_denied.contains(&"first_name".to_string()),
+            "first_name should be denied: {emp_denied:?}"
+        );
+        assert!(
+            emp_denied.contains(&"last_name".to_string()),
+            "last_name should be denied: {emp_denied:?}"
+        );
+        // columns NOT ending in _name must not be denied
+        for col in &[
+            "email",
+            "id",
+            "ssn",
+            "secret_key",
+            "secret_token",
+            "created_at",
+        ] {
+            assert!(
+                !emp_denied.contains(&col.to_string()),
+                "{col} should NOT be denied: {emp_denied:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_column_deny_prefix_glob() {
+        let db = setup_visibility_db().await;
+        let ds_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+
+        insert_test_user(&db, user_id).await;
+        insert_test_datasource(&db, ds_id).await;
+        insert_policy_with_custom_column_deny(
+            &db,
+            ds_id,
+            user_id,
+            true,
+            "deny",
+            "public",
+            "employees",
+            &["secret_*"],
+        )
+        .await;
+
+        let cache = EngineCache::new(db, [0u8; 32]);
+        let catalog = make_catalog(ds_id, "open");
+        let vis = cache
+            .compute_user_visibility(user_id, &catalog)
+            .await
+            .unwrap();
+
+        let denied = vis
+            .filter
+            .expect("Expected visibility filter")
+            .denied_columns;
+        let emp_denied = denied_col_names(&denied, "employees");
+
+        assert!(
+            emp_denied.contains(&"secret_key".to_string()),
+            "secret_key should be denied: {emp_denied:?}"
+        );
+        assert!(
+            emp_denied.contains(&"secret_token".to_string()),
+            "secret_token should be denied: {emp_denied:?}"
+        );
+        for col in &[
+            "first_name",
+            "last_name",
+            "email",
+            "id",
+            "ssn",
+            "created_at",
+        ] {
+            assert!(
+                !emp_denied.contains(&col.to_string()),
+                "{col} should NOT be denied: {emp_denied:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_column_deny_multiple_patterns() {
+        let db = setup_visibility_db().await;
+        let ds_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+
+        insert_test_user(&db, user_id).await;
+        insert_test_datasource(&db, ds_id).await;
+        insert_policy_with_custom_column_deny(
+            &db,
+            ds_id,
+            user_id,
+            true,
+            "deny",
+            "public",
+            "employees",
+            &["*_at", "secret_*"],
+        )
+        .await;
+
+        let cache = EngineCache::new(db, [0u8; 32]);
+        let catalog = make_catalog(ds_id, "open");
+        let vis = cache
+            .compute_user_visibility(user_id, &catalog)
+            .await
+            .unwrap();
+
+        let denied = vis
+            .filter
+            .expect("Expected visibility filter")
+            .denied_columns;
+        let emp_denied = denied_col_names(&denied, "employees");
+
+        for col in &["created_at", "secret_key", "secret_token"] {
+            assert!(
+                emp_denied.contains(&col.to_string()),
+                "{col} should be denied: {emp_denied:?}"
+            );
+        }
+        for col in &["first_name", "last_name", "email", "id", "ssn"] {
+            assert!(
+                !emp_denied.contains(&col.to_string()),
+                "{col} should NOT be denied: {emp_denied:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_column_deny_cross_table_isolation() {
+        // Deny all columns on employees — orders table must remain fully visible.
+        let db = setup_visibility_db().await;
+        let ds_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+
+        insert_test_user(&db, user_id).await;
+        insert_test_datasource(&db, ds_id).await;
+        insert_policy_with_custom_column_deny(
+            &db,
+            ds_id,
+            user_id,
+            true,
+            "deny",
+            "public",
+            "employees",
+            &["*"],
+        )
+        .await;
+
+        let cache = EngineCache::new(db, [0u8; 32]);
+        let catalog = make_catalog(ds_id, "open");
+        let vis = cache
+            .compute_user_visibility(user_id, &catalog)
+            .await
+            .unwrap();
+
+        let denied = vis
+            .filter
+            .expect("Expected visibility filter")
+            .denied_columns;
+        let orders_denied = denied_col_names(&denied, "orders");
+
+        assert!(
+            orders_denied.is_empty(),
+            "orders columns must not be denied when deny only targets employees: {orders_denied:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_column_deny_exact_regression() {
+        // Exact column name — only that one column should appear in denied.
+        let db = setup_visibility_db().await;
+        let ds_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+
+        insert_test_user(&db, user_id).await;
+        insert_test_datasource(&db, ds_id).await;
+        insert_policy_with_custom_column_deny(
+            &db,
+            ds_id,
+            user_id,
+            true,
+            "deny",
+            "public",
+            "employees",
+            &["ssn"],
+        )
+        .await;
+
+        let cache = EngineCache::new(db, [0u8; 32]);
+        let catalog = make_catalog(ds_id, "open");
+        let vis = cache
+            .compute_user_visibility(user_id, &catalog)
+            .await
+            .unwrap();
+
+        let denied = vis
+            .filter
+            .expect("Expected visibility filter")
+            .denied_columns;
+        let emp_denied = denied_col_names(&denied, "employees");
+
+        assert_eq!(
+            emp_denied,
+            vec!["ssn"],
+            "Only ssn should be denied: {emp_denied:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_column_deny_large_schema() {
+        // Table with 100 columns, deny ["*"] — all 100 must appear in denied_columns.
+        let db = setup_visibility_db().await;
+        let ds_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+
+        insert_test_user(&db, user_id).await;
+        insert_test_datasource(&db, ds_id).await;
+        insert_policy_with_custom_column_deny(
+            &db,
+            ds_id,
+            user_id,
+            true,
+            "deny",
+            "public",
+            "big_table",
+            &["*"],
+        )
+        .await;
+
+        // Build a catalog with a "big_table" of 100 columns
+        let fields: Vec<Field> = (0..100)
+            .map(|i| Field::new(format!("col_{i:03}"), DataType::Utf8, true))
+            .collect();
+        let big_schema = Arc::new(Schema::new(fields));
+        let mut tables = HashMap::new();
+        tables.insert(
+            "big_table".to_string(),
+            VirtualCatalogTable {
+                table_name: "big_table".to_string(),
+                arrow_schema: big_schema,
+            },
+        );
+        let mut schemas = HashMap::new();
+        schemas.insert(
+            "public".to_string(),
+            VirtualCatalogSchema {
+                schema_name: "public".to_string(),
+                tables,
+            },
+        );
+        let catalog = CachedCatalog {
+            datasource_id: ds_id,
+            schemas,
+            default_schema: "public".to_string(),
+            access_mode: "open".to_string(),
+        };
+
+        let cache = EngineCache::new(db, [0u8; 32]);
+        let vis = cache
+            .compute_user_visibility(user_id, &catalog)
+            .await
+            .unwrap();
+
+        let denied = vis
+            .filter
+            .expect("Expected visibility filter")
+            .denied_columns;
+        let big_denied = denied_col_names(&denied, "big_table");
+
+        assert_eq!(big_denied.len(), 100, "All 100 columns should be denied");
     }
 }

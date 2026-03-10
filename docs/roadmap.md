@@ -312,6 +312,7 @@ Given complexity of new policy system (interaction with DataFusion and PostgreSQ
 - 2026-03-04: DataFusion query error - table 'postgres.pg_catalog.pg_statio_user_tables' not found
 - 2026-03-04: DataFusion query error - table 'postgres.information_schema.table_constraints' not found
 - 2026-03-04: DataFusion query error - Invalid function 'quote_ident'. Did you mean 'date_bin'?
+- 2026-03-09: JOIN with duplicate column names (e.g., `id`) and `SELECT *` causes "Ambiguous reference to unqualified field id" error.
 - Sometimes SQL queries take long time and cause UI to hang - need performance testing, may be missing indexes
 
 ### Git Commit Hook Improvements

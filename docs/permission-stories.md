@@ -269,13 +269,13 @@ Every story carries a `Priority` label. Use these tiers when planning the roadma
 |------|-------|----------|
 | **P0 — MVP** | Must-have for first paying customer | Directly maps to PLAN.md Phases B–E. Core tenant isolation, basic column masking, column hiding, role-based access. |
 | **P1 — V1** | Required for production-grade product | Conditional masking, ABAC, basic ReBAC, audit logging, YAML policy-as-code, break-glass access. |
-| **P2 — Future** | Differentiators and edge cases | Hierarchical/recursive access, contextual guardrails (geo, time, device), migration tooling, advanced ReBAC. |
+| **P2 — Future** | Differentiators and edge cases | Hierarchical/recursive access, contextual guardrails, migration tooling, advanced ReBAC, TBAC, Logic Decoupling, Programmable Governance, JIT Access. |
 
 **P0 stories (11):** DS-01, DS-02, DS-04, DS-10, MT-01, MT-05, MT-06, RE-01, CC-01, CC-03, AU-01
 
 **P1 stories (22):** DS-03, DS-05, DS-06, DS-09, DS-12, DS-14, DS-15, MT-02, MT-03, MT-04, MT-08, RE-02, RE-06, RE-09, CX-01, CX-03, CX-06, AU-02, AU-04, AU-08, CC-07, DM-05
 
-**P2 stories (remaining):** All HI-xx; DS-07, DS-08, DS-11, DS-13, DF-01, DF-02, DF-03, DF-04, DF-05; MT-07, MT-09; RE-03–RE-05, RE-07, RE-08, RE-10; CX-02, CX-04, CX-05, CX-07–CX-10; AU-05–AU-07; CC-02, CC-04–CC-06; DM-01–DM-04
+**P2 stories (remaining):** All HI-xx; DS-07, DS-08, DS-11, DS-13, DS-16, DS-17, MT-10, LN-01, AU-09, GW-01, AC-01, AC-02, JT-01, AB-02, TEST-01, PR-01, PB-01, CR-01, SIM-01, DF-01, DF-02, DF-03, DF-04, DF-05; MT-07, MT-09; RE-03–RE-05, RE-07, RE-08, RE-10; CX-02, CX-04, CX-05, CX-07–CX-10; AU-05–AU-07; CC-02, CC-04–CC-06; DM-01–DM-04
 
 ---
 
@@ -288,7 +288,7 @@ _Objective: Controlling visibility of specific attributes within a dataset, tran
 | **DS-01** | P0 | As a **Security Lead** (Platform Admin), I want to partially mask sensitive strings (e.g., last 4 digits of SSN, or the first and last four digits of credit cards), so analysts can verify records without seeing full PII. | Masking customer PII for support agents, allowing partial verification. | Pattern-based masking; Conditional logic for string manipulation. | **Original**: `SELECT id, name, ssn, credit_card FROM customers WHERE id = 'cust-123';` <br><br> **Rendered**: `SELECT id, name, CONCAT('***-**-', RIGHT(ssn, 4)) AS ssn, CONCAT(LEFT(credit_card, 4), '****-****-', RIGHT(credit_card, 4)) AS credit_card FROM customers WHERE id = 'cust-123';` |
 | **DS-02** | P0 | As a **Finance Manager** (Manager), I want specific financial columns (e.g., `cost_price`, `margin`) to be visible to my team but replaced with `NULL` or a default value for others. | Restricting internal margin/cost data from the general Sales team or external partners. | Role-based column filtering/nullification. | **Original**: `SELECT id, sku, name, unit_price, cost_price, margin FROM products WHERE id = 'prod-456';` <br><br> **Rendered (for Sales User)**: `SELECT id, sku, name, unit_price, NULL AS cost_price, 0.00 AS margin FROM products WHERE id = 'prod-456';` |
 | **DS-03** | P1 | As a **Data Privacy Officer** (Security & Compliance), I want to automatically redact or replace patterns (emails, phone numbers, URLs) in unstructured "Notes" or `TEXT` columns to prevent accidental PII exposure. | Scrubbing PII from `support_tickets.comments` or customer feedback forms. | Regular expression-based redaction/replacement. | **Original**: `SELECT id, subject, comments FROM support_tickets WHERE id = 'ticket-789';` <br><br> **Rendered**: `SELECT id, subject, REGEXP_REPLACE(comments, '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}', '[REDACTED PII]', 'g') AS comments FROM support_tickets WHERE id = 'ticket-789';` |
-| **DS-04** | P0 | As a **Data Analyst** (Analyst), I want the proxy to return generic, non-breaking placeholders (e.g., `[RESTRICTED]`, `N/A`) instead of SQL errors when I query a column for which I lack full visibility. | Preventing Tableau/Looker dashboards or custom reports from breaking when a user lacks granular column permissions. | Error suppression with static placeholder substitution. | **Original**: `SELECT id, name, ssn FROM customers WHERE id = 'cust-123';` (User lacks `ssn` access) <br><br> **Rendered**: `SELECT id, name, '[RESTRICTED]' AS ssn FROM customers WHERE id = 'cust-123';` |
+| **DS-04** | P0 | As a **Data Analyst** (Analyst), I want the proxy to return generic, non-breaking placeholders (e.g., `[RESTRICTED]`, `N/A`) instead of SQL errors when I query a column for which I lack full visibility. | Preventing BI dashboards or custom reports from breaking when a user lacks granular column permissions. | Error suppression with static placeholder substitution. | **Original**: `SELECT id, name, ssn FROM customers WHERE id = 'cust-123';` <br><br> **Rendered**: `SELECT id, name, '[RESTRICTED]' AS ssn FROM customers WHERE id = 'cust-123';` |
 | **DS-05** | P1 | As a **Compliance Officer** (Security & Compliance), I want to implement *conditional masking* where the level of data masking varies based on both the user's role and other attributes (e.g., data sensitivity, context). | Tiered visibility for customer PII: Support sees partial phone, Managers see full phone for *their* direct reports, and Admins see full for all. | Multi-factor conditional logic (role, relationship, data sensitivity). | **Original**: `SELECT u.name, c.phone, c.email FROM users u JOIN customers c ON u.id = c.user_id WHERE c.id = 'cust-123';` <br><br> **Rendered (for Support User)**: `SELECT u.name, CONCAT('***-***-', RIGHT(c.phone, 4)) AS phone, CONCAT(LEFT(c.email, 2), '***@', SUBSTRING(c.email FROM POSITION('@' IN c.email)+1)) AS email FROM users u JOIN customers c ON u.id = c.user_id WHERE c.id = 'cust-123';` <br><br> **Rendered (for Manager of the customer's org)**: `SELECT u.name, c.phone, CONCAT(LEFT(c.email, 2), '***@', SUBSTRING(c.email FROM POSITION('@' IN c.email)+1)) AS email FROM users u JOIN customers c ON u.id = c.user_id WHERE c.id = 'cust-123' AND u.manager_id = CURRENT_USER_ID;` <br><br> **Rendered (for Admin User)**: `SELECT u.name, c.phone, c.email FROM users u JOIN customers c ON u.id = c.user_id WHERE c.id = 'cust-123';` |
 | **DS-06** | P1 | As a **Risk Manager** (Security & Compliance), I want to mask numeric values (e.g., account balances, credit scores, order totals) into predefined buckets or ranges to protect exact figures while retaining statistical utility. | Preventing exact financial data from being exposed to sales or junior analysts, only providing approximate values. | Numeric range classification with `CASE` statements. | **Original**: `SELECT id, name, total_amount FROM orders WHERE organization_id = 'org-456';` <br><br> **Rendered**: `SELECT id, name, CASE WHEN total_amount >= 10000 THEN '>= 10k' WHEN total_amount >= 5000 THEN '5k-10k' WHEN total_amount >= 1000 THEN '1k-5k' ELSE '<1k' END AS total_amount_range FROM orders WHERE organization_id = 'org-456';` |
 | **DS-07** | P2 | As a **Data Engineer** (Developer / Engineer), I want to tokenize sensitive identifiers (e.g., SSN, internal customer IDs) so that their real value is hidden, but they can still be used for joins and internal system reconciliation. | Allowing joins on PII-related columns across different datasets (e.g., `customers` and `support_tickets`) without exposing raw PII. | Consistent hashing or token lookup for sensitive columns. | **Original**: `SELECT o.id, c.name FROM orders o JOIN customers c ON o.customer_id = c.id WHERE c.ssn = '123-45-6789';` <br><br> **Rendered (using a tokenized SSN)**: `SELECT o.id, c.name FROM orders o JOIN customers c ON o.customer_id = c.id WHERE c.ssn_token = 'XYZ-TOKEN-123';` (Assumes `ssn_token` is stored/generated consistently). <br><br> **Alternative (hashing on the fly)**: `SELECT o.id, c.name FROM orders o JOIN customers c ON o.customer_id = c.id WHERE SHA256(c.ssn || 'SALT') = SHA256('123-45-6789' || 'SALT');` |
@@ -302,6 +302,8 @@ _Objective: Controlling visibility of specific attributes within a dataset, tran
 | **DF-02** | P2 | As a **Privacy Engineer** (Developer / Engineer), I want to transform JSON columns into flattened tables with restricted fields. | Handling semi-structured data. | JSON key stripping at projection time. | **Original**: `SELECT preferences FROM customers;` (JSON: `{"ssn": "123", "diet": "vegan"}`) <br><br> **Rendered**: `SELECT (preferences->>'diet') AS diet FROM customers;` (SSN key stripped). |
 | **DS-14** | P1 | As a **Platform Admin**, I want to hide an entire schema from specific users so that it is invisible in `information_schema.schemata`, SQL client sidebars, and query execution — without switching the datasource to `policy_required` mode. | Hiding an internal `analytics` or `raw_data` schema from external partners or support agents in `open` mode, while keeping all other schemas accessible. | Schema-level catalog exclusion via `object_access deny` obligation. | **Original**: `SELECT * FROM information_schema.schemata;` (User has schema deny on `analytics`) <br><br> **Rendered**: Schema `analytics` is absent from results. <br><br> **Original**: `SELECT * FROM analytics.reports;` <br><br> **Rendered**: Error `"schema 'analytics' not found"` — as if the schema does not exist. |
 | **DS-15** | P1 | As a **Security Admin** (Platform Admin), I want to hide a specific table within a schema from specific users so that it is invisible in `information_schema.tables`, SQL client sidebars, and query execution — while the rest of the schema remains visible. | Hiding the `payments` table from support agents who only need `orders` and `customers` in the `public` schema. | Table-level catalog exclusion via `object_access deny` obligation. | **Original**: `SELECT * FROM information_schema.tables WHERE table_schema = 'public';` (User has table deny on `public.payments`) <br><br> **Rendered**: Table `payments` is absent from results. <br><br> **Original**: `SELECT * FROM payments;` <br><br> **Rendered**: Error `"table 'payments' not found"` — as if the table does not exist. |
+| **DS-16** | P2 | As a **Security Architect** (Security & Compliance), I want to define a "Logic Template" (e.g., `ssn_mask`) once and apply it to multiple columns across different tables/datasources. | Updating a single mask logic template to change SSN masking from `last-4` to `last-3` across the whole platform. | Policy Logic Decoupling (Logic Templates). | **Logic Template**: `MASKING_LOGIC('***-**-' || RIGHT(val, 4))` <br><br> **Applied to**: `customers.ssn`, `employee_records.tax_id`. |
+| **DS-17** | P2 | As a **Privacy Officer** (Security & Compliance), I want to mask a column based on the value of another column in the same row or a user attribute. | Masking `credit_limit` only if `user.region` != `customer.region` (Multi-column context). | Context-Aware Masking Logic. | **Original**: `SELECT credit_limit FROM customers;` <br><br> **Rendered**: `SELECT CASE WHEN {user.region} != region THEN '[REDACTED]' ELSE credit_limit END AS credit_limit FROM customers;` |
 
 ---
 
@@ -320,6 +322,7 @@ _Objective: Enforcing hard data boundaries based on the identity of the logged-i
 | **MT-07** | P2 | As a **Warehouse Manager** (Manager), I want to see inventory data only for the warehouses I manage. | Inventory visibility per warehouse location. | **Original**: `SELECT * FROM inventory;` <br><br> **Rendered**: `SELECT * FROM inventory WHERE warehouse_id IN (SELECT warehouse_id FROM user_warehouses WHERE user_id = 'user-123');` |
 | **MT-08** | P1 | As a **Partner Integration User** (External / Partner), I want to see only shared/public data, not tenant-specific private data. | Third-party API integrations. | **Original**: `SELECT * FROM products;` <br><br> **Rendered**: `SELECT * FROM products WHERE is_public = true;` |
 | **MT-09** | P2 | As a **Compliance Manager** (Security & Compliance), I want to ensure that data from "sandbox" or "trial" tenants is completely isolated from production data. | Test environments vs Production. | **Original**: `SELECT * FROM customers;` <br><br> **Rendered**: `SELECT * FROM customers WHERE organization_id = 'org-sandbox-01' AND is_production = false;` |
+| **MT-10** | P2 | As a **Data Steward** (Security & Compliance), I want new tables to be automatically secured based on tags discovered during catalog scanning. | Auto-securing any column tagged `type:ssn` with the `ssn_mask` template without manual policy updates. | Tag-Based Access Control (TBAC) & Inherited Tagging. | **Action**: Discovery job finds column `tax_id`, identifies it as `PII` via regex, tags it. Policy `Global_PII_Mask` (targeting `tag:pii`) applies automatically. |
 
 ---
 
@@ -341,6 +344,7 @@ _Objective: Solving complex "Graph-based" authorization at the SQL layer where d
 | **RE-08** | P2 | As a **Customer** (External / Partner), I want to see only my own orders, regardless of tenant isolation rules in some contexts (for portal access). | B2B Customer Portal viewing their own history. | **Original**: `SELECT * FROM orders;` <br><br> **Rendered**: `SELECT * FROM orders WHERE customer_id = 'customer-portal-user-id';` (Mapping customer ID to user ID). |
 | **RE-09** | P1 | As a **Procurement Manager** (Manager), I want to see all supplier contracts where either I am the owner OR I am a member of the buying group. | Complex multi-group ownership. | **Original**: `SELECT * FROM supplier_contracts;` <br><br> **Rendered**: `SELECT * FROM supplier_contracts sc WHERE sc.owner_id = 'user-123' OR sc.id IN (SELECT contract_id FROM contract_groups WHERE group_id IN (SELECT group_id FROM group_members WHERE user_id = 'user-123'));` |
 | **RE-10** | P2 | As an **HR Manager** (Manager), I want to see employee data only for employees who are in the same legal entity as me. | Filtering across subsidiaries. | **Original**: `SELECT * FROM employees;` <br><br> **Rendered**: `SELECT * FROM employees e WHERE e.legal_entity_id = (SELECT legal_entity_id FROM users WHERE id = 'user-hr');` |
+| **LN-01** | P2 | As a **Security Admin** (Platform Admin), I want security rules to "stick" to data as it flows through CTEs, Subqueries, and Views. | Ensuring a mask applied to `raw_users.email` is still enforced even if the user queries a View or uses a complex CTE joining that table. | Sticky Security (Security Lineage). | **Original**: `WITH t AS (SELECT * FROM raw_users) SELECT email FROM t;` <br><br> **Rendered**: `WITH t AS (SELECT id, CONCAT(LEFT(email, 1), '***') AS email FROM raw_users) SELECT email FROM t;` |
 
 ---
 
@@ -393,6 +397,17 @@ _Objective: Maintaining visibility, compliance, and system health through compre
 | **AU-06** | P2 | As a **DBA** (Platform Admin), I want to see which columns are being masked most frequently. | Tuning masking rules. | **Dashboard**: `Top Masked Columns: credit_card (1000 hits), ssn (500 hits), cost_price (200 hits).` |
 | **AU-07** | P2 | As a **Legal Hold Manager** (Auditor), I want to ensure specific data cannot be deleted even by admins. | Litigation hold. | **Original**: `DELETE FROM emails WHERE id = 'email-evidence';` <br><br> **Rendered**: Error "Legal hold active on this record. Deletion prohibited." |
 | **AU-08** | P1 | As a **GDPR Officer** (Security & Compliance), I want to know exactly who accessed a specific customer's PII in the last 30 days. | Right of Access request fulfillment. | **Query**: `SELECT user_id, timestamp FROM audit_logs WHERE table_name = 'customers' AND resource_id = 'cust-123' AND action = 'SELECT' AND timestamp > NOW() - INTERVAL '30 days';` |
+| **AU-09** | P2 | As a **Platform Admin**, I want to delegate policy management for a specific "Data Domain" to a business owner without giving them query access to the data. | A Finance Lead managing Finance masking rules without being able to run queries themselves. | Delegated Policy Administration & Data Domains. | **Action**: Finance Lead logs into Admin UI, sees only Finance Datasources, can create/edit policies. SQL proxy still blocks their queries. |
+| **GW-01** | P2 | As a **Data Analyst** (Analyst), I want to request access to a hidden resource directly from the proxy interface. | Analyst sees a "Hidden" table in the sidebar and clicks a button to trigger an approval workflow. | Access Request Workflows (Self-Service). | **Action**: Analyst clicks "Request Access" in UI. Admin receives notification. Upon approval, a new Policy Assignment is created. |
+| **AC-01** | P2 | As a **Data Custodian** (Security & Compliance), I want a visual heatmap of PII exposure across all datasources. | Generating a dashboard showing which tables contain high concentrations of sensitive data based on auto-discovery tags. | PII Heatmap & Data Sensitivity Discovery. | **Dashboard**: Heatmap showing "Staging: Low Risk", "Production: High Risk (500 untagged PII columns)". |
+| **AC-02** | P2 | As a **Security Admin** (Platform Admin), I want the system to automatically tag columns based on data patterns (e.g., Credit Card numbers) during discovery scans. | Automating the tagging process so that 100 new tables are secured without manual tagging. | Auto-Classification & Pattern Matching. | **Action**: Scan finds column `cc_val`, detects Luhn algorithm match, tags as `type:credit_card`. |
+| **JT-01** | P2 | As an **Analyst**, I want to request temporary (e.g., 2-hour) unmasked access to a sensitive table for a specific incident. | Just-in-Time elevation for emergency troubleshooting. | JIT Access & Temporary Policy Assignments. | **Action**: Analyst requests access in UI with ticket INC-999. Approved. Proxy allows unmasked access for 120 minutes. |
+| **AB-02** | P2 | As a **SaaS Developer** (Platform Admin), I want to sync user attributes directly from our OIDC provider to drive policies. | Eliminating manual user attribute management by using existing identity claims. | ABAC Attribute Sync. | **Policy**: `WHERE cost_center = {user.identity_cost_center}`. |
+| **TEST-01**| P2 | As an **Admin**, I want to run a query "as" another user to verify that their masking rules are working as expected. | Debugging complex policy interactions without needing user passwords. | Policy Impersonation (Sudo). | **Action**: Admin selects 'Connect as Bob', runs `SELECT * FROM users`, sees masked data exactly as Bob would. |
+| **PR-01** | P2 | As a **Security Engineer** (Platform Admin), I want to use a script (Rhai) to implement complex masking logic that SQL cannot easily express. | Calling an external API or using a custom decryption library inside the masking logic. | Programmable Obligations (Scripting). | **Script**: `fn mask(val) { if val.len() > 10 { call_vault_decrypt(val) } else { val } }` |
+| **PB-01** | P2 | As a **Compliance Officer** (Security & Compliance), I want users to select a "Purpose" for their query (e.g., 'Audit') to unlock specific data lenses, with external validation. | Enforcing Purpose Limitation by requiring a valid ticket ID for sensitive access. | Purpose-Based Access Control (PBAC). | **Original**: `SELECT * FROM payroll;` (Purpose: Audit, Ticket: INC-123). <br><br> **Rendered**: unmasked data (if Ticket INC-123 is valid). |
+| **CR-01** | P2 | As a **Data Provider**, I want to allow two parties to join their data on a sensitive key (like SSN) without either party seeing the key. | Enabling "Clean Room" analytics where the join key is strictly prohibited from selection or filtering. | Clean Room Joins (Blind Joins). | **Policy**: Allow JOIN on `ssn`, but `ssn` is hard-denied for SELECT. |
+| **SIM-01**| P2 | As a **Security Architect**, I want to simulate a policy change against historical query logs to see what will break before applying it. | Reducing risk of "Breaking Prod" by running "What-If" analysis on real traffic. | Policy Impact Simulation. | **Output**: "Applying this rule will break 5 BI reports using column 'margin'." |
 
 ---
 
@@ -445,8 +460,6 @@ _Scenarios where multiple rules must fire correctly on a single query. These val
 
 ---
 
----
-
 ## Implementation Status
 
 ### P0 (Implemented)
@@ -454,44 +467,15 @@ _Scenarios where multiple rules must fire correctly on a single query. These val
 The following stories are implemented in the current release via the policy system:
 
 | Story | Status | Implementation |
-|---|---|---|
-| DS-01 | ✅ | `column_mask` obligation with partial SSN expression |
-| DS-02 | ✅ | `column_access` deny on `cost_price`, `margin` |
-| DS-04 | ✅ | `column_mask` obligation with `'[RESTRICTED]'` literal |
-| DS-10 | ✅ | `column_access` deny on `ssn`, `credit_card` |
-| MT-01 | ✅ | `row_filter` with `organization_id = {user.tenant}` |
-| MT-05 | ✅ | Explicit `row_filter: 1=1` policy assigned to admin user |
-| MT-06 | ✅ | Multiple row_filter obligations OR'd across permit policies |
-| RE-01 | ✅ | `row_filter` with `join_through` for indirect tenant column |
-| CC-01 | ✅ | `access_mode: "policy_required"` on datasource |
-| CC-03 | ✅ | Per-table row_filter + column_mask applied in a single JOIN query |
-| AU-01 | ✅ | `GET /api/v1/audit/queries` with pagination and filtering |
-| AU-03 | ⏸ Deferred | Design decision pending: import should call the REST API via HTTP (not bypass it with direct DB writes), so that validation, version snapshots, cache invalidation, and effect validation are handled by the existing handlers. Requires adding `reqwest`, storing the admin base URL in `AdminState`, and forwarding the Bearer token. Export is straightforward but deferred together with import for consistency. |
-| DS-14 | ✅ | `object_access deny` obligation with no `table` field (schema-level); populates `denied_schemas` in `compute_user_visibility()`; schema excluded from virtual `SessionContext` in both open and policy_required modes |
-| DS-15 | ✅ | `object_access deny` obligation with `schema` + `table` field (table-level); populates `denied_tables`; table excluded from virtual `SessionContext` while rest of schema remains visible |
-
-**Key design decisions for P0:**
-- Policies assign directly to users or all users (`user_id = NULL`). No roles/groups.
-- `is_admin` grants management API access only — does NOT bypass data policies.
-- Datasource `access_mode`: `"open"` (default) or `"policy_required"`.
-- `column_access deny` obligations are enforced on **both** permit and deny-effect policies. Deny policies with `row_filter` obligations short-circuit with an error; deny policies with `column_access deny` strip columns silently.
-- Disabled policies (`is_enabled: false`) are fully inert — no query-time enforcement, no schema hiding.
-- Version snapshots for audit: every policy mutation increments `version` and creates a `policy_version` snapshot.
-- Template variables (`{user.tenant}`, etc.) use parse-then-substitute — immune to injection.
-- `schema`/`table` fields support `"*"` (match-all) and prefix globs (e.g. `"raw_*"`) in all obligation types. Matching logic lives in `policy_match.rs` and is shared by `PolicyHook` and `compute_user_visibility()`.
-- `column_mask` on deny-effect policies is rejected at the API level (`422`) and hidden in the UI. Only `column_access` and `object_access` obligations are valid on deny policies.
-
-### P1 (Deferred)
-
-The following story categories require roles/groups or advanced features not yet implemented:
-
-| Category | Examples | Notes |
-|---|---|---|
-| Role-based policies | DS-03, DS-05, DS-06, DS-07, DS-08, DS-09 | Requires roles/groups (P1) |
-| Group-based policies | MT-02, MT-03, MT-04 | Requires group membership (P1) |
-| Dynamic/context-based | CX-01 (break-glass), CX-02, CX-03, CX-04, CX-05, CX-06 | Requires session context / time-based rules (P1) |
-| ReBAC | RB-01 through RB-05 | Relationship-based access control (P1+) |
-| ABAC | AB-01 through AB-05 | Attribute-based access control (P1) |
-| Composition (CO) | All CO stories | Most depend on roles — P1 |
-
-_End of Document_
+|-------|--------|----------------|
+| DS-01 | ✅ | `column_mask` obligation |
+| DS-02 | ✅ | `column_mask` obligation (using `NULL` or literal) |
+| DS-04 | ✅ | `column_mask` obligation (using literal string) |
+| DS-10 | ✅ | `column_access deny` obligation |
+| MT-01 | ✅ | `row_filter` obligation |
+| MT-05 | ✅ | Admin-assigned "Allow All" policy |
+| MT-06 | ✅ | `row_filter` using `IN (...)` |
+| RE-01 | ✅ | `join_through` in `row_filter` |
+| CC-01 | ✅ | `access_mode: policy_required` |
+| CC-03 | ✅ | Multi-policy composition |
+| AU-01 | ✅ | Audit logging (original vs rewritten) |

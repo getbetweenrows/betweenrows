@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ---------- obligation definitions ----------
 
@@ -51,6 +51,19 @@ pub fn matches_pattern(pattern: &str, value: &str) -> bool {
     } else {
         pattern == value
     }
+}
+
+/// Expand column patterns (including globs) against actual column names.
+///
+/// Returns the set of concrete column names matching any pattern.
+/// Consistent with `matches_schema_table` / `matches_schema_only` for pattern semantics.
+/// Called by `PolicyHook` at `TableScan` time and by the engine at catalog-build time.
+pub fn expand_column_patterns(patterns: &[String], actual_columns: &[&str]) -> HashSet<String> {
+    actual_columns
+        .iter()
+        .filter(|col| patterns.iter().any(|p| matches_pattern(p, col)))
+        .map(|col| col.to_string())
+        .collect()
 }
 
 /// Check whether an obligation's (schema, table) pattern matches a DataFusion table scan.

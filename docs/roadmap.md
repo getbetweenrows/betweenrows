@@ -2,6 +2,22 @@
 
 ## Policy System
 
+### Zero-Trust Column Model & JOIN Fix Verification Suite
+
+- **TC-JOIN-01 (JOIN Collision)**: JOIN `customers` and `orders`. Both have an `email` column. **Deny** `email` on `customers` only. Verify `orders.email` is visible while `customers.email` is stripped.
+- **TC-JOIN-02 (Multi-Table JOIN)**: JOIN 3 tables (`a`, `b`, `c`) all with `id`. **Allow** `id` on `b` only. Verify the result set contains exactly one `id` column (from `b`).
+- **TC-JOIN-03 (Aliasing)**: `SELECT c.email FROM customers AS c`. **Deny** `email` on `customers`. Verify `c.email` is stripped correctly (rewriter resolves alias `c` to `customers`).
+- **TC-ZT-01 (Implicit Blackout)**: Permit policy with `row_filter` only (no `allow` obligations). Verify `AllColumnsDenied` error (Whitelist activated but empty).
+- **TC-ZT-02 (Explicit Whitelist)**: Permit policy with `allow ["id", "name"]`. Verify only `id` and `name` are returned.
+- **TC-ZT-03 (Wildcard Whitelist)**: Permit policy with `allow ["*"]` + `row_filter`. Verify all columns are visible.
+- **TC-ZT-04 (Sidebar Sync)**: Engine `compute_user_visibility` with `row_filter` only. Verify table exists in sidebar but has 0 columns.
+- **TC-DENY-01 (Deny Wins)**: Policy A: `allow ["email"]`. Policy B: `deny ["email"]`. Verify `email` is stripped.
+- **TC-DENY-02 (Absolute Veto)**: Policy A: `allow ["id"]`. Policy B: `deny ["*"]`. Verify 0 columns visible (Deny `*` wins over explicit allow).
+- **TC-PLAN-01 (CTE Leak)**: `WITH t AS (SELECT * FROM users) SELECT ssn FROM t`. **Deny** `ssn`. Verify `ssn` is stripped inside the CTE definition (at the scan level).
+- **TC-PLAN-02 (Subquery in FROM)**: `SELECT sub.ssn FROM (SELECT * FROM users) AS sub`. **Deny** `ssn`. Verify inner `SELECT *` is rewritten to exclude `ssn`.
+- **TC-GLOB-01 (Suffix Glob)**: `deny ["*_at"]` against `created_at`, `updated_at`, `name`. Verify `name` remains; `*_at` columns are stripped.
+- **TC-GLOB-03 (Case Sensitivity)**: Deny `["Email"]` on a Postgres `email` column. Verify `email` survives (patterns are case-sensitive to match Postgres).
+
 ### Visibility follows Access
 
 - Differentiate metadata access (virtual schema) and data access (cells, values)
@@ -21,12 +37,130 @@
 
 > **See also:** AU-03 (YAML policy-as-code), CC-07 (version control & audit trail for policy changes)
 
+### Policy-Level Shadow Mode
+
+Shadow Mode is a "dry-run" state for individual SQL security policies. Instead of blocking a query that violates a rule, the proxy allows it but logs exactly what would have happened.
+
+- **Action Status**: Each policy can be set to `Enforce` (Block/Mask) or `Shadow` (Log only).
+- **Risk Mitigation**: Eliminates the fear of "breaking prod" by testing new constraints against live traffic without blocking.
+- **Policy Refinement**: Helps identify false positives before enforcement.
+- **Unified Logging**: Shadow matches look identical to blocks in logs, allowing users to visualize their security posture before committing.
+
+> **See also:** DM-04 (canary rollout for testing policies on subset of users)
+
 ### Policy Creation Assistant
 
 - Policy creation can be hard without deep understanding
 - Consider: policy templates, policy examples, or AI-assisted policy creation
 - Allow create (paste) and/or import policy from json/yaml, as a way to help users to quickly copy polices from testing env to prod env.
 - auto scan upstream tables, fetch a few rows, then use LLM to suggest a bunch of policies, users can pick to add/enable them, and/or future tweak them manually or by iterating with LLM.
+
+### Logic Decoupling & Tag-Based Access Control (TBAC)
+
+- **Policy Templates**: Separate transformation logic (e.g., `REGEXP_REPLACE`) from policy definitions. Allows updating logic in one place for many policies.
+- **Metadata Tagging Layer**: Allow admins and auto-scanners to apply tags (e.g., `pii`, `financial`, `deprecated`) to DataSources, Schemas, Tables, and Columns.
+- **Inherited Tagging**: Tags applied to a Database or Table automatically flow down to child Columns unless overridden.
+- **Tag-Based Obligations**: Update `policy_match.rs` to allow targeting obligations via tag patterns (e.g., `"target": "tag:pii"`) instead of just names.
+- **Context-Aware Masking**: Support multi-column context in masking expressions (e.g., mask `salary` based on `region` column value).
+- **Auto-Classification**: Add pattern-matching scanners (Regex, Luhn, NLP) to the Discovery Job to automatically tag sensitive data.
+
+### Governance, Security Lineage & JIT
+
+- **Sticky Security (Security Lineage)**: Ensure security rules "stick" to data as it moves through CTEs, subqueries, and views.
+- **Data Domains**: Group DataSources into "Domains" (e.g., Finance, HR) for delegated administration.
+- **Delegated Security**: Implement permissions on the policies themselves—allow a user to manage policies for a domain without having query access to that domain.
+- **Invisible Security (Stealth Mode)**: Option to hide the "shape" of security logic from `EXPLAIN` plans and audit logs to prevent leaking internal security posture (Secure Virtual Views).
+- **Just-in-Time (JIT) Access**: Support temporary, windowed policy assignments (e.g., 2-hour elevation) triggered by approval workflows or ticket validation.
+
+### Programmable Governance (The "Leapfrog" Layer)
+
+- **Programmable Obligations (Rhai/Wasm)**: Allow Policy Templates to be written in a sandboxed scripting language for logic too complex for SQL (e.g., custom decryption, calling external risk APIs).
+- **Validated Purpose (PBAC)**: Move beyond roles to "Purposes." Require a validated claim (e.g., a ticket ID from a ticketing system) to unlock specific data lenses.
+- **Clean Room Joins**: Support "Blind Joins" where two tables can be joined on a sensitive key, but the proxy guarantees the key cannot be leaked in results or filters.
+- **User Attribute Sync**: Dynamically pull ABAC attributes (Region, Department, Clearance) from identity claims at connect time.
+- **Impact Analysis Engine**: Run a "What-If" simulation of a policy change against historical query logs to identify breaking changes before enforcement.
+- **Policy Impersonation (Sudo Mode)**: Admin tool to "Run as User X" to verify policy enforcement and visibility in real-time.
+
+---
+
+## Deep Dive: Technical Concepts & Industry Parity
+
+This section details the core mechanisms we are implementing to achieve parity with enterprise standards and beyond.
+
+### 1. Tag-Based Access Control (TBAC) & Inherited Tagging
+**Design Pattern: Metadata-Driven Security**
+
+**Concept:** Instead of mapping security rules to object names, rules target **Tags**. Objects (DataSources, Tables, Columns) are labeled with metadata.
+
+**How it works:**
+1.  **Tag Assignment:** An admin or auto-scanner applies a tag like `pii:true` or `classification:sensitive` to an entity.
+2.  **Inheritance Logic:** Tags follow a tree structure. A tag on a `DataSource` flows to all its `Schemas`. A tag on a `Table` flows to all its `Columns`. 
+    *   *Example:* If `table:customers` is tagged `sensitivity:high`, every column within it (email, name, id) inherits that tag unless explicitly overridden.
+3.  **Policy Evaluation:** The `PolicyHook` resolves the tags for every `TableScan` and `Column` in the logical plan. If an obligation targets `tag:pii`, it applies to every column that carries or inherits that tag.
+4.  **Benefits:** Zero-touch security. Adding a new table to the database requires zero policy updates if it follows a tagged naming convention or inherits from a tagged schema.
+
+### 2. Logic Decoupling (Policy Templates)
+**Design Pattern: Logic-Assignment Separation**
+
+**Concept:** Separation of **Transformation Logic** (The "How") from **Security Mapping** (The "Where").
+
+**How it works:**
+1.  **Logic Template:** Define a reusable SQL expression snippet, e.g., `Template(name="last_4_mask", logic="'***-**-' || RIGHT(val, 4)")`.
+2.  **Assignment:** A `Policy` links a `Column` (or `Tag`) to a `Template`.
+3.  **Late Binding:** At query time, the proxy fetches the template logic and binds it to the specific column being queried.
+4.  **Benefits:** Maintainability. Changing the legal requirement for SSN masking (e.g., from last-4 to last-3) is done in one single template, instantly updating every column assigned to it.
+
+### 3. Context-Aware Masking
+**Design Pattern: Multi-Column Visibility**
+
+**Concept:** Masking logic that depends on other data in the same row or user attributes.
+
+**How it works:**
+1.  **Expression Context:** The `mask_expression` is no longer limited to the column itself (`val`). It can reference any column from the source table.
+2.  **Logic Example:** `CASE WHEN user.role = 'manager' OR department = user.department THEN salary ELSE '***' END`.
+3.  **Implementation:** The proxy injects a `CASE` statement into the projection that includes the necessary "context columns" from the underlying scan.
+
+### 4. Sticky Security (Security Lineage)
+**Design Pattern: Plan-Aware Protection**
+
+**Concept:** Security constraints are not bypassed by "wrapping" a table in a View, CTE, or Subquery.
+
+**How it works:**
+1.  **Recursive Rewriting:** The `PolicyHook` doesn't just look at the top-level table. It recursively walks the DataFusion `LogicalPlan`.
+2.  **Metadata Propagation:** If a leaf node (TableScan) has a mask applied, that mask "infects" the column as it passes through CTEs and Views.
+3.  **Implementation:** Uses `transform_up` to ensure that even if a user queries `SELECT email FROM (SELECT * FROM users)`, the `email` column is masked at the source `users` scan before reaching the outer query.
+
+### 5. Attribute-Based Access Control (ABAC) & Sync
+**Design Pattern: Identity-Driven Security**
+
+**Concept:** Using a flexible map of user properties (Attributes) rather than just a flat Role, synced from identity providers.
+
+**How it works:**
+1.  **Identity Registry:** Users carry a JSON bundle of attributes (e.g., `{"clearance": 3, "region": "EMEA"}`).
+2.  **IDP Sync:** At handshake, the proxy extracts claims from the identity token (e.g., `groups`, `department`) and populates the session attributes.
+3.  **Dynamic Substitution:** Every `{user.attribute}` placeholder in a policy is replaced at query time with the corresponding value from the user's session.
+
+### 6. Validated Purpose (PBAC) & JIT Elevation
+**Design Pattern: Just-in-Time Governance**
+
+**Concept:** Enforcing Purpose Limitation and temporary access elevation.
+
+**How it works:**
+1.  **Purpose Handshake:** The client connection includes metadata: `purpose=audit` and `justification=INC-123`.
+2.  **External Validation:** The proxy calls a webhook (e.g., to a ticketing system) to verify that `INC-123` is a valid, open ticket assigned to this user.
+3.  **Temporary Lenses:** If validated, the "Audit Lens" is activated for a limited window (e.g., 2 hours). After expiry, the connection automatically reverts to a masked/restricted state without requiring a reconnect.
+
+### 7. Programmable Obligations (Scripted Logic)
+**Design Pattern: Logic-as-Code**
+
+**Concept:** Moving beyond static SQL for governance logic.
+
+**How it works:**
+1.  **Scripting Sandbox:** Admins can upload small scripts (e.g., Rhai) as "Policy Templates."
+2.  **Runtime Execution:** The proxy registers these scripts as UDFs (User Defined Functions) in the plan.
+3.  **Use Cases:** Calling an external vault for decryption, applying custom NLP models for scrubbing, or performing complex calculations that SQL cannot handle efficiently.
+
+---
 
 ### Performance of PolicyHook
 
@@ -55,11 +189,9 @@
 
 > **See also:** DM-05 (verbose mode to explain why row filtered/masked), DM-04 (canary rollout for testing policies on subset of users)
 
-### Wildcard `*` Support for Column Names in `column_access`
+### Wildcard `*` Support for Column Names in `column_access` ✅ Resolved
 
-- **Current**: `column_access` columns field is a plain list of exact column names — no wildcard support.
-- **Use case**: `columns: ["*"]` combined with `schema: "*"` / `table: "orders"` would deny all columns in a table, effectively making it invisible at the column-metadata level without needing `policy_required` mode.
-- **Implementation**: check for `"*"` in the columns list inside the `column_access` deny block in `compute_user_visibility()` (`engine/mod.rs`) and `PolicyHook` (`hooks/policy.rs`). If present, expand to all column names from the matched table's Arrow schema.
+- **Implemented 2026-03-11**: `column_access` columns field now supports glob patterns (`"*"`, `"prefix_*"`, `"*_suffix"`) via `expand_column_patterns()` in `policy_match.rs`. Used in both `PolicyHook` (per-TableScan via `apply_projection_qualified`) and `compute_user_visibility()` in `engine/mod.rs`. Full wildcard `["*"]` denies all columns, glob patterns match subsets.
 
 ### Conditional Column Masking
 
@@ -162,6 +294,25 @@ This works but creates policy explosion when combining multiple conditions.
 4. Update tests to cover conditional obligations
 
 > **See also:** Related to DM-03 (mask vs. hide decision), DM-04 (canary rollout for testing policies on subset of users)
+
+## AI Integration & Model Context Protocol (MCP)
+
+### Model Context Protocol (MCP) Server Integration
+
+Integrate an MCP server into the SQL proxy to turn it into a secure gateway for AI agents (Claude, ChatGPT, Gemini). This allows LLMs to interact with databases through a standardized protocol while inheriting all fine-grained access control (FGAC) and security policies.
+
+- **Schema Discovery**: LLMs can safely discover allowed tables/columns via MCP "Resources" or tools, constrained by user-specific policies.
+- **Secure Query Execution**: Implement a `run_secure_query` tool that intercepts AI-generated SQL and applies FGAC before execution.
+- **Shadow Mode for AI**: Visualize and audit SQL generated by LLMs to identify potential policy violations or "sneaky" access attempts.
+- **Ecosystem Connectivity**: Enable direct connection from Claude Desktop, VS Code, and other AI agents to the secure proxy.
+
+**Product Vision**: "BetweenRows: The Firewall for AI-to-SQL Interactions. Policies you can trust, for queries you didn't write."
+
+#### Implementation Steps:
+1. **Define MCP Tools**: Create tools like `execute_query` or `run_secure_query`.
+2. **Contextual Resources**: Share safe schema metadata snippets via MCP Resources.
+3. **Identity Mapping**: Pass user identity through MCP headers to apply correct fine-grained rules.
+4. **SDK Selection**: Use official TypeScript SDK or `fastmcp` for implementation.
 
 ## UI/UX Improvements
 
@@ -312,7 +463,7 @@ Given complexity of new policy system (interaction with DataFusion and PostgreSQ
 - 2026-03-04: DataFusion query error - table 'postgres.pg_catalog.pg_statio_user_tables' not found
 - 2026-03-04: DataFusion query error - table 'postgres.information_schema.table_constraints' not found
 - 2026-03-04: DataFusion query error - Invalid function 'quote_ident'. Did you mean 'date_bin'?
-- 2026-03-09: JOIN with duplicate column names (e.g., `id`) and `SELECT *` causes "Ambiguous reference to unqualified field id" error.
+- 2026-03-09: JOIN with duplicate column names (e.g., `id`) and `SELECT *` causes "Ambiguous reference to unqualified field id" error. — **Partially mitigated 2026-03-11**: column deny/allow now uses `DFSchema` qualifier-aware iteration so deny rules no longer collide across tables. Root ambiguity for `SELECT *` on JOINs with duplicate column names is a DataFusion limitation, not directly related to policy enforcement.
 - Sometimes SQL queries take long time and cause UI to hang - need performance testing, may be missing indexes
 
 ### Git Commit Hook Improvements
@@ -381,19 +532,13 @@ Benefit: This ensures that if we need to override a "v1" style for a specific ed
 
 Specific areas identified from 2026-03-08 bug fixes — worth revisiting in a dedicated refactoring pass:
 
-#### `column_access deny` logic is in three places
+#### `column_access deny` logic is in three places ✅ Resolved (2026-03-11)
 
-After the recent fixes, column deny logic lives in:
+All three sites now share `expand_column_patterns()` from `policy_match.rs` for column glob expansion. `ObligationEffects::collect` unifies deny logic into `column_deny_patterns: HashMap<(schema, table), Vec<pattern>>` — the same per-table key used by both the permit and deny loops. `compute_user_visibility()` also calls `expand_column_patterns` against Arrow schema fields. Single source of truth for matching semantics.
 
-1. `PolicyHook` permit loop — strips denied columns from permit-policy obligations
-2. `PolicyHook` deny loop (newly added) — strips denied columns from deny-policy obligations
-3. `compute_user_visibility()` — hides denied columns from the schema at connect time
+#### `handle_query` is too large ✅ Partially resolved (2026-03-11)
 
-All three must stay consistent (same matching rules, same column name comparison). A single `collect_column_denies(policies, user_tables)` helper that all three call would eliminate the duplication.
-
-#### `handle_query` is too large
-
-`PolicyHook::handle_query` does plan loading, row filter injection, column mask injection, column access deny, empty-projection guard, access_mode gating, and audit logging — all in one method (~300+ lines). It is hard to unit test individual obligations in isolation. Consider splitting into smaller, testable functions: `apply_row_filters`, `apply_column_masks`, `apply_column_denies`, `check_access_mode`.
+Refactored into `apply_row_filters` (per-TableScan Filter injection via `transform_up`) and `apply_projection_qualified` (single qualifier-aware top-level Projection). The zero-trust refactor also extracted `ObligationEffects::collect` for obligation gathering and `has_effects` for early-out detection. `handle_query` is now a coordinator of well-named sub-methods.
 
 #### `rebuild_contexts_for_datasource` has a brief staleness window
 

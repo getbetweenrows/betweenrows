@@ -26,7 +26,9 @@ use super::QueryHook;
 use crate::entity::{
     data_source, discovered_schema, policy, policy_assignment, policy_obligation, query_audit_log,
 };
-use crate::policy_match::{ColumnAccessDef, ColumnMaskDef, RowFilterDef, matches_schema_table};
+use crate::policy_match::{
+    ColumnAccessDef, ColumnMaskDef, RowFilterDef, expand_column_patterns, matches_schema_table,
+};
 
 // ---------- system schema detection ----------
 
@@ -715,14 +717,15 @@ impl PolicyError {
 struct ObligationEffects {
     /// Combined row filter per (df_schema, table): AND within a policy, AND across policies.
     row_filters: HashMap<(String, String), datafusion::logical_expr::Expr>,
-    /// Column mask expressions keyed by column name. First (highest priority) wins.
-    column_masks: HashMap<String, datafusion::logical_expr::Expr>,
-    /// Exact column names to completely remove from the projection (O(1) HashSet lookup).
-    column_denies: HashSet<String>,
-    /// Glob patterns for column deny (contain `*`). Checked at projection time via matches_pattern.
-    /// Kept separate to avoid O(P×C) cost on every query when no globs are in use.
-    column_glob_patterns: Vec<String>,
-    /// Tables that have at least one matching permit obligation.
+    /// Raw column allow patterns per (df_schema, table). Only `column_access "allow"` populates
+    /// this. Expanded against actual column names at TableScan injection time.
+    column_allow_patterns: HashMap<(String, String), Vec<String>>,
+    /// Raw column deny patterns per (df_schema, table). Expanded at TableScan injection time.
+    column_deny_patterns: HashMap<(String, String), Vec<String>>,
+    /// Column mask expressions keyed by (df_schema, table, column). First wins per column.
+    column_masks: HashMap<(String, String, String), datafusion::logical_expr::Expr>,
+    /// Tables that have at least one `column_access "allow"` permit obligation.
+    /// `row_filter` and `column_mask` do NOT grant table access (zero-trust model).
     tables_with_permit: HashSet<(String, String)>,
     /// If set, a deny-effect row_filter matched the query — must reject before executing.
     denied_by_policy: Option<String>,
@@ -738,9 +741,9 @@ impl ObligationEffects {
     ) -> Self {
         let mut effects = ObligationEffects {
             row_filters: HashMap::new(),
+            column_allow_patterns: HashMap::new(),
+            column_deny_patterns: HashMap::new(),
             column_masks: HashMap::new(),
-            column_denies: HashSet::new(),
-            column_glob_patterns: Vec::new(),
             tables_with_permit: HashSet::new(),
             denied_by_policy: None,
         };
@@ -787,7 +790,7 @@ impl ObligationEffects {
                                     &session.df_to_upstream,
                                 ) {
                                     let key = (df_schema.clone(), table.clone());
-                                    effects.tables_with_permit.insert(key.clone());
+                                    // row_filter does NOT grant table access (zero-trust model).
 
                                     match parse_filter_expr(&def.filter_expression, user_vars) {
                                         Ok(filter) => {
@@ -821,12 +824,13 @@ impl ObligationEffects {
                                     table,
                                     &session.df_to_upstream,
                                 ) {
-                                    effects
-                                        .tables_with_permit
-                                        .insert((df_schema.clone(), table.clone()));
-
-                                    // First (highest priority) mask wins.
-                                    if !effects.column_masks.contains_key(&def.column) {
+                                    // column_mask does NOT grant table access (zero-trust model).
+                                    let triple =
+                                        (df_schema.clone(), table.clone(), def.column.clone());
+                                    // First (highest priority) mask wins — use entry API.
+                                    if let std::collections::hash_map::Entry::Vacant(e) =
+                                        effects.column_masks.entry(triple)
+                                    {
                                         match parse_mask_expr(
                                             session_context,
                                             &def.column,
@@ -834,9 +838,7 @@ impl ObligationEffects {
                                             user_vars,
                                         ) {
                                             Ok(mask) => {
-                                                effects
-                                                    .column_masks
-                                                    .insert(def.column.clone(), mask);
+                                                e.insert(mask);
                                             }
                                             Err(e) => {
                                                 tracing::error!(
@@ -864,17 +866,22 @@ impl ObligationEffects {
                                     table,
                                     &session.df_to_upstream,
                                 ) {
-                                    effects
-                                        .tables_with_permit
-                                        .insert((df_schema.clone(), table.clone()));
-                                    if def.action == "deny" {
-                                        for c in &def.columns {
-                                            if c.contains('*') {
-                                                effects.column_glob_patterns.push(c.clone());
-                                            } else {
-                                                effects.column_denies.insert(c.clone());
-                                            }
-                                        }
+                                    let key = (df_schema.clone(), table.clone());
+                                    if def.action == "allow" {
+                                        // Only column_access "allow" grants table access.
+                                        effects.tables_with_permit.insert(key.clone());
+                                        effects
+                                            .column_allow_patterns
+                                            .entry(key)
+                                            .or_default()
+                                            .extend(def.columns.iter().cloned());
+                                    } else if def.action == "deny" {
+                                        // Deny does not grant access; just records the deny.
+                                        effects
+                                            .column_deny_patterns
+                                            .entry(key)
+                                            .or_default()
+                                            .extend(def.columns.iter().cloned());
                                     }
                                 }
                             }
@@ -908,13 +915,12 @@ impl ObligationEffects {
                             &session.df_to_upstream,
                         ) && def.action == "deny"
                         {
-                            for c in &def.columns {
-                                if c.contains('*') {
-                                    effects.column_glob_patterns.push(c.clone());
-                                } else {
-                                    effects.column_denies.insert(c.clone());
-                                }
-                            }
+                            let key = (df_schema.clone(), table.clone());
+                            effects
+                                .column_deny_patterns
+                                .entry(key)
+                                .or_default()
+                                .extend(def.columns.iter().cloned());
                         }
                     }
                 }
@@ -947,6 +953,9 @@ impl ObligationEffects {
     }
 
     /// Inject row filter `Filter` nodes below each matching `TableScan` via `transform_up`.
+    ///
+    /// Row filters are scoped to their source table, so they can safely reference columns
+    /// that are later stripped by the top-level projection (e.g. `tenant_id` filters).
     fn apply_row_filters(&self, plan: LogicalPlan) -> Result<LogicalPlan, PolicyError> {
         if self.row_filters.is_empty() {
             return Ok(plan);
@@ -979,59 +988,88 @@ impl ObligationEffects {
             .map_err(PolicyError::PlanTransformation)
     }
 
-    /// Apply column masks and column denies as a top-level `Projection`.
+    /// Apply column allow/deny/mask rules as a single top-level `Projection`.
     ///
-    /// Denied columns take priority: a column that is both denied and masked is removed,
-    /// never replaced with the mask expression.
-    fn apply_projection(&self, plan: LogicalPlan) -> Result<LogicalPlan, PolicyError> {
-        if self.column_masks.is_empty()
-            && self.column_denies.is_empty()
-            && self.column_glob_patterns.is_empty()
+    /// Uses the DFSchema's qualifier information (which table each field originated from)
+    /// to scope allow/deny patterns to their source table. This eliminates JOIN column
+    /// collisions: denying `email` on `customers` does not affect `orders.email`.
+    ///
+    /// The Projection sits above any existing SQL-planner Projections, so it does not
+    /// interfere with column resolution inside those lower nodes.
+    ///
+    /// Deny takes priority over mask: a column that is both denied and masked is removed.
+    fn apply_projection_qualified(&self, plan: LogicalPlan) -> Result<LogicalPlan, PolicyError> {
+        use datafusion::logical_expr::Expr;
+
+        if self.column_allow_patterns.is_empty()
+            && self.column_deny_patterns.is_empty()
+            && self.column_masks.is_empty()
         {
             return Ok(plan);
         }
 
         let output_schema = plan.schema();
-        let arrow_fields = output_schema.fields();
+        let mut new_exprs: Vec<Expr> = Vec::new();
 
-        let is_denied = |col_name: &str| -> bool {
-            if self.column_denies.contains(col_name) {
-                return true; // O(1) exact match
-            }
-            // Only iterate globs when they are actually present
-            if !self.column_glob_patterns.is_empty() {
-                return self
-                    .column_glob_patterns
-                    .iter()
-                    .any(|p| crate::policy_match::matches_pattern(p, col_name));
-            }
-            false
-        };
+        for (qualifier, field) in output_schema.iter() {
+            let col_name = field.name();
 
-        let new_exprs: Vec<datafusion::logical_expr::Expr> = arrow_fields
-            .iter()
-            .filter_map(|field| {
-                let col_name = field.name();
-                // Deny takes priority over mask.
-                if is_denied(col_name) {
-                    return None;
+            // Extract (df_schema, table) from the DFSchema qualifier for this field.
+            let (df_schema, table) = match qualifier {
+                Some(tref) => (
+                    tref.schema().unwrap_or("").to_string(),
+                    tref.table().to_string(),
+                ),
+                None => (String::new(), String::new()),
+            };
+            let key = (df_schema.clone(), table.clone());
+
+            // Allow check: if allow patterns exist for this table, column must be in the set.
+            if let Some(allow_pats) = self.column_allow_patterns.get(&key) {
+                let actual = [col_name.as_str()];
+                if expand_column_patterns(allow_pats, &actual).is_empty() {
+                    continue; // not in allow list → invisible
                 }
-                if let Some(mask) = self.column_masks.get(col_name.as_str()) {
-                    Some(mask.clone().alias(col_name))
-                } else {
-                    Some(col(col_name))
+            }
+
+            // Deny check: column matches a deny pattern → skip (deny beats mask).
+            if let Some(deny_pats) = self.column_deny_patterns.get(&key) {
+                let actual = [col_name.as_str()];
+                if !expand_column_patterns(deny_pats, &actual).is_empty() {
+                    continue; // denied
                 }
-            })
-            .collect();
+            }
+
+            // Mask check: replace column expr with mask expression.
+            let triple = (df_schema, table, col_name.clone());
+            if let Some(mask) = self.column_masks.get(&triple) {
+                new_exprs.push(mask.clone().alias(col_name));
+            } else {
+                // Use a qualifier-aware column reference to avoid JOIN ambiguity.
+                let col_expr = match qualifier {
+                    Some(tref) => Expr::Column(datafusion::common::Column::new(
+                        Some(tref.clone()),
+                        col_name,
+                    )),
+                    None => col(col_name),
+                };
+                new_exprs.push(col_expr);
+            }
+        }
 
         if new_exprs.is_empty() {
-            let denied: Vec<String> = arrow_fields
-                .iter()
-                .map(|f| f.name().clone())
-                .filter(|n| is_denied(n))
+            let denied: Vec<String> = output_schema
+                .field_names()
+                .into_iter()
+                .map(|n| n.to_string())
                 .collect();
             return Err(PolicyError::AllColumnsDenied { columns: denied });
         }
+
+        tracing::debug!(
+            visible = new_exprs.len(),
+            "PolicyHook: applying column projection"
+        );
 
         LogicalPlanBuilder::from(plan)
             .project(new_exprs)
@@ -1043,12 +1081,12 @@ impl ObligationEffects {
             })
     }
 
-    /// True if any row filters, column masks, or column denies were collected.
+    /// True if any row filters, column patterns, or column masks were collected.
     fn has_effects(&self) -> bool {
         !self.row_filters.is_empty()
+            || !self.column_allow_patterns.is_empty()
+            || !self.column_deny_patterns.is_empty()
             || !self.column_masks.is_empty()
-            || !self.column_denies.is_empty()
-            || !self.column_glob_patterns.is_empty()
     }
 }
 
@@ -1075,7 +1113,7 @@ async fn apply_obligations(
 
     let had_effects = effects.has_effects();
     let plan = effects.apply_row_filters(logical_plan)?;
-    let plan = effects.apply_projection(plan)?;
+    let plan = effects.apply_projection_qualified(plan)?;
 
     Ok((plan, had_effects))
 }
@@ -1272,6 +1310,18 @@ mod tests {
             version: 1,
             priority,
             obligations,
+        }
+    }
+
+    fn make_column_allow_obl(schema: &str, table: &str, columns: &[&str]) -> ResolvedObligation {
+        ResolvedObligation {
+            obligation_type: "column_access".to_string(),
+            definition: serde_json::json!({
+                "schema": schema,
+                "table": table,
+                "columns": columns,
+                "action": "allow",
+            }),
         }
     }
 
@@ -1742,7 +1792,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_policy_required_with_permit_normal() {
-        // access_mode = "policy_required" with a permit → normal filter applied, not false.
+        // access_mode = "policy_required" with row_filter only → lit(false) injected.
+        // row_filter does not grant table access (zero-trust model); only column_access
+        // "allow" grants access. Without it the table is blocked.
         let session = make_session(
             vec![make_policy(
                 "p1",
@@ -1763,8 +1815,11 @@ mod tests {
 
         assert!(had_effects);
         let display = plan_display(&result_plan);
-        // Should contain the actual filter, not a blanket false
-        assert!(display.contains("Filter"), "Expected Filter: {display}");
+        // lit(false) injected because row_filter alone doesn't grant access
+        assert!(
+            display.contains("false"),
+            "Expected lit(false) filter (row_filter alone does not grant access): {display}"
+        );
     }
 
     #[tokio::test]
@@ -2086,7 +2141,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_policy_required_with_permit_normal() {
-        // policy_required + permit with row_filter → filtered rows returned.
+        // policy_required + permit with row_filter only → 0 rows (zero-trust: row_filter alone
+        // doesn't grant access; only column_access "allow" does).
         let ctx = setup_customers_ctx().await;
         let session = make_session(
             vec![make_policy(
@@ -2107,7 +2163,11 @@ mod tests {
             .unwrap();
 
         let batches = exec_plan(&ctx, result_plan).await;
-        assert_eq!(total_rows(&batches), 3);
+        assert_eq!(
+            total_rows(&batches),
+            0,
+            "row_filter alone does not grant access in policy_required mode"
+        );
     }
 
     #[tokio::test]
@@ -2485,17 +2545,52 @@ mod tests {
         );
     }
 
+    /// Build a cross-join plan over two EmptyTables — for JOIN collision tests.
+    fn build_join_plan(
+        table_a: &str,
+        cols_a: Vec<(&str, DataType)>,
+        table_b: &str,
+        cols_b: Vec<(&str, DataType)>,
+    ) -> LogicalPlan {
+        let fields_a: Vec<Field> = cols_a
+            .into_iter()
+            .map(|(n, dt)| Field::new(n, dt, true))
+            .collect();
+        let schema_a = Arc::new(Schema::new(fields_a));
+        let source_a = Arc::new(DefaultTableSource::new(Arc::new(EmptyTable::new(schema_a))));
+        let plan_a = LogicalPlanBuilder::scan(table_a, source_a, None)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let fields_b: Vec<Field> = cols_b
+            .into_iter()
+            .map(|(n, dt)| Field::new(n, dt, true))
+            .collect();
+        let schema_b = Arc::new(Schema::new(fields_b));
+        let source_b = Arc::new(DefaultTableSource::new(Arc::new(EmptyTable::new(schema_b))));
+        let plan_b = LogicalPlanBuilder::scan(table_b, source_b, None)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        LogicalPlanBuilder::from(plan_a)
+            .cross_join(plan_b)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn test_apply_projection_join_collision() {
-        // KNOWN LIMITATION: deny ["id"] is name-based — strips "id" from both table_a and table_b.
-        // This test documents the current behavior; a future fix will be visible as a test change.
+        // FIX: per-TableScan injection scopes column deny to its source table.
+        // Denying "email" on customers must NOT strip "email" from orders.
         let session = make_session(
             vec![make_policy(
                 "p1",
                 "permit",
                 1,
-                // Intended to only deny id on table_a, but column_denies is flat.
-                vec![make_column_deny_obl("public", "table_a", &["id"])],
+                vec![make_column_deny_obl("public", "customers", &["email"])],
             )],
             vec![],
             "open",
@@ -2503,45 +2598,48 @@ mod tests {
         );
         let ctx = SessionContext::new();
 
-        // Build a plan that has two "id" columns (simulated via a single table with id + id2,
-        // and we manually test that the flat HashSet approach strips ALL "id" columns).
-        let effects = ObligationEffects {
-            row_filters: HashMap::new(),
-            column_masks: HashMap::new(),
-            column_denies: {
-                let mut s = HashSet::new();
-                s.insert("id".to_string());
-                s
-            },
-            column_glob_patterns: Vec::new(),
-            tables_with_permit: HashSet::new(),
-            denied_by_policy: None,
-        };
-
-        // A plan with two "id"-like columns (both would be denied since deny is name-based).
-        let plan = build_scan_plan(
-            "public.joined",
+        let plan = build_join_plan(
+            "public.customers",
             vec![
-                ("id", DataType::Int32),   // from table_a — should be denied
-                ("id_b", DataType::Int32), // from table_b — should NOT be denied
+                ("id", DataType::Int32),
                 ("name", DataType::Utf8),
+                ("email", DataType::Utf8),
+            ],
+            "public.orders",
+            vec![
+                ("id", DataType::Int32),
+                ("email", DataType::Utf8),
+                ("amount", DataType::Int32),
             ],
         );
 
-        let result = effects.apply_projection(plan).unwrap();
-        let schema = result.schema();
+        let (result_plan, had_effects) = apply_obligations(&session, &ctx, plan, &default_vars())
+            .await
+            .unwrap();
+
+        assert!(had_effects);
+        let schema = result_plan.schema();
         let col_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
 
-        // Current behavior: only exact "id" is stripped (name-based, not table-qualified).
-        assert!(!col_names.contains(&"id"), "id stripped: {col_names:?}");
-        assert!(col_names.contains(&"id_b"), "id_b kept: {col_names:?}");
-        assert!(col_names.contains(&"name"), "name kept: {col_names:?}");
-        let _ = ctx; // silence unused warning
+        // customers.email denied → only 1 "email" remaining (from orders)
+        let email_count = col_names.iter().filter(|&&n| n == "email").count();
+        assert_eq!(
+            email_count, 1,
+            "Only orders.email should survive: {col_names:?}"
+        );
+        assert!(
+            col_names.contains(&"name"),
+            "customers.name remains: {col_names:?}"
+        );
+        assert!(
+            col_names.contains(&"amount"),
+            "orders.amount remains: {col_names:?}"
+        );
     }
 
     #[tokio::test]
     async fn test_apply_projection_exact_uses_set_path() {
-        // Exact name deny with no glob — column_glob_patterns must be empty.
+        // Exact name deny — "ssn" is denied, other columns survive.
         let session = make_session(
             vec![make_policy(
                 "p1",
@@ -2563,22 +2661,6 @@ mod tests {
             ],
         );
 
-        let user_tables = collect_user_tables(&plan);
-        let vars = default_vars();
-        let effects = ObligationEffects::collect(&session, &user_tables, &vars, &ctx);
-
-        // No glob patterns — must use the O(1) HashSet path.
-        assert!(
-            effects.column_glob_patterns.is_empty(),
-            "No glob patterns expected for exact deny: {:?}",
-            effects.column_glob_patterns
-        );
-        assert!(
-            effects.column_denies.contains("ssn"),
-            "ssn must be in exact deny set: {:?}",
-            effects.column_denies
-        );
-
         let (result_plan, had_effects) = apply_obligations(&session, &ctx, plan, &default_vars())
             .await
             .unwrap();
@@ -2594,7 +2676,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exact_deny_no_glob_overhead() {
-        // Deny ["ssn"] (no *) → column_glob_patterns must be empty after collection.
+        // Deny ["ssn"] (no *) → stored as raw pattern in column_deny_patterns; ssn denied.
         let session = make_session(
             vec![make_policy(
                 "p1",
@@ -2616,10 +2698,220 @@ mod tests {
         let vars = default_vars();
         let effects = ObligationEffects::collect(&session, &user_tables, &vars, &ctx);
 
+        // Pattern is stored as-is; expansion happens at injection time.
+        let key = ("public".to_string(), "events".to_string());
+        let patterns = effects.column_deny_patterns.get(&key);
         assert!(
-            effects.column_glob_patterns.is_empty(),
-            "No glob overhead for exact deny: {:?}",
-            effects.column_glob_patterns
+            patterns.is_some_and(|p| p.contains(&"ssn".to_string())),
+            "ssn pattern must be in column_deny_patterns: {:?}",
+            effects.column_deny_patterns
+        );
+    }
+
+    // ---------- zero-trust column model tests ----------
+
+    #[tokio::test]
+    async fn test_column_access_allow_whitelist() {
+        // column_access "allow" [name, email] → only those two columns visible.
+        let session = make_session(
+            vec![make_policy(
+                "p1",
+                "permit",
+                1,
+                vec![make_column_allow_obl(
+                    "public",
+                    "customers",
+                    &["name", "email"],
+                )],
+            )],
+            vec![],
+            "open",
+            HashMap::new(),
+        );
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.customers",
+            vec![
+                ("id", DataType::Int32),
+                ("name", DataType::Utf8),
+                ("email", DataType::Utf8),
+                ("ssn", DataType::Utf8),
+            ],
+        );
+
+        let (result_plan, had_effects) = apply_obligations(&session, &ctx, plan, &default_vars())
+            .await
+            .unwrap();
+
+        assert!(had_effects);
+        let schema = result_plan.schema();
+        let col_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            col_names,
+            vec!["name", "email"],
+            "only allowed columns: {col_names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_row_filter_alone_zero_columns() {
+        // row_filter only in policy_required → lit(false) (no column_access allow = not in
+        // tables_with_permit). Table is blocked, not AllColumnsDenied.
+        let session = make_session(
+            vec![make_policy(
+                "p1",
+                "permit",
+                1,
+                vec![make_row_filter_obl(
+                    "public",
+                    "customers",
+                    "org_id = 'acme'",
+                )],
+            )],
+            vec![],
+            "policy_required",
+            HashMap::new(),
+        );
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.customers",
+            vec![("id", DataType::Int32), ("name", DataType::Utf8)],
+        );
+
+        let (result_plan, had_effects) = apply_obligations(&session, &ctx, plan, &default_vars())
+            .await
+            .unwrap();
+
+        assert!(had_effects);
+        let display = plan_display(&result_plan);
+        assert!(
+            display.contains("false"),
+            "Expected lit(false) — row_filter alone does not grant access: {display}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_column_access_allow_and_row_filter() {
+        // column_access "allow" + row_filter → only allowed columns, with row filter applied.
+        let session = make_session(
+            vec![make_policy(
+                "p1",
+                "permit",
+                1,
+                vec![
+                    make_column_allow_obl("public", "customers", &["id", "name"]),
+                    make_row_filter_obl("public", "customers", "id > 0"),
+                ],
+            )],
+            vec![],
+            "open",
+            HashMap::new(),
+        );
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.customers",
+            vec![
+                ("id", DataType::Int32),
+                ("name", DataType::Utf8),
+                ("ssn", DataType::Utf8),
+            ],
+        );
+
+        let (result_plan, had_effects) = apply_obligations(&session, &ctx, plan, &default_vars())
+            .await
+            .unwrap();
+
+        assert!(had_effects);
+        let display = plan_display(&result_plan);
+        // Both a Filter and a Projection must be present
+        assert!(
+            display.contains("Filter"),
+            "Expected Filter node: {display}"
+        );
+        let schema = result_plan.schema();
+        let col_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            col_names,
+            vec!["id", "name"],
+            "only allowed columns: {col_names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_column_access_deny_no_table_permit() {
+        // column_access "deny" in a permit policy does NOT grant table access.
+        // In policy_required mode, table stays blocked (lit(false)).
+        let session = make_session(
+            vec![make_policy(
+                "p1",
+                "permit",
+                1,
+                vec![make_column_deny_obl("public", "customers", &["ssn"])],
+            )],
+            vec![],
+            "policy_required",
+            HashMap::new(),
+        );
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.customers",
+            vec![("id", DataType::Int32), ("ssn", DataType::Utf8)],
+        );
+
+        let (result_plan, had_effects) = apply_obligations(&session, &ctx, plan, &default_vars())
+            .await
+            .unwrap();
+
+        assert!(had_effects);
+        let display = plan_display(&result_plan);
+        assert!(
+            display.contains("false"),
+            "Expected lit(false) — column_access deny alone does not grant access: {display}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_join_targeted_deny() {
+        // Deny email on customers only — orders.email must survive.
+        // This is the core JOIN collision regression test.
+        let session = make_session(
+            vec![make_policy(
+                "p1",
+                "permit",
+                1,
+                vec![make_column_deny_obl("public", "customers", &["email"])],
+            )],
+            vec![],
+            "open",
+            HashMap::new(),
+        );
+        let ctx = SessionContext::new();
+
+        let plan = build_join_plan(
+            "public.customers",
+            vec![("id", DataType::Int32), ("email", DataType::Utf8)],
+            "public.orders",
+            vec![
+                ("id", DataType::Int32),
+                ("email", DataType::Utf8),
+                ("total", DataType::Int32),
+            ],
+        );
+
+        let (result_plan, had_effects) = apply_obligations(&session, &ctx, plan, &default_vars())
+            .await
+            .unwrap();
+
+        assert!(had_effects);
+        let schema = result_plan.schema();
+        let col_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+
+        // customers.email denied, orders.email survives → 1 "email" in output
+        let email_count = col_names.iter().filter(|&&n| n == "email").count();
+        assert_eq!(email_count, 1, "orders.email must survive: {col_names:?}");
+        assert!(
+            col_names.contains(&"total"),
+            "orders.total remains: {col_names:?}"
         );
     }
 }

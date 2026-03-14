@@ -907,37 +907,33 @@ impl EngineCache {
         let mut denied_columns: HashSet<(String, String, String)> = HashSet::new();
         let mut denied_schemas: HashSet<String> = HashSet::new();
         let mut denied_tables: HashSet<(String, String)> = HashSet::new();
+        // Track column_access "allow" patterns per table to compute denied columns.
+        let mut column_allow_patterns: HashMap<(String, String), Vec<String>> = HashMap::new();
 
         for obl in &obligations {
-            let def: serde_json::Value = serde_json::from_str(&obl.definition).unwrap_or_default();
-
-            // Only permit obligations contribute to table visibility
-            if permit_policy_ids.contains(&obl.policy_id) {
-                let schema_table: Option<(&str, &str)> = match obl.obligation_type.as_str() {
-                    "row_filter" | "column_mask" | "column_access" => {
-                        match (
-                            def.get("schema").and_then(|v| v.as_str()),
-                            def.get("table").and_then(|v| v.as_str()),
+            // Only column_access "allow" from permit policies grants table visibility.
+            // row_filter and column_mask do NOT grant access (zero-trust model).
+            if permit_policy_ids.contains(&obl.policy_id)
+                && obl.obligation_type == "column_access"
+                && let Ok(col_def) =
+                    serde_json::from_str::<crate::policy_match::ColumnAccessDef>(&obl.definition)
+                && col_def.action == "allow"
+            {
+                for (df_alias, vs) in &catalog.schemas {
+                    for table_name in vs.tables.keys() {
+                        if crate::policy_match::matches_schema_table(
+                            &col_def.schema,
+                            &col_def.table,
+                            df_alias,
+                            table_name,
+                            &df_to_upstream,
                         ) {
-                            (Some(s), Some(t)) => Some((s, t)),
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                };
-
-                if let Some((obl_schema, obl_table)) = schema_table {
-                    for (df_alias, vs) in &catalog.schemas {
-                        for table_name in vs.tables.keys() {
-                            if crate::policy_match::matches_schema_table(
-                                obl_schema,
-                                obl_table,
-                                df_alias,
-                                table_name,
-                                &df_to_upstream,
-                            ) {
-                                visible_tables.insert((df_alias.clone(), table_name.clone()));
-                            }
+                            let key = (df_alias.clone(), table_name.clone());
+                            visible_tables.insert(key.clone());
+                            column_allow_patterns
+                                .entry(key)
+                                .or_default()
+                                .extend(col_def.columns.iter().cloned());
                         }
                     }
                 }
@@ -960,21 +956,49 @@ impl EngineCache {
                             table_name,
                             &df_to_upstream,
                         ) {
-                            for col_pattern in &col_def.columns {
-                                for field in table.arrow_schema.fields() {
-                                    if crate::policy_match::matches_pattern(
-                                        col_pattern,
-                                        field.name(),
-                                    ) {
-                                        denied_columns.insert((
-                                            df_alias.clone(),
-                                            table_name.clone(),
-                                            field.name().clone(),
-                                        ));
-                                    }
-                                }
+                            let actual_cols: Vec<&str> = table
+                                .arrow_schema
+                                .fields()
+                                .iter()
+                                .map(|f| f.name().as_str())
+                                .collect();
+                            for col_name in crate::policy_match::expand_column_patterns(
+                                &col_def.columns,
+                                &actual_cols,
+                            ) {
+                                denied_columns.insert((
+                                    df_alias.clone(),
+                                    table_name.clone(),
+                                    col_name,
+                                ));
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // Convert column_access "allow" restrictions into denied_columns entries.
+        // Any field not in the allowed set is denied from the schema.
+        for ((df_alias, table_name), allow_patterns) in &column_allow_patterns {
+            if let Some(vs) = catalog.schemas.get(df_alias)
+                && let Some(table) = vs.tables.get(table_name)
+            {
+                let actual_cols: Vec<&str> = table
+                    .arrow_schema
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().as_str())
+                    .collect();
+                let allowed =
+                    crate::policy_match::expand_column_patterns(allow_patterns, &actual_cols);
+                for field in table.arrow_schema.fields() {
+                    if !allowed.contains(field.name()) {
+                        denied_columns.insert((
+                            df_alias.clone(),
+                            table_name.clone(),
+                            field.name().clone(),
+                        ));
                     }
                 }
             }

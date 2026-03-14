@@ -165,15 +165,67 @@ The `columns` field of `column_access` obligations also supports glob patterns:
 
 Both prefix globs (`col_*`) and suffix globs (`*_col`) are supported for column names. Patterns are **case-sensitive** — this matches PostgreSQL's default behaviour of folding identifiers to lowercase. Glob matching for columns is applied at schema-metadata build time (connect) and at query-time projection (execute), so denied columns are hidden from both `information_schema.columns` and `SELECT` results.
 
+## Zero-trust column model
+
+Column visibility follows a **zero-trust** model in `policy_required` mode: a table is completely inaccessible until a `column_access "allow"` obligation explicitly grants access. `row_filter` and `column_mask` obligations transform data but do **not** grant access by themselves.
+
+### Obligation responsibility matrix
+
+| Obligation | Grants table access? | Grants column access? | Modifies data? |
+|---|---|---|---|
+| `row_filter` | **No** | No | Yes (filters rows) |
+| `column_mask` | **No** | No | Yes (transforms value) |
+| `column_access "allow"` | **Yes** | Yes (named columns only) | No |
+| `column_access "deny"` | **No** — does not unblock a table | Removes named columns | No |
+| `object_access "deny"` | Removes table/schema | Removes all | No |
+
+### `column_access "allow"` — the access grant obligation
+
+`column_access "allow"` is the **only** obligation that makes a table visible in `policy_required` mode. It also specifies which columns the user can see:
+
+```json
+{
+  "schema": "public",
+  "table": "customers",
+  "columns": ["id", "name", "email"],
+  "action": "allow"
+}
+```
+
+With only this obligation, the user sees the `customers` table with exactly three columns. Any column not in the `columns` list is invisible in both schema metadata and query results.
+
+### Composing access with row filters
+
+`column_access "allow"` and `row_filter` in the same policy stack correctly — the allow obligation grants access and column visibility, while the row filter restricts which rows are returned:
+
+```json
+[
+  { "type": "column_access", "action": "allow", "schema": "public", "table": "customers", "columns": ["id", "name"] },
+  { "type": "row_filter",    "schema": "public", "table": "customers", "filter_expression": "organization_id = {user.tenant}" }
+]
+```
+
+Result: only `id` and `name` columns, filtered to the user's tenant rows.
+
+### `column_access "deny"` does not grant access
+
+In `policy_required` mode, a policy that **only** has `column_access "deny"` obligations does **not** unblock the table. The table remains blocked by `lit(false)`. Use `column_access "allow"` first to grant access, then optionally layer `column_access "deny"` to remove specific columns.
+
+In `open` mode, `column_access "deny"` removes the specified columns from results (same behaviour as before).
+
+### JOIN column scoping
+
+Column allow/deny/mask rules are scoped to their source table. Denying `email` on `customers` does **not** affect `email` on `orders` in the same JOIN:
+
+```sql
+-- With deny email on customers, this correctly returns:
+-- customers.id, customers.name, orders.id, orders.email, orders.total
+SELECT * FROM customers JOIN orders ON customers.id = orders.customer_id
+```
+
+Column qualifiers from DataFusion's query planner are used to identify which table each output column originated from, ensuring column rules apply only to their intended table.
+
 ## Known limitations
-
-### Column deny is not table-qualified at query time
-
-`column_access deny` obligations identify denied columns by **name only**, not by `schema.table.column`. In a query that JOINs two tables both containing a column named `id`, a deny on `id` in `table_a` will also strip `id` from `table_b` in the same result set.
-
-The column is correctly hidden from schema metadata (`information_schema.columns`) on a per-table basis at connect time. Query-time stripping in `SELECT *` or explicit projections is name-based across the full projection.
-
-*Workaround:* use more specific column names to avoid collisions (e.g. `orders_id` instead of `id`), or restrict access at the table level with `object_access deny` when full table hiding is needed.
 
 ### `object_access deny` uses the upstream (source) schema name, not the alias
 

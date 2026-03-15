@@ -28,6 +28,9 @@ pub async fn list_audit_logs(
     if let Some(ds_id) = params.datasource_id {
         query = query.filter(query_audit_log::Column::DataSourceId.eq(ds_id));
     }
+    if let Some(ref status) = params.status {
+        query = query.filter(query_audit_log::Column::Status.eq(status.clone()));
+    }
     if let Some(ref from) = params.from
         && let Ok(dt) = chrono::NaiveDateTime::parse_from_str(from, "%Y-%m-%dT%H:%M:%S")
     {
@@ -67,6 +70,8 @@ pub async fn list_audit_logs(
                 client_ip: m.client_ip,
                 client_info: m.client_info,
                 created_at: m.created_at,
+                status: m.status,
+                error_message: m.error_message,
             })
         })
         .collect();

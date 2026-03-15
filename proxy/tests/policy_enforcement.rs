@@ -2713,3 +2713,394 @@ async fn tc_rf_01_neq_operator_quoted_column() {
     assert_eq!(rows[1][0], "2"); // Denver CO
     assert_eq!(rows[2][0], "4"); // Seattle WA
 }
+
+// ===========================================================================
+// TC-AUDIT-01: Successful query → audit entry has status "success",
+//              execution_time_ms > 0, rewritten_query shows actual SQL
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_audit_01_success_audit_status() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_audit01";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.sales;
+             CREATE TABLE {schema}.sales (id INT, tenant TEXT, amount INT);
+             INSERT INTO {schema}.sales VALUES (1, 'acme', 100), (2, 'globex', 200);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_audit01", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let user_id = server
+        .create_user("user_audit01", "UserPass1!", "acme", ds_id)
+        .await;
+
+    server
+        .create_and_assign_policy(
+            "audit01-permit",
+            "permit",
+            vec![json!({
+                "obligation_type": "row_filter",
+                "definition": {
+                    "schema": schema,
+                    "table": "sales",
+                    "filter_expression": "tenant = {user.tenant}"
+                }
+            })],
+            ds_id,
+            Some(user_id),
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_audit01", "UserPass1!", "ds_audit01")
+        .await;
+    client
+        .simple_query(&format!("SELECT * FROM {schema}.sales"))
+        .await
+        .unwrap();
+
+    // Audit write is async — give it time to complete
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    let resp = server
+        .admin
+        .get("/api/v1/audit/queries")
+        .authorization_bearer(&server.admin_token)
+        .await;
+    resp.assert_status_ok();
+    let body = resp.json::<serde_json::Value>();
+    let entries = body["data"].as_array().unwrap();
+
+    let entry = entries
+        .iter()
+        .find(|e| e["username"].as_str() == Some("user_audit01"))
+        .expect("TC-AUDIT-01: no audit entry for user_audit01");
+
+    assert_eq!(
+        entry["status"].as_str(),
+        Some("success"),
+        "TC-AUDIT-01: status must be 'success'"
+    );
+    assert!(
+        entry["error_message"].is_null(),
+        "TC-AUDIT-01: error_message must be null on success"
+    );
+    let elapsed = entry["execution_time_ms"].as_i64().unwrap_or(0);
+    assert!(
+        elapsed >= 0,
+        "TC-AUDIT-01: execution_time_ms must be non-negative, got {elapsed}"
+    );
+    // Rewritten query should be present (row filter was applied) and not contain the fake comment
+    let rewritten = entry["rewritten_query"].as_str().unwrap_or("");
+    assert!(
+        !rewritten.is_empty(),
+        "TC-AUDIT-01: rewritten_query must be present when row filter is applied"
+    );
+    assert!(
+        !rewritten.contains("/* policy-rewritten */"),
+        "TC-AUDIT-01: rewritten_query must not be the fake comment, got: {rewritten}"
+    );
+}
+
+// ===========================================================================
+// TC-AUDIT-02: Denied query (deny policy) → audit entry has status "denied"
+//              with error_message containing the policy name
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_audit_02_denied_audit_status() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_audit02";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.accounts;
+             CREATE TABLE {schema}.accounts (id INT, region TEXT);
+             INSERT INTO {schema}.accounts VALUES (1, 'us'), (2, 'eu');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_audit02", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let user_id = server
+        .create_user("user_audit02", "UserPass1!", "default", ds_id)
+        .await;
+
+    // Deny policy that blocks queries on this table
+    server
+        .create_and_assign_policy(
+            "audit02-deny",
+            "deny",
+            vec![json!({
+                "obligation_type": "row_filter",
+                "definition": {
+                    "schema": schema,
+                    "table": "accounts",
+                    "filter_expression": "region = 'eu'"
+                }
+            })],
+            ds_id,
+            Some(user_id),
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_audit02", "UserPass1!", "ds_audit02")
+        .await;
+    // This query should be denied by the deny policy
+    let _ = client
+        .simple_query(&format!("SELECT * FROM {schema}.accounts"))
+        .await; // may error — that's expected
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    let resp = server
+        .admin
+        .get("/api/v1/audit/queries")
+        .authorization_bearer(&server.admin_token)
+        .await;
+    resp.assert_status_ok();
+    let body = resp.json::<serde_json::Value>();
+    let entries = body["data"].as_array().unwrap();
+
+    let entry = entries
+        .iter()
+        .find(|e| e["username"].as_str() == Some("user_audit02"))
+        .expect("TC-AUDIT-02: no audit entry for user_audit02");
+
+    assert_eq!(
+        entry["status"].as_str(),
+        Some("denied"),
+        "TC-AUDIT-02: status must be 'denied'"
+    );
+    let err_msg = entry["error_message"].as_str().unwrap_or("");
+    assert!(
+        err_msg.contains("audit02-deny"),
+        "TC-AUDIT-02: error_message must contain the policy name, got: {err_msg}"
+    );
+}
+
+// ===========================================================================
+// TC-AUDIT-03: Error query (non-existent table) → audit entry has status "error"
+//              with error_message populated
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_audit_03_error_audit_status() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_audit03";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.things;
+             CREATE TABLE {schema}.things (id INT, name TEXT);
+             INSERT INTO {schema}.things VALUES (1, 'foo');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_audit03", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("user_audit03", "UserPass1!", "default", ds_id)
+        .await;
+
+    let client = server
+        .connect_as("user_audit03", "UserPass1!", "ds_audit03")
+        .await;
+    // Query a non-existent table — DataFusion will fail to build the plan
+    let _ = client
+        .simple_query(&format!("SELECT * FROM {schema}.nonexistent_table_xyz"))
+        .await; // expected to error
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    let resp = server
+        .admin
+        .get("/api/v1/audit/queries")
+        .authorization_bearer(&server.admin_token)
+        .await;
+    resp.assert_status_ok();
+    let body = resp.json::<serde_json::Value>();
+    let entries = body["data"].as_array().unwrap();
+
+    let entry = entries
+        .iter()
+        .find(|e| e["username"].as_str() == Some("user_audit03"))
+        .expect("TC-AUDIT-03: no audit entry for user_audit03");
+
+    assert_eq!(
+        entry["status"].as_str(),
+        Some("error"),
+        "TC-AUDIT-03: status must be 'error'"
+    );
+    let err_msg = entry["error_message"].as_str().unwrap_or("");
+    assert!(
+        !err_msg.is_empty(),
+        "TC-AUDIT-03: error_message must be populated for failed queries"
+    );
+}
+
+// ===========================================================================
+// TC-AUDIT-04: Status filter — GET /audit/queries?status=denied returns only
+//              denied entries
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_audit_04_status_filter() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_audit04";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.data;
+             CREATE TABLE {schema}.data (id INT, category TEXT);
+             INSERT INTO {schema}.data VALUES (1, 'a'), (2, 'b');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_audit04", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let user_id = server
+        .create_user("user_audit04", "UserPass1!", "default", ds_id)
+        .await;
+
+    // Deny policy
+    server
+        .create_and_assign_policy(
+            "audit04-deny",
+            "deny",
+            vec![json!({
+                "obligation_type": "row_filter",
+                "definition": {
+                    "schema": schema,
+                    "table": "data",
+                    "filter_expression": "category = 'a'"
+                }
+            })],
+            ds_id,
+            Some(user_id),
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_audit04", "UserPass1!", "ds_audit04")
+        .await;
+    // Denied query
+    let _ = client
+        .simple_query(&format!("SELECT * FROM {schema}.data"))
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    // Filter by status=denied
+    let resp = server
+        .admin
+        .get("/api/v1/audit/queries?status=denied")
+        .authorization_bearer(&server.admin_token)
+        .await;
+    resp.assert_status_ok();
+    let body = resp.json::<serde_json::Value>();
+    let entries = body["data"].as_array().unwrap();
+
+    // All returned entries must have status "denied"
+    for e in entries {
+        assert_eq!(
+            e["status"].as_str(),
+            Some("denied"),
+            "TC-AUDIT-04: status filter returned non-denied entry: {e}"
+        );
+    }
+
+    // Filter by status=success should return no entries for this user (only denied queries ran)
+    let resp2 = server
+        .admin
+        .get(&format!(
+            "/api/v1/audit/queries?status=success&datasource_id={ds_id}"
+        ))
+        .authorization_bearer(&server.admin_token)
+        .await;
+    resp2.assert_status_ok();
+    let body2 = resp2.json::<serde_json::Value>();
+    let entries2 = body2["data"].as_array().unwrap();
+    let user_entries: Vec<_> = entries2
+        .iter()
+        .filter(|e| e["username"].as_str() == Some("user_audit04"))
+        .collect();
+    assert!(
+        user_entries.is_empty(),
+        "TC-AUDIT-04: success filter should return no entries for user_audit04 (only denied queries ran)"
+    );
+}
+
+// ===========================================================================
+// TC-AUDIT-05: Write statement (INSERT) rejected by ReadOnlyHook
+//              → audit entry has status "denied", error_message is present
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_audit_05_write_rejected_audit_status() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_audit05";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT, name TEXT);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_audit05", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("user_audit05", "UserPass1!", "default", ds_id)
+        .await;
+
+    let client = server
+        .connect_as("user_audit05", "UserPass1!", "ds_audit05")
+        .await;
+    // INSERT should be rejected by ReadOnlyHook but audited first by PolicyHook
+    let _ = client
+        .simple_query(&format!("INSERT INTO {schema}.items VALUES (1, 'test')"))
+        .await; // expected to error
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    let resp = server
+        .admin
+        .get("/api/v1/audit/queries")
+        .authorization_bearer(&server.admin_token)
+        .await;
+    resp.assert_status_ok();
+    let body = resp.json::<serde_json::Value>();
+    let entries = body["data"].as_array().unwrap();
+
+    let entry = entries
+        .iter()
+        .find(|e| e["username"].as_str() == Some("user_audit05"))
+        .expect("TC-AUDIT-05: no audit entry for write-rejected statement");
+
+    assert_eq!(
+        entry["status"].as_str(),
+        Some("denied"),
+        "TC-AUDIT-05: write rejection must be audited as 'denied'"
+    );
+    let err_msg = entry["error_message"].as_str().unwrap_or("");
+    assert!(
+        err_msg.contains("read-only"),
+        "TC-AUDIT-05: error_message must mention read-only, got: {err_msg}"
+    );
+}

@@ -506,6 +506,7 @@ pub struct ListAuditLogQuery {
     pub datasource_id: Option<uuid::Uuid>,
     pub from: Option<String>, // ISO datetime string
     pub to: Option<String>,
+    pub status: Option<String>, // "success" | "error" | "denied"
 }
 
 #[derive(Debug, Serialize)]
@@ -522,6 +523,8 @@ pub struct AuditLogResponse {
     pub client_ip: Option<String>,
     pub client_info: Option<String>,
     pub created_at: chrono::NaiveDateTime,
+    pub status: String,
+    pub error_message: Option<String>,
 }
 
 // ---------- discovery job responses ----------

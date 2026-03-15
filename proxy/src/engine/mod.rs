@@ -34,7 +34,7 @@ use crate::entity::{
 /// PostgreSQL dialect extended to unparse `datafusion-functions-json` UDFs
 /// back to native PG JSON operators (`->`, `->>`, `?`) so that filters are
 /// pushed down to the upstream PostgreSQL server as native syntax.
-struct BetweenRowsPostgresDialect;
+pub(crate) struct BetweenRowsPostgresDialect;
 
 // All methods below except `scalar_function_to_sql_overrides` mirror the
 // implementations in `PostgreSqlDialect`. If that crate's defaults change,

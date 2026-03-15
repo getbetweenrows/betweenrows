@@ -14,6 +14,8 @@ export interface AuditLogEntry {
   client_ip: string | null
   client_info: string | null
   created_at: string
+  status: 'success' | 'error' | 'denied'
+  error_message: string | null
 }
 
 export async function listAuditLogs(params?: {
@@ -23,6 +25,7 @@ export async function listAuditLogs(params?: {
   datasource_id?: string
   from?: string
   to?: string
+  status?: string
 }): Promise<PaginatedResponse<AuditLogEntry>> {
   const { data } = await client.get<PaginatedResponse<AuditLogEntry>>('/audit/queries', { params })
   return data

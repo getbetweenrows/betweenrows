@@ -11,6 +11,7 @@ use datafusion::sql::sqlparser::ast::{
 };
 use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::parser::Parser;
+use datafusion::sql::unparser::Unparser;
 use pgwire::api::ClientInfo;
 use pgwire::api::portal::Format;
 use pgwire::api::results::Response;
@@ -23,6 +24,8 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use super::QueryHook;
+use super::read_only::is_allowed_statement;
+use crate::engine::BetweenRowsPostgresDialect;
 use crate::entity::{
     data_source, discovered_schema, policy, policy_assignment, policy_obligation, query_audit_log,
 };
@@ -443,6 +446,55 @@ impl PolicyHook {
     pub async fn invalidate_user(&self, user_id: Uuid) {
         let mut cache = self.cache.write().await;
         cache.retain(|k, _| k.0 != user_id);
+    }
+
+    /// Best-effort audit write for a statement that will be rejected by `ReadOnlyHook`.
+    /// Skips silently if user context is missing or the session can't be loaded.
+    async fn audit_write_rejected(&self, statement: &Statement, client: &(dyn ClientInfo + Sync)) {
+        let metadata = client.metadata();
+        let user_id_str = match metadata.get("user_id") {
+            Some(s) => s.clone(),
+            None => return,
+        };
+        let user_id = match Uuid::parse_str(&user_id_str) {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+        let username = metadata.get("user").cloned().unwrap_or_default();
+        let datasource = metadata.get("datasource").cloned().unwrap_or_default();
+        let client_ip = Some(client.socket_addr().ip().to_string());
+        let client_info = metadata.get("application_name").cloned();
+
+        let session = match self.get_session(user_id, &datasource).await {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let db = self.db.clone();
+        let original_query = statement.to_string();
+
+        tokio::spawn(async move {
+            let now = Utc::now().naive_utc();
+            let entry = query_audit_log::ActiveModel {
+                id: sea_orm::Set(Uuid::now_v7()),
+                user_id: sea_orm::Set(user_id),
+                username: sea_orm::Set(username),
+                data_source_id: sea_orm::Set(session.datasource_id),
+                datasource_name: sea_orm::Set(session.datasource_name),
+                original_query: sea_orm::Set(original_query),
+                rewritten_query: sea_orm::Set(None),
+                policies_applied: sea_orm::Set("[]".to_string()),
+                execution_time_ms: sea_orm::Set(None),
+                client_ip: sea_orm::Set(client_ip),
+                client_info: sea_orm::Set(client_info),
+                created_at: sea_orm::Set(now),
+                status: sea_orm::Set("denied".to_string()),
+                error_message: sea_orm::Set(Some("Only read-only queries are allowed".to_string())),
+            };
+            if let Err(e) = sea_orm::ActiveModelTrait::insert(entry, &db).await {
+                tracing::error!(error = %e, "Failed to write audit log entry for rejected write");
+            }
+        });
     }
 
     async fn get_session(
@@ -1118,6 +1170,12 @@ impl QueryHook for PolicyHook {
         client: &(dyn ClientInfo + Sync),
     ) -> Option<PgWireResult<Response>> {
         if !matches!(statement, Statement::Query(_)) {
+            // Write statements (INSERT, UPDATE, DELETE, DROP, SET, …) will be rejected
+            // by ReadOnlyHook. Audit them here before passing through, so the denied
+            // attempt is on the record.
+            if !is_allowed_statement(statement) {
+                self.audit_write_rejected(statement, client).await;
+            }
             return None;
         }
         if is_system_only_statement(statement) {
@@ -1162,52 +1220,103 @@ impl QueryHook for PolicyHook {
         let query_start = std::time::Instant::now();
         let original_query = statement.to_string();
 
-        // Build logical plan
-        let df_stmt = datafusion::sql::parser::Statement::Statement(Box::new(statement.clone()));
-        let logical_plan = match session_context.state().statement_to_plan(df_stmt).await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!(error = %e, "PolicyHook: failed to build plan");
-                return Some(Err(PgWireError::ApiError(Box::new(e))));
-            }
-        };
+        // --- labeled block: returns (result, status, error_message, rewritten_query) ---
+        // This single block captures all outcome paths so the audit write is in one place.
+        let (result, audit_status, audit_error, audit_rewritten): (
+            PgWireResult<Response>,
+            &'static str,
+            Option<String>,
+            Option<String>,
+        ) =
+            'query: {
+                // Build logical plan
+                let df_stmt =
+                    datafusion::sql::parser::Statement::Statement(Box::new(statement.clone()));
+                let logical_plan = match session_context.state().statement_to_plan(df_stmt).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::error!(error = %e, "PolicyHook: failed to build plan");
+                        let msg = e.to_string();
+                        break 'query (
+                            Err(PgWireError::ApiError(Box::new(e))),
+                            "error",
+                            Some(msg),
+                            None,
+                        );
+                    }
+                };
 
-        // Apply all policy obligations (deny check, row filters, column masks/denies).
-        let (final_plan, had_effects) =
-            match apply_obligations(&session, session_context, logical_plan, &user_vars).await {
-                Ok(result) => result,
-                Err(e) => {
-                    tracing::error!(error = %e, "PolicyHook: obligation error");
-                    return Some(Err(e.into_pgwire_error()));
-                }
+                // Apply all policy obligations (deny check, row filters, column masks/denies).
+                let (final_plan, had_effects) =
+                    match apply_obligations(&session, session_context, logical_plan, &user_vars)
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(e) => {
+                            tracing::error!(error = %e, "PolicyHook: obligation error");
+                            let (status, msg) = match &e {
+                                PolicyError::DeniedByPolicy { policy_name } => {
+                                    ("denied", format!("Access denied by policy '{policy_name}'"))
+                                }
+                                PolicyError::AllColumnsDenied { columns } => (
+                                    "denied",
+                                    format!(
+                                        "Column{} {} restricted by policy",
+                                        if columns.len() == 1 { "" } else { "s" },
+                                        columns.join(", ")
+                                    ),
+                                ),
+                                PolicyError::PlanTransformation(inner) => {
+                                    ("error", inner.to_string())
+                                }
+                            };
+                            break 'query (Err(e.into_pgwire_error()), status, Some(msg), None);
+                        }
+                    };
+
+                // Unparse the rewritten plan back to SQL when policy effects were applied.
+                let rewritten_query = if had_effects {
+                    let unparser = Unparser::new(&BetweenRowsPostgresDialect);
+                    match unparser.plan_to_sql(&final_plan) {
+                        Ok(sql) => Some(sql.to_string()),
+                        Err(_) => Some(format!("/* plan-to-sql failed */ {original_query}")),
+                    }
+                } else {
+                    None
+                };
+
+                // Execute the plan.
+                let df = match session_context.execute_logical_plan(final_plan).await {
+                    Ok(df) => df,
+                    Err(e) => {
+                        tracing::error!(error = %e, "PolicyHook: execution failed");
+                        let msg = e.to_string();
+                        break 'query (
+                            Err(PgWireError::ApiError(Box::new(e))),
+                            "error",
+                            Some(msg),
+                            rewritten_query,
+                        );
+                    }
+                };
+
+                // Encode the DataFrame into a pgwire response (this is where rows are pulled).
+                let response = match encode_dataframe(df, &Format::UnifiedText, None).await {
+                    Ok(qr) => Response::Query(qr),
+                    Err(e) => {
+                        tracing::error!(error = %e, "PolicyHook: encoding error");
+                        let msg = e.to_string();
+                        break 'query (Err(e), "error", Some(msg), rewritten_query);
+                    }
+                };
+
+                (Ok(response), "success", None, rewritten_query)
             };
 
-        let rewritten_query = if had_effects {
-            Some(format!("/* policy-rewritten */ {original_query}"))
-        } else {
-            None
-        };
-
-        // Execute
-        let df = match session_context.execute_logical_plan(final_plan).await {
-            Ok(df) => df,
-            Err(e) => {
-                tracing::error!(error = %e, "PolicyHook: execution failed");
-                return Some(Err(PgWireError::ApiError(Box::new(e))));
-            }
-        };
-
+        // Duration measured after the labeled block — covers planning + execution + encoding.
         let elapsed_ms = query_start.elapsed().as_millis() as i64;
 
-        let response = match encode_dataframe(df, &Format::UnifiedText, None).await {
-            Ok(qr) => Response::Query(qr),
-            Err(e) => {
-                tracing::error!(error = %e, "PolicyHook: encoding error");
-                return Some(Err(e));
-            }
-        };
-
-        // Async audit log
+        // Async audit log — runs on all paths (success, error, denied).
         let policies_applied: Vec<serde_json::Value> = session
             .permit_policies
             .iter()
@@ -1226,10 +1335,10 @@ impl QueryHook for PolicyHook {
         let audit_ds_id = session.datasource_id;
         let audit_ds_name = session.datasource_name.clone();
         let audit_orig_q = original_query;
-        let audit_rewritten = rewritten_query;
         let audit_policies = serde_json::to_string(&policies_applied).unwrap_or_default();
         let audit_ip = client_ip;
         let audit_info = client_info;
+        let audit_status_owned = audit_status.to_string();
 
         tokio::spawn(async move {
             let now = Utc::now().naive_utc();
@@ -1246,13 +1355,15 @@ impl QueryHook for PolicyHook {
                 client_ip: sea_orm::Set(audit_ip),
                 client_info: sea_orm::Set(audit_info),
                 created_at: sea_orm::Set(now),
+                status: sea_orm::Set(audit_status_owned),
+                error_message: sea_orm::Set(audit_error),
             };
             if let Err(e) = sea_orm::ActiveModelTrait::insert(entry, &db).await {
                 tracing::error!(error = %e, "Failed to write audit log entry");
             }
         });
 
-        Some(Ok(response))
+        Some(result)
     }
 }
 

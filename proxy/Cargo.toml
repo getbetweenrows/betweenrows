@@ -67,3 +67,6 @@ dashmap = "6"
 tokio-test = "0.4"
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["full"] }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+axum-test = "19"

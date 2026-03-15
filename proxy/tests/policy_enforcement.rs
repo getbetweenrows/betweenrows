@@ -2102,3 +2102,564 @@ async fn policy_required_with_allow_table_visible() {
         "Table without a permit policy must be invisible in policy_required mode"
     );
 }
+
+// ===========================================================================
+// TC-JOIN-01: JOIN column collision — deny on one table must not affect other
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_join_01_join_column_collision() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_join01";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.customers;
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.customers (id INT, email TEXT, name TEXT);
+             CREATE TABLE {schema}.orders (id INT, email TEXT, amount INT);
+             INSERT INTO {schema}.customers VALUES (1, 'alice@example.com', 'Alice');
+             INSERT INTO {schema}.orders VALUES (1, 'order@example.com', 100);"
+        ))
+        .await;
+
+    let ds_id = server
+        .create_datasource("ds_join01", "policy_required")
+        .await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_join01", "UserPass1!", "default", ds_id)
+        .await;
+
+    // Allow all columns on orders, allow only name (not email) on customers
+    server
+        .create_and_assign_policy(
+            "orders-all-join01",
+            "permit",
+            vec![json!({
+                "obligation_type": "column_access",
+                "definition": {"schema": schema, "table": "orders", "columns": ["*"], "action": "allow"}
+            })],
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_and_assign_policy(
+            "customers-name-join01",
+            "permit",
+            vec![json!({
+                "obligation_type": "column_access",
+                "definition": {"schema": schema, "table": "customers", "columns": ["id", "name"], "action": "allow"}
+            })],
+            ds_id,
+            None,
+        )
+        .await;
+
+    // Deny email on customers only
+    server
+        .create_and_assign_policy(
+            "deny-customers-email-join01",
+            "deny",
+            vec![json!({
+                "obligation_type": "column_access",
+                "definition": {"schema": schema, "table": "customers", "columns": ["email"], "action": "deny"}
+            })],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_join01", "UserPass1!", "ds_join01")
+        .await;
+
+    // JOIN query — orders.email should be visible, customers.email stripped
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT o.email FROM {schema}.customers c JOIN {schema}.orders o ON c.id = o.id"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0][0], "order@example.com",
+        "orders.email should be visible"
+    );
+}
+
+// ===========================================================================
+// TC-ZT-01: Zero-trust — row_filter only, no column_access allow → error
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_zt_01_implicit_blackout() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_zt01";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.users;
+             CREATE TABLE {schema}.users (id INT, tenant TEXT, name TEXT);
+             INSERT INTO {schema}.users VALUES (1, 'acme', 'Alice');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_zt01", "policy_required").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_zt01", "UserPass1!", "acme", ds_id)
+        .await;
+
+    // Permit policy with row_filter only — no column_access allow obligation
+    // In zero-trust mode this activates an empty whitelist → AllColumnsDenied
+    server
+        .create_and_assign_policy(
+            "row-filter-only-zt01",
+            "permit",
+            vec![json!({
+                "obligation_type": "row_filter",
+                "definition": {
+                    "schema": schema,
+                    "table": "users",
+                    "filter_expression": "tenant = {user.tenant}"
+                }
+            })],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_zt01", "UserPass1!", "ds_zt01")
+        .await;
+    let result = client
+        .simple_query(&format!("SELECT * FROM {schema}.users"))
+        .await;
+    assert!(
+        result.is_err(),
+        "TC-ZT-01: row_filter-only permit should deny all columns (empty whitelist)"
+    );
+}
+
+// ===========================================================================
+// TC-ZT-02: Zero-trust — explicit whitelist [id, name] → only those visible
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_zt_02_explicit_whitelist() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_zt02";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.users;
+             CREATE TABLE {schema}.users (id INT, name TEXT, secret TEXT);
+             INSERT INTO {schema}.users VALUES (1, 'Alice', 'top-secret');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_zt02", "policy_required").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_zt02", "UserPass1!", "default", ds_id)
+        .await;
+
+    server
+        .create_and_assign_policy(
+            "whitelist-id-name-zt02",
+            "permit",
+            vec![json!({
+                "obligation_type": "column_access",
+                "definition": {
+                    "schema": schema,
+                    "table": "users",
+                    "columns": ["id", "name"],
+                    "action": "allow"
+                }
+            })],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_zt02", "UserPass1!", "ds_zt02")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT * FROM {schema}.users"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    // Result should have exactly 2 columns: id and name (secret stripped)
+    assert_eq!(
+        rows[0].len(),
+        2,
+        "TC-ZT-02: only id and name should be visible"
+    );
+    assert_eq!(rows[0][0], "1");
+    assert_eq!(rows[0][1], "Alice");
+}
+
+// ===========================================================================
+// TC-ZT-03: Zero-trust — wildcard whitelist ["*"] + row_filter → all visible
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_zt_03_wildcard_whitelist() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_zt03";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT, amount INT);
+             INSERT INTO {schema}.orders VALUES
+               (1, 'acme', 100),
+               (2, 'globex', 200);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_zt03", "policy_required").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_zt03", "UserPass1!", "acme", ds_id)
+        .await;
+
+    server
+        .create_and_assign_policy(
+            "wildcard-whitelist-zt03",
+            "permit",
+            vec![
+                json!({
+                    "obligation_type": "column_access",
+                    "definition": {"schema": schema, "table": "orders", "columns": ["*"], "action": "allow"}
+                }),
+                json!({
+                    "obligation_type": "row_filter",
+                    "definition": {"schema": schema, "table": "orders", "filter_expression": "tenant = {user.tenant}"}
+                }),
+            ],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_zt03", "UserPass1!", "ds_zt03")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT * FROM {schema}.orders ORDER BY id"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(
+        rows.len(),
+        1,
+        "TC-ZT-03: row_filter should restrict to acme rows"
+    );
+    assert_eq!(
+        rows[0].len(),
+        3,
+        "TC-ZT-03: all 3 columns should be visible with wildcard"
+    );
+    assert_eq!(rows[0][1], "acme");
+}
+
+// ===========================================================================
+// TC-DENY-01: Deny wins — allow email, then deny email → email stripped
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_deny_01_deny_wins() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_deny01";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.contacts;
+             CREATE TABLE {schema}.contacts (id INT, email TEXT, name TEXT);
+             INSERT INTO {schema}.contacts VALUES (1, 'alice@example.com', 'Alice');"
+        ))
+        .await;
+
+    let ds_id = server
+        .create_datasource("ds_deny01", "policy_required")
+        .await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_deny01", "UserPass1!", "default", ds_id)
+        .await;
+
+    // Policy A: allow email (and all other columns)
+    server
+        .create_and_assign_policy(
+            "allow-email-deny01",
+            "permit",
+            vec![json!({
+                "obligation_type": "column_access",
+                "definition": {"schema": schema, "table": "contacts", "columns": ["id", "email", "name"], "action": "allow"}
+            })],
+            ds_id,
+            None,
+        )
+        .await;
+
+    // Policy B: deny email
+    server
+        .create_and_assign_policy(
+            "deny-email-deny01",
+            "deny",
+            vec![json!({
+                "obligation_type": "column_access",
+                "definition": {"schema": schema, "table": "contacts", "columns": ["email"], "action": "deny"}
+            })],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_deny01", "UserPass1!", "ds_deny01")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT * FROM {schema}.contacts"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].len(),
+        2,
+        "TC-DENY-01: deny wins, email should be stripped"
+    );
+    // id and name remain; email is gone
+    assert_eq!(rows[0][0], "1");
+    assert_eq!(rows[0][1], "Alice");
+}
+
+// ===========================================================================
+// TC-DENY-02: Absolute veto — allow id, deny ["*"] → 0 columns visible
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_deny_02_absolute_veto() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_deny02";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.records;
+             CREATE TABLE {schema}.records (id INT, data TEXT);
+             INSERT INTO {schema}.records VALUES (1, 'sensitive');"
+        ))
+        .await;
+
+    let ds_id = server
+        .create_datasource("ds_deny02", "policy_required")
+        .await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_deny02", "UserPass1!", "default", ds_id)
+        .await;
+
+    // Policy A: allow id
+    server
+        .create_and_assign_policy(
+            "allow-id-deny02",
+            "permit",
+            vec![json!({
+                "obligation_type": "column_access",
+                "definition": {"schema": schema, "table": "records", "columns": ["id"], "action": "allow"}
+            })],
+            ds_id,
+            None,
+        )
+        .await;
+
+    // Policy B: deny all columns with wildcard
+    server
+        .create_and_assign_policy(
+            "deny-all-deny02",
+            "deny",
+            vec![json!({
+                "obligation_type": "column_access",
+                "definition": {"schema": schema, "table": "records", "columns": ["*"], "action": "deny"}
+            })],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_deny02", "UserPass1!", "ds_deny02")
+        .await;
+    let result = client
+        .simple_query(&format!("SELECT * FROM {schema}.records"))
+        .await;
+    assert!(
+        result.is_err(),
+        "TC-DENY-02: deny [*] must veto all columns including the allowed id"
+    );
+}
+
+// ===========================================================================
+// TC-GLOB-01: Suffix glob — deny ["*_at"] strips timestamp columns, keeps name
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_glob_01_suffix_glob() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_glob01";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.events;
+             CREATE TABLE {schema}.events (id INT, name TEXT, created_at TIMESTAMP, updated_at TIMESTAMP);
+             INSERT INTO {schema}.events VALUES (1, 'launch', NOW(), NOW());"
+        ))
+        .await;
+
+    let ds_id = server
+        .create_datasource("ds_glob01", "policy_required")
+        .await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_glob01", "UserPass1!", "default", ds_id)
+        .await;
+
+    // Allow all columns
+    server
+        .create_and_assign_policy(
+            "allow-all-glob01",
+            "permit",
+            vec![json!({
+                "obligation_type": "column_access",
+                "definition": {"schema": schema, "table": "events", "columns": ["*"], "action": "allow"}
+            })],
+            ds_id,
+            None,
+        )
+        .await;
+
+    // Deny *_at columns (suffix glob)
+    server
+        .create_and_assign_policy(
+            "deny-timestamps-glob01",
+            "deny",
+            vec![json!({
+                "obligation_type": "column_access",
+                "definition": {"schema": schema, "table": "events", "columns": ["*_at"], "action": "deny"}
+            })],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_glob01", "UserPass1!", "ds_glob01")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT * FROM {schema}.events"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].len(),
+        2,
+        "TC-GLOB-01: *_at glob should strip created_at and updated_at, leaving id and name"
+    );
+    assert_eq!(rows[0][0], "1");
+    assert_eq!(rows[0][1], "launch");
+}
+
+// ===========================================================================
+// TC-GLOB-03: Case sensitivity — deny ["Email"] does NOT strip lowercase "email"
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_glob_03_case_sensitivity() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_glob03";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.contacts;
+             CREATE TABLE {schema}.contacts (id INT, email TEXT);
+             INSERT INTO {schema}.contacts VALUES (1, 'alice@example.com');"
+        ))
+        .await;
+
+    let ds_id = server
+        .create_datasource("ds_glob03", "policy_required")
+        .await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_glob03", "UserPass1!", "default", ds_id)
+        .await;
+
+    // Allow all columns
+    server
+        .create_and_assign_policy(
+            "allow-all-glob03",
+            "permit",
+            vec![json!({
+                "obligation_type": "column_access",
+                "definition": {"schema": schema, "table": "contacts", "columns": ["*"], "action": "allow"}
+            })],
+            ds_id,
+            None,
+        )
+        .await;
+
+    // Deny "Email" (capitalized) — Postgres columns are lowercase "email"
+    // Case-sensitive matching means this deny should NOT strip the email column
+    server
+        .create_and_assign_policy(
+            "deny-Email-glob03",
+            "deny",
+            vec![json!({
+                "obligation_type": "column_access",
+                "definition": {"schema": schema, "table": "contacts", "columns": ["Email"], "action": "deny"}
+            })],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_glob03", "UserPass1!", "ds_glob03")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT * FROM {schema}.contacts"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].len(),
+        2,
+        "TC-GLOB-03: case-sensitive deny 'Email' must NOT strip lowercase 'email'"
+    );
+    assert_eq!(rows[0][1], "alice@example.com");
+}

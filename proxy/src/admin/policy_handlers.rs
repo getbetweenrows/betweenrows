@@ -15,12 +15,14 @@ use crate::entity::{
     data_source, policy, policy_assignment, policy_obligation, policy_version, proxy_user,
 };
 
+use crate::policy_match::ObligationType;
+
 use super::{
     AdminState, ApiErr,
     dto::{
         AssignPolicyRequest, CreatePolicyRequest, ListPoliciesQuery, ObligationRequest,
         ObligationResponse, PaginatedResponse, PolicyAssignmentResponse, PolicyResponse,
-        UpdatePolicyRequest, validate_policy_name,
+        UpdatePolicyRequest, validate_obligation, validate_policy_name,
     },
     jwt::AdminClaims,
 };
@@ -36,7 +38,7 @@ fn validate_no_deny_column_mask(
     if effect == "deny"
         && obligations
             .iter()
-            .any(|o| o.obligation_type == "column_mask")
+            .any(|o| o.obligation_type == ObligationType::ColumnMask)
     {
         Some("column_mask obligations are not supported on deny-effect policies")
     } else {
@@ -291,6 +293,11 @@ pub async fn create_policy(
         return Err(ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, err));
     }
 
+    // Validate obligation definition shapes
+    for obl in &body.obligations {
+        validate_obligation(obl).map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    }
+
     let now = Utc::now().naive_utc();
     let policy_id = Uuid::now_v7();
     let txn = state.db.begin().await.map_err(ApiErr::internal)?;
@@ -325,7 +332,7 @@ pub async fn create_policy(
         let m = policy_obligation::ActiveModel {
             id: Set(Uuid::now_v7()),
             policy_id: Set(policy_id),
-            obligation_type: Set(obl.obligation_type.clone()),
+            obligation_type: Set(obl.obligation_type.to_string()),
             definition: Set(def_json),
             created_at: Set(now),
             updated_at: Set(now),
@@ -461,11 +468,15 @@ pub async fn update_policy(
         )));
     }
 
-    // Validate deny + column_mask combination
+    // Validate deny + column_mask combination and obligation definition shapes
     let final_effect = body.effect.as_deref().unwrap_or(&p.effect);
     if let Some(ref new_obls) = body.obligations {
         if let Some(err) = validate_no_deny_column_mask(final_effect, new_obls) {
             return Err(ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, err));
+        }
+        for obl in new_obls {
+            validate_obligation(obl)
+                .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
         }
     } else if final_effect == "deny" {
         // No new obligations provided but effect is (or stays) deny — check existing ones
@@ -533,7 +544,7 @@ pub async fn update_policy(
             let m = policy_obligation::ActiveModel {
                 id: Set(Uuid::now_v7()),
                 policy_id: Set(id),
-                obligation_type: Set(obl.obligation_type.clone()),
+                obligation_type: Set(obl.obligation_type.to_string()),
                 definition: Set(def_json),
                 created_at: Set(now),
                 updated_at: Set(now),
@@ -1066,7 +1077,11 @@ mod tests {
                         "obligations": [
                             {
                                 "obligation_type": "row_filter",
-                                "definition": {"filter": "tenant_id = '{user.tenant}'"}
+                                "definition": {
+                                    "schema": "public",
+                                    "table": "orders",
+                                    "filter_expression": "tenant_id = {user.tenant}"
+                                }
                             }
                         ]
                     })))
@@ -1389,6 +1404,222 @@ mod tests {
             .unwrap();
 
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // ===== Obligation type & definition validation =====
+
+    #[tokio::test]
+    async fn create_policy_unknown_obligation_type_rejected() {
+        // Unknown obligation_type strings fail JSON deserialization → 422
+        let db = setup_db().await;
+        let admin_id = Uuid::now_v7();
+        insert_user(&db, admin_id, "admin").await;
+
+        let token = admin_token(admin_id);
+        let res = make_router(make_state(db))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "bad-type",
+                        "effect": "permit",
+                        "obligations": [
+                            {
+                                "obligation_type": "banana",
+                                "definition": {}
+                            }
+                        ]
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn create_policy_row_filter_missing_fields_422() {
+        let db = setup_db().await;
+        let admin_id = Uuid::now_v7();
+        insert_user(&db, admin_id, "admin").await;
+
+        let token = admin_token(admin_id);
+        let res = make_router(make_state(db))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "bad-row-filter",
+                        "effect": "permit",
+                        "obligations": [
+                            {
+                                "obligation_type": "row_filter",
+                                "definition": {"schema": "public"}
+                                // missing "table" and "filter_expression"
+                            }
+                        ]
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn create_policy_column_access_invalid_action_422() {
+        let db = setup_db().await;
+        let admin_id = Uuid::now_v7();
+        insert_user(&db, admin_id, "admin").await;
+
+        let token = admin_token(admin_id);
+        let res = make_router(make_state(db))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "bad-action",
+                        "effect": "permit",
+                        "obligations": [
+                            {
+                                "obligation_type": "column_access",
+                                "definition": {
+                                    "schema": "*",
+                                    "table": "*",
+                                    "columns": ["ssn"],
+                                    "action": "grant"  // invalid — must be "allow" or "deny"
+                                }
+                            }
+                        ]
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn create_policy_object_access_non_deny_action_422() {
+        let db = setup_db().await;
+        let admin_id = Uuid::now_v7();
+        insert_user(&db, admin_id, "admin").await;
+
+        let token = admin_token(admin_id);
+        let res = make_router(make_state(db))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "bad-obj-action",
+                        "effect": "deny",
+                        "obligations": [
+                            {
+                                "obligation_type": "object_access",
+                                "definition": {
+                                    "schema": "private",
+                                    "action": "allow"  // invalid — object_access only supports "deny"
+                                }
+                            }
+                        ]
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn create_policy_valid_obligations_accepted() {
+        // Verify all four obligation types with valid definitions are accepted
+        let db = setup_db().await;
+        let admin_id = Uuid::now_v7();
+        insert_user(&db, admin_id, "admin").await;
+
+        let token = admin_token(admin_id);
+
+        // row_filter
+        let res = make_router(make_state(db.clone()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "valid-row-filter",
+                        "effect": "permit",
+                        "obligations": [{
+                            "obligation_type": "row_filter",
+                            "definition": {"schema": "public", "table": "orders", "filter_expression": "tenant = {user.tenant}"}
+                        }]
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+
+        // object_access (deny)
+        let res = make_router(make_state(db.clone()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "valid-object-access",
+                        "effect": "deny",
+                        "obligations": [{
+                            "obligation_type": "object_access",
+                            "definition": {"schema": "private", "action": "deny"}
+                        }]
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+
+        // object_access with optional table field
+        let res = make_router(make_state(db))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "valid-object-access-table",
+                        "effect": "deny",
+                        "obligations": [{
+                            "obligation_type": "object_access",
+                            "definition": {"schema": "private", "table": "secrets", "action": "deny"}
+                        }]
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ This document lists attack vectors and corresponding integration tests for the p
 
 ## Test environment
 
-Integration tests live in `proxy/tests/`. They require a PostgreSQL instance and a configured datasource. Set `TEST_DATABASE_URL` to a test Postgres database.
+Integration tests live in `proxy/tests/policy_enforcement.rs`. They use `testcontainers` to spin up a real Postgres container automatically — no manual database setup or environment variables required. Run with `cargo test --test policy_enforcement`.
 
 ---
 
@@ -121,38 +121,6 @@ WITH data AS (SELECT * FROM orders) SELECT * FROM data
 **Defense**: `PUT /policies/{id}` requires the current `version` in the payload. If `version` doesn't match, the server returns `409 Conflict`. The client must reload and retry.
 
 **Test**: Fetch policy at version 1. Submit update with `version: 1`. Concurrently submit another update with `version: 1`. Verify one returns `409` and the other succeeds.
-
----
-
-## Planned integration test file
-
-`proxy/tests/policy_enforcement.rs`:
-
-```rust
-#[tokio::test]
-async fn row_filter_tenant_isolation() { ... }
-
-#[tokio::test]
-async fn row_filter_template_variable_injection_safe() { ... }
-
-#[tokio::test]
-async fn row_filter_bypasses_table_alias() { ... }
-
-#[tokio::test]
-async fn row_filter_bypasses_cte() { ... }
-
-#[tokio::test]
-async fn column_access_deny_star_expansion() { ... }
-
-#[tokio::test]
-async fn column_mask_direct_column_reference() { ... }
-
-#[tokio::test]
-async fn join_both_tables_filtered() { ... }
-
-#[tokio::test]
-async fn policy_required_no_policy_returns_empty() { ... }
-```
 
 ---
 

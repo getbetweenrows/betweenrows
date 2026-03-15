@@ -2,30 +2,15 @@
 
 ## Policy System
 
-### Zero-Trust Column Model & JOIN Fix Verification Suite
+### Remaining Integration Test Cases
 
-- **TC-JOIN-01 (JOIN Collision)**: JOIN `customers` and `orders`. Both have an `email` column. **Deny** `email` on `customers` only. Verify `orders.email` is visible while `customers.email` is stripped.
+The following TC-* scenarios are defined but not yet covered by integration tests (`proxy/tests/policy_enforcement.rs`). Implemented cases have already been removed from this list.
+
 - **TC-JOIN-02 (Multi-Table JOIN)**: JOIN 3 tables (`a`, `b`, `c`) all with `id`. **Allow** `id` on `b` only. Verify the result set contains exactly one `id` column (from `b`).
 - **TC-JOIN-03 (Aliasing)**: `SELECT c.email FROM customers AS c`. **Deny** `email` on `customers`. Verify `c.email` is stripped correctly (rewriter resolves alias `c` to `customers`).
-- **TC-ZT-01 (Implicit Blackout)**: Permit policy with `row_filter` only (no `allow` obligations). Verify `AllColumnsDenied` error (Whitelist activated but empty).
-- **TC-ZT-02 (Explicit Whitelist)**: Permit policy with `allow ["id", "name"]`. Verify only `id` and `name` are returned.
-- **TC-ZT-03 (Wildcard Whitelist)**: Permit policy with `allow ["*"]` + `row_filter`. Verify all columns are visible.
-- **TC-ZT-04 (Sidebar Sync)**: Engine `compute_user_visibility` with `row_filter` only. Verify table exists in sidebar but has 0 columns.
-- **TC-DENY-01 (Deny Wins)**: Policy A: `allow ["email"]`. Policy B: `deny ["email"]`. Verify `email` is stripped.
-- **TC-DENY-02 (Absolute Veto)**: Policy A: `allow ["id"]`. Policy B: `deny ["*"]`. Verify 0 columns visible (Deny `*` wins over explicit allow).
+- **TC-ZT-04 (Sidebar Sync)**: Engine `compute_user_visibility` with `row_filter` only. Verify table exists in sidebar but has 0 columns (requires engine-level test or catalog API assertion).
 - **TC-PLAN-01 (CTE Leak)**: `WITH t AS (SELECT * FROM users) SELECT ssn FROM t`. **Deny** `ssn`. Verify `ssn` is stripped inside the CTE definition (at the scan level).
 - **TC-PLAN-02 (Subquery in FROM)**: `SELECT sub.ssn FROM (SELECT * FROM users) AS sub`. **Deny** `ssn`. Verify inner `SELECT *` is rewritten to exclude `ssn`.
-- **TC-GLOB-01 (Suffix Glob)**: `deny ["*_at"]` against `created_at`, `updated_at`, `name`. Verify `name` remains; `*_at` columns are stripped.
-- **TC-GLOB-03 (Case Sensitivity)**: Deny `["Email"]` on a Postgres `email` column. Verify `email` survives (patterns are case-sensitive to match Postgres).
-
-### Visibility follows Access
-
-- Differentiate metadata access (virtual schema) and data access (cells, values)
-- Philosophy: "Visibility follows Access" - if you can access a schema/table/column, you can see it in your SQL client sidebar
-- To avoid evaluating policies twice (connection time for virtual schema, query time for filtering):
-  - Store CompiledVisibility in admin store, updated on policy create/update
-  - Need to determine best approach: database trigger vs code in API
-- Need to define schema for storing pre-compiled visibility
 
 ### Configurable Policies
 
@@ -175,23 +160,11 @@ This section details the core mechanisms we are implementing to achieve parity w
 - Users must not interrupt this migration
 - Explore mitigation at framework level or provide better tooling/guidance
 
-### Error Handling for Policy Definitions
-
-- How are errors in filter_expression or mask_expression handled at runtime?
-- Need robust validation during policy creation/update to prevent syntactically incorrect or semantically invalid expressions
-- Phase D mentions "Definition validation (parse expressions, check catalog references)" - good
-
-> **See also:** Implementation status mentions "Definition validation (parse expressions, check catalog references)"
-
 ### Allow Testing/Preview Policy Before Deployment
 
 - Allow sudo as a user to test out the policy if the policy isn't for the admin
 
 > **See also:** DM-05 (verbose mode to explain why row filtered/masked), DM-04 (canary rollout for testing policies on subset of users)
-
-### Wildcard `*` Support for Column Names in `column_access` ✅ Resolved
-
-- **Implemented 2026-03-11**: `column_access` columns field now supports glob patterns (`"*"`, `"prefix_*"`, `"*_suffix"`) via `expand_column_patterns()` in `policy_match.rs`. Used in both `PolicyHook` (per-TableScan via `apply_projection_qualified`) and `compute_user_visibility()` in `engine/mod.rs`. Full wildcard `["*"]` denies all columns, glob patterns match subsets.
 
 ### Conditional Column Masking
 
@@ -531,14 +504,6 @@ Benefit: This ensures that if we need to override a "v1" style for a specific ed
 - Consider big refactoring if needed to reduce tech debt and improve maintainability
 
 Specific areas identified from 2026-03-08 bug fixes — worth revisiting in a dedicated refactoring pass:
-
-#### `column_access deny` logic is in three places ✅ Resolved (2026-03-11)
-
-All three sites now share `expand_column_patterns()` from `policy_match.rs` for column glob expansion. `ObligationEffects::collect` unifies deny logic into `column_deny_patterns: HashMap<(schema, table), Vec<pattern>>` — the same per-table key used by both the permit and deny loops. `compute_user_visibility()` also calls `expand_column_patterns` against Arrow schema fields. Single source of truth for matching semantics.
-
-#### `handle_query` is too large ✅ Partially resolved (2026-03-11)
-
-Refactored into `apply_row_filters` (per-TableScan Filter injection via `transform_up`) and `apply_projection_qualified` (single qualifier-aware top-level Projection). The zero-trust refactor also extracted `ObligationEffects::collect` for obligation gathering and `has_effects` for early-out detection. `handle_query` is now a coordinator of well-named sub-methods.
 
 #### `rebuild_contexts_for_datasource` has a brief staleness window
 

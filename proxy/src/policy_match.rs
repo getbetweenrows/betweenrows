@@ -1,5 +1,38 @@
 use std::collections::{HashMap, HashSet};
 
+// ---------- obligation type enum ----------
+
+/// Strongly-typed obligation type identifier.
+///
+/// Serialized as snake_case (e.g. `"row_filter"`, `"column_mask"`) in JSON.
+/// Unknown values are rejected at deserialization time, which catches
+/// typos and invalid obligation types before they reach the database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObligationType {
+    RowFilter,
+    ColumnMask,
+    ColumnAccess,
+    ObjectAccess,
+}
+
+impl ObligationType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RowFilter => "row_filter",
+            Self::ColumnMask => "column_mask",
+            Self::ColumnAccess => "column_access",
+            Self::ObjectAccess => "object_access",
+        }
+    }
+}
+
+impl std::fmt::Display for ObligationType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 // ---------- obligation definitions ----------
 
 /// Parsed definition for a `row_filter` obligation.

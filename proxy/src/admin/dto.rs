@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::entity::proxy_user;
+use crate::policy_match::ObligationType;
 
 // ---------- user requests ----------
 
@@ -331,8 +332,84 @@ pub struct CatalogColumnResponse {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ObligationRequest {
-    pub obligation_type: String, // "row_filter" | "column_mask" | "column_access"
+    pub obligation_type: ObligationType,
     pub definition: serde_json::Value,
+}
+
+/// Validate the shape of an obligation's `definition` JSON.
+///
+/// Checks that all required fields are present and have the correct types.
+/// Additional unknown fields are allowed (forward-compatible for future extensions
+/// like `condition`, `priority`, etc.).
+///
+/// Returns `Err(String)` with a human-readable message on failure.
+pub fn validate_obligation(obl: &ObligationRequest) -> Result<(), String> {
+    let def = &obl.definition;
+    match obl.obligation_type {
+        ObligationType::RowFilter => {
+            require_str_field(def, "row_filter", "schema")?;
+            require_str_field(def, "row_filter", "table")?;
+            require_str_field(def, "row_filter", "filter_expression")?;
+        }
+        ObligationType::ColumnMask => {
+            require_str_field(def, "column_mask", "schema")?;
+            require_str_field(def, "column_mask", "table")?;
+            require_str_field(def, "column_mask", "column")?;
+            require_str_field(def, "column_mask", "mask_expression")?;
+        }
+        ObligationType::ColumnAccess => {
+            require_str_field(def, "column_access", "schema")?;
+            require_str_field(def, "column_access", "table")?;
+            match def.get("columns") {
+                Some(v) if v.is_array() => {}
+                Some(_) => {
+                    return Err(
+                        "column_access obligation: 'columns' must be an array of strings"
+                            .to_string(),
+                    );
+                }
+                None => {
+                    return Err(
+                        "column_access obligation: missing required field 'columns'".to_string()
+                    );
+                }
+            }
+            let action = def.get("action").and_then(|v| v.as_str()).ok_or_else(|| {
+                "column_access obligation: missing required field 'action'".to_string()
+            })?;
+            if action != "allow" && action != "deny" {
+                return Err(
+                    "column_access obligation: 'action' must be 'allow' or 'deny'".to_string(),
+                );
+            }
+        }
+        ObligationType::ObjectAccess => {
+            require_str_field(def, "object_access", "schema")?;
+            let action = def.get("action").and_then(|v| v.as_str()).ok_or_else(|| {
+                "object_access obligation: missing required field 'action'".to_string()
+            })?;
+            if action != "deny" {
+                return Err("object_access obligation: 'action' must be 'deny'".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn require_str_field(
+    def: &serde_json::Value,
+    obligation_type: &str,
+    field: &str,
+) -> Result<(), String> {
+    match def.get(field) {
+        Some(v) if v.is_string() => Ok(()),
+        Some(_) => Err(format!(
+            "{obligation_type} obligation: field '{field}' must be a string"
+        )),
+        None => Err(format!(
+            "{obligation_type} obligation: missing required field '{field}'"
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]

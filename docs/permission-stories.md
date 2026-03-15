@@ -460,22 +460,3 @@ _Scenarios where multiple rules must fire correctly on a single query. These val
 
 ---
 
-## Implementation Status
-
-### P0 (Implemented)
-
-The following stories are implemented in the current release via the policy system:
-
-| Story | Status | Implementation |
-|-------|--------|----------------|
-| DS-01 | ✅ | `column_mask` obligation |
-| DS-02 | ✅ | `column_mask` obligation (using `NULL` or literal) |
-| DS-04 | ✅ | `column_mask` obligation (using literal string) |
-| DS-10 | ✅ | `column_access deny` obligation |
-| MT-01 | ✅ | `row_filter` obligation |
-| MT-05 | ✅ | Admin-assigned "Allow All" policy |
-| MT-06 | ✅ | `row_filter` using `IN (...)` |
-| RE-01 | ✅ | `join_through` in `row_filter` |
-| CC-01 | ✅ | `access_mode: policy_required` |
-| CC-03 | ✅ | Multi-policy composition |
-| AU-01 | ✅ | Audit logging (original vs rewritten) |

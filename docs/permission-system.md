@@ -103,6 +103,8 @@ Unlike `column_access deny` (which strips columns from results), `object_access 
 
 > **`column_mask` on deny policies is invalid.** The API returns `422 Unprocessable Entity` if you attempt to create or update a `deny`-effect policy with a `column_mask` obligation. The UI hides `column_mask` from the available obligation types when `deny` is selected. Only `column_access` and `object_access` obligations are supported on deny policies.
 
+> **Obligation definition validation.** The API validates obligation definitions at create/update time and returns `422 Unprocessable Entity` for malformed payloads: unknown `obligation_type` values, missing required fields (`schema`, `table`, `filter_expression`, `column`, `mask_expression`, `columns`, `action`), wrong field types, or invalid `action` values (`column_access` accepts `"allow"` or `"deny"`; `object_access` accepts `"deny"` only). Extra fields in the definition are permitted for forward compatibility.
+
 ## Template variables
 
 Filter and mask expressions can reference the authenticated user's attributes:

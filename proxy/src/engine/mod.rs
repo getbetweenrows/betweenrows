@@ -911,13 +911,14 @@ impl EngineCache {
         let mut column_allow_patterns: HashMap<(String, String), Vec<String>> = HashMap::new();
 
         for obl in &obligations {
-            // Only column_access "allow" from permit policies grants table visibility.
+            // Only column_access from permit policies grants table visibility.
             // row_filter and column_mask do NOT grant access (zero-trust model).
+            // The obligation's intent is derived from the policy effect: permit → allowlist,
+            // deny → denylist. There is no obligation-level action field.
             if permit_policy_ids.contains(&obl.policy_id)
                 && obl.obligation_type == "column_access"
                 && let Ok(col_def) =
                     serde_json::from_str::<crate::policy_match::ColumnAccessDef>(&obl.definition)
-                && col_def.action == "allow"
             {
                 for (df_alias, vs) in &catalog.schemas {
                     for table_name in vs.tables.keys() {
@@ -939,13 +940,13 @@ impl EngineCache {
                 }
             }
 
-            // column_access deny from any policy hides columns from the schema.
+            // column_access from deny-effect policies hides columns from the schema.
             // Patterns are expanded against actual field names at build time so that
             // glob patterns (*_name, secret_*) are resolved to exact column names here.
-            if obl.obligation_type == "column_access"
+            if !permit_policy_ids.contains(&obl.policy_id)
+                && obl.obligation_type == "column_access"
                 && let Ok(col_def) =
                     serde_json::from_str::<crate::policy_match::ColumnAccessDef>(&obl.definition)
-                && col_def.action == "deny"
             {
                 for (df_alias, vs) in &catalog.schemas {
                     for (table_name, table) in &vs.tables {
@@ -2052,7 +2053,6 @@ mod tests {
         let obl_def = serde_json::json!({
             "schema": schema,
             "table": table,
-            "action": "deny",
             "columns": columns
         })
         .to_string();
@@ -2510,5 +2510,174 @@ mod tests {
         let big_denied = denied_col_names(&denied, "big_table");
 
         assert_eq!(big_denied.len(), 100, "All 100 columns should be denied");
+    }
+
+    // ─── schema alias + policy_required regression tests ────────────────────
+
+    async fn insert_datasource_with_access_mode(
+        db: &sea_orm::DatabaseConnection,
+        ds_id: Uuid,
+        access_mode: &str,
+    ) {
+        use crate::entity::data_source;
+        use chrono::Utc;
+        use sea_orm::ActiveModelTrait;
+
+        let now = Utc::now().naive_utc();
+        data_source::ActiveModel {
+            id: sea_orm::Set(ds_id),
+            name: sea_orm::Set(format!("ds-alias-{ds_id}")),
+            ds_type: sea_orm::Set("postgres".to_string()),
+            config: sea_orm::Set("{}".to_string()),
+            secure_config: sea_orm::Set(String::new()),
+            is_active: sea_orm::Set(true),
+            access_mode: sea_orm::Set(access_mode.to_string()),
+            last_sync_at: sea_orm::Set(None),
+            last_sync_result: sea_orm::Set(None),
+            created_at: sea_orm::Set(now),
+            updated_at: sea_orm::Set(now),
+        }
+        .insert(db)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_permit_policy_column_access_all(
+        db: &sea_orm::DatabaseConnection,
+        ds_id: Uuid,
+        user_id: Uuid,
+    ) {
+        use crate::entity::{policy, policy_assignment, policy_obligation};
+        use chrono::Utc;
+        use sea_orm::ActiveModelTrait;
+
+        let policy_id = Uuid::now_v7();
+        let now = Utc::now().naive_utc();
+
+        policy::ActiveModel {
+            id: sea_orm::Set(policy_id),
+            name: sea_orm::Set(format!("permit-col-access-all-{policy_id}")),
+            description: sea_orm::Set(None),
+            effect: sea_orm::Set("permit".to_string()),
+            is_enabled: sea_orm::Set(true),
+            version: sea_orm::Set(1),
+            created_by: sea_orm::Set(user_id),
+            updated_by: sea_orm::Set(user_id),
+            created_at: sea_orm::Set(now),
+            updated_at: sea_orm::Set(now),
+        }
+        .insert(db)
+        .await
+        .unwrap();
+
+        // column_access with columns:["*"] — no action field; intent from policy effect.
+        policy_obligation::ActiveModel {
+            id: sea_orm::Set(Uuid::now_v7()),
+            policy_id: sea_orm::Set(policy_id),
+            obligation_type: sea_orm::Set("column_access".to_string()),
+            definition: sea_orm::Set(
+                serde_json::json!({
+                    "schema": "*",
+                    "table": "*",
+                    "columns": ["*"]
+                })
+                .to_string(),
+            ),
+            created_at: sea_orm::Set(now),
+            updated_at: sea_orm::Set(now),
+        }
+        .insert(db)
+        .await
+        .unwrap();
+
+        policy_assignment::ActiveModel {
+            id: sea_orm::Set(Uuid::now_v7()),
+            policy_id: sea_orm::Set(policy_id),
+            data_source_id: sea_orm::Set(ds_id),
+            user_id: sea_orm::Set(None), // wildcard
+            priority: sea_orm::Set(100),
+            created_at: sea_orm::Set(now),
+            updated_at: sea_orm::Set(now),
+        }
+        .insert(db)
+        .await
+        .unwrap();
+    }
+
+    fn make_aliased_catalog(ds_id: Uuid, access_mode: &str) -> CachedCatalog {
+        // Source schema "public" is exposed to DataFusion under alias "public_alias".
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let mut tables = HashMap::new();
+        tables.insert(
+            "performer".to_string(),
+            VirtualCatalogTable {
+                table_name: "performer".to_string(),
+                arrow_schema: schema,
+            },
+        );
+        let mut schemas = HashMap::new();
+        schemas.insert(
+            "public_alias".to_string(),
+            VirtualCatalogSchema {
+                schema_name: "public".to_string(),
+                tables,
+            },
+        );
+        CachedCatalog {
+            datasource_id: ds_id,
+            schemas,
+            default_schema: "public_alias".to_string(),
+            access_mode: access_mode.to_string(),
+        }
+    }
+
+    /// Regression: a permit policy with `column_access` columns:["*"] must grant full
+    /// visibility in policy_required mode. Before the action-field removal, the same
+    /// policy with action:"deny" would produce visible_tables=Some(empty) — making all
+    /// tables invisible and causing "table not found" on unqualified queries due to the
+    /// default schema falling back to the hardcoded "public" instead of the alias.
+    #[tokio::test]
+    async fn test_permit_column_access_wildcard_grants_full_visibility_policy_required() {
+        let db = setup_visibility_db().await;
+        let ds_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+
+        insert_test_user(&db, user_id).await;
+        insert_datasource_with_access_mode(&db, ds_id, "policy_required").await;
+        insert_permit_policy_column_access_all(&db, ds_id, user_id).await;
+
+        let cache = EngineCache::new(db, [0u8; 32]);
+        let catalog = make_aliased_catalog(ds_id, "policy_required");
+        let vis = cache
+            .compute_user_visibility(user_id, &catalog)
+            .await
+            .unwrap();
+
+        let filter = vis
+            .filter
+            .expect("Expected a visibility filter for policy_required datasource");
+        let visible = filter
+            .visible_tables
+            .expect("Expected Some(visible_tables) in policy_required mode");
+
+        // permit + column_access ["*"] must make the table visible.
+        assert!(
+            visible.contains(&("public_alias".to_string(), "performer".to_string())),
+            "Expected performer to be visible; got: {visible:?}"
+        );
+    }
+
+    /// Regression: select_default_schema returns "public" for an empty map (when all tables
+    /// are filtered by policy). The caller (build_user_context) must fall back to
+    /// catalog.default_schema rather than this hardcoded value so that unqualified table
+    /// references resolve to the correct alias schema.
+    #[test]
+    fn test_select_default_schema_empty_map_falls_back_to_public() {
+        let empty: HashMap<String, VirtualCatalogSchema> = HashMap::new();
+        // Documents the fallback: caller must prefer catalog.default_schema over this.
+        assert_eq!(select_default_schema(&empty), "public");
     }
 }

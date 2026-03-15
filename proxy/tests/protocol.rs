@@ -50,7 +50,6 @@ async fn setup_open_datasource(
                     "schema": schema,
                     "table": "*",
                     "columns": ["*"],
-                    "action": "allow"
                 }
             })],
             ds_id,

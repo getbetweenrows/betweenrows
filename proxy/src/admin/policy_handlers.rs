@@ -1255,7 +1255,7 @@ mod tests {
                         "obligations": [
                             {
                                 "obligation_type": "column_access",
-                                "definition": {"schema": "*", "table": "*", "columns": ["ssn"], "action": "deny"}
+                                "definition": {"schema": "*", "table": "*", "columns": ["ssn"]}
                             }
                         ]
                     })))
@@ -1475,7 +1475,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_policy_column_access_invalid_action_422() {
+    async fn create_policy_column_access_missing_columns_422() {
+        // column_access obligation requires the 'columns' array.
         let db = setup_db().await;
         let admin_id = Uuid::now_v7();
         insert_user(&db, admin_id, "admin").await;
@@ -1489,16 +1490,15 @@ mod tests {
                     .header("Authorization", format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
                     .body(json_body(serde_json::json!({
-                        "name": "bad-action",
+                        "name": "missing-columns",
                         "effect": "permit",
                         "obligations": [
                             {
                                 "obligation_type": "column_access",
                                 "definition": {
                                     "schema": "*",
-                                    "table": "*",
-                                    "columns": ["ssn"],
-                                    "action": "grant"  // invalid — must be "allow" or "deny"
+                                    "table": "*"
+                                    // 'columns' is missing — required field
                                 }
                             }
                         ]

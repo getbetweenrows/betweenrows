@@ -8,16 +8,16 @@ Permissions are defined as **policies**. A policy is a named, reusable unit that
 
 When a user runs a query:
 1. The proxy loads all **enabled** policies assigned to the datasource for that user.
-2. `deny` policies are evaluated first. A `row_filter` match on a deny policy rejects the query with an error. `column_access deny` obligations on deny policies are collected alongside those from permit policies (step 3).
-3. `permit` policies are applied — their obligations rewrite the query in-flight (row filters, column masks, column access controls). Column denies from both permit and deny policies are combined.
+2. `deny` policies are evaluated first. A `row_filter` match on a deny policy rejects the query with an error. `column_access` obligations on deny policies strip specific columns from results.
+3. `permit` policies are applied — their obligations rewrite the query in-flight (row filters, column masks, column access controls). Column denies from deny policies are applied on top.
 4. The rewritten query executes against the upstream database.
 
 ## Policy effects
 
-- **permit** — applies obligations to the query (row filtering, masking, etc.)
-- **deny** — primarily used to block access with an error. Can also carry `column_access deny` obligations to strip specific columns from results.
+- **permit** — applies obligations to the query (row filtering, masking, column allowlisting, etc.)
+- **deny** — primarily used to block access with an error. Can also carry `column_access` obligations to strip specific columns from results.
 
-Deny policies are evaluated before permit policies. If a deny policy has a matching `row_filter` obligation, the query is rejected immediately with an error. `column_access deny` obligations on deny policies strip columns from results just like they do on permit policies — they do not cause an error.
+Deny policies are evaluated before permit policies. If a deny policy has a matching `row_filter` obligation, the query is rejected immediately with an error. `column_access` obligations on deny policies strip columns from results — they do not cause an error.
 
 > **`is_enabled` flag**: only enabled policies are enforced. Disabling (or enabling) a policy removes (or adds) all its effects immediately — both for query-time enforcement and for schema visibility — without requiring a reconnect.
 >
@@ -57,22 +57,26 @@ Replaces a column's value with a masked expression in query results.
 
 When multiple mask policies target the same column, the one with the **lowest priority number** (highest precedence) wins.
 
-### column_access (deny)
+### column_access
 
-Removes the specified columns from query results entirely.
+Controls which columns a user can see. The **policy effect** determines the obligation's intent:
+
+- **In a `permit` policy** → acts as an **allowlist**: only the listed columns are visible; all others are hidden from schema metadata and query results. This is also the only obligation that makes a table accessible in `policy_required` mode.
+- **In a `deny` policy** → acts as a **denylist**: the listed columns are removed from schema metadata and query results.
 
 ```json
 {
   "schema": "public",
   "table": "customers",
-  "columns": ["ssn", "credit_card"],
-  "action": "deny"
+  "columns": ["ssn", "credit_card"]
 }
 ```
 
-Denied columns are unioned across all matching **enabled** policies, regardless of effect — if any enabled policy (permit or deny) denies a column, it is removed from the result. The column is also hidden from schema metadata (`information_schema.columns`) on the user's connection.
+Denied columns from `deny` policies are unioned — if any enabled deny policy removes a column, it is absent from results regardless of permit policies.
 
 If the query selects **only** denied columns (e.g. `SELECT ssn FROM customers`), the proxy returns SQLSTATE `42501` (insufficient privilege) with a message identifying the restricted columns rather than returning empty rows.
+
+Glob patterns are supported in the `columns` field — see [Column glob patterns](#column-glob-patterns-columns-field) below.
 
 ### object_access (deny)
 
@@ -103,7 +107,7 @@ Unlike `column_access deny` (which strips columns from results), `object_access 
 
 > **`column_mask` on deny policies is invalid.** The API returns `422 Unprocessable Entity` if you attempt to create or update a `deny`-effect policy with a `column_mask` obligation. The UI hides `column_mask` from the available obligation types when `deny` is selected. Only `column_access` and `object_access` obligations are supported on deny policies.
 
-> **Obligation definition validation.** The API validates obligation definitions at create/update time and returns `422 Unprocessable Entity` for malformed payloads: unknown `obligation_type` values, missing required fields (`schema`, `table`, `filter_expression`, `column`, `mask_expression`, `columns`, `action`), wrong field types, or invalid `action` values (`column_access` accepts `"allow"` or `"deny"`; `object_access` accepts `"deny"` only). Extra fields in the definition are permitted for forward compatibility.
+> **Obligation definition validation.** The API validates obligation definitions at create/update time and returns `422 Unprocessable Entity` for malformed payloads: unknown `obligation_type` values, missing required fields (`schema`, `table`, `filter_expression`, `column`, `mask_expression`, `columns`, `action`), wrong field types, or invalid `action` values (`object_access` requires `"deny"`). The `column_access` obligation has no `action` field — intent is determined by the enclosing policy's `effect`. Extra fields in the definition are permitted for forward compatibility.
 
 ## Template variables
 
@@ -173,47 +177,46 @@ Column visibility follows a **zero-trust** model in `policy_required` mode: a ta
 
 ### Obligation responsibility matrix
 
-| Obligation | Grants table access? | Grants column access? | Modifies data? |
-|---|---|---|---|
-| `row_filter` | **No** | No | Yes (filters rows) |
-| `column_mask` | **No** | No | Yes (transforms value) |
-| `column_access "allow"` | **Yes** | Yes (named columns only) | No |
-| `column_access "deny"` | **No** — does not unblock a table | Removes named columns | No |
-| `object_access "deny"` | Removes table/schema | Removes all | No |
+| Obligation | Policy effect | Grants table access? | Grants column access? | Modifies data? |
+|---|---|---|---|---|
+| `row_filter` | permit | **No** | No | Yes (filters rows) |
+| `column_mask` | permit | **No** | No | Yes (transforms value) |
+| `column_access` | **permit** | **Yes** | Yes (named columns only) | No |
+| `column_access` | **deny** | **No** — does not unblock a table | Removes named columns | No |
+| `object_access` | deny | Removes table/schema | Removes all | No |
 
-### `column_access "allow"` — the access grant obligation
+### `column_access` in a permit policy — the access grant obligation
 
-`column_access "allow"` is the **only** obligation that makes a table visible in `policy_required` mode. It also specifies which columns the user can see:
+`column_access` in a **permit** policy is the **only** obligation that makes a table visible in `policy_required` mode. It also specifies which columns the user can see:
 
 ```json
 {
   "schema": "public",
   "table": "customers",
-  "columns": ["id", "name", "email"],
-  "action": "allow"
+  "columns": ["id", "name", "email"]
 }
 ```
 
-With only this obligation, the user sees the `customers` table with exactly three columns. Any column not in the `columns` list is invisible in both schema metadata and query results.
+With only this obligation (on a permit policy), the user sees the `customers` table with exactly three columns. Any column not in the `columns` list is invisible in both schema metadata and query results.
 
 ### Composing access with row filters
 
-`column_access "allow"` and `row_filter` in the same policy stack correctly — the allow obligation grants access and column visibility, while the row filter restricts which rows are returned:
+`column_access` (permit) and `row_filter` in the same policy stack correctly — the `column_access` obligation grants access and column visibility, while the row filter restricts which rows are returned:
 
 ```json
 [
-  { "type": "column_access", "action": "allow", "schema": "public", "table": "customers", "columns": ["id", "name"] },
+  { "type": "column_access", "schema": "public", "table": "customers", "columns": ["id", "name"] },
   { "type": "row_filter",    "schema": "public", "table": "customers", "filter_expression": "organization_id = {user.tenant}" }
 ]
 ```
 
 Result: only `id` and `name` columns, filtered to the user's tenant rows.
 
-### `column_access "deny"` does not grant access
+### `column_access` in a deny policy does not grant access
 
-In `policy_required` mode, a policy that **only** has `column_access "deny"` obligations does **not** unblock the table. The table remains blocked by `lit(false)`. Use `column_access "allow"` first to grant access, then optionally layer `column_access "deny"` to remove specific columns.
+In `policy_required` mode, a **deny** policy with `column_access` obligations does **not** unblock the table. The table remains blocked by `lit(false)`. Use `column_access` on a **permit** policy first to grant access, then layer a `column_access` deny policy to strip specific columns.
 
-In `open` mode, `column_access "deny"` removes the specified columns from results (same behaviour as before).
+In `open` mode, `column_access` on a deny policy removes the specified columns from results.
 
 ### JOIN column scoping
 
@@ -443,16 +446,15 @@ Partially mask SSNs for support staff:
 ```
 
 ### Column access control (DS-10)
-Remove sensitive columns entirely:
+Remove sensitive columns entirely using a deny policy:
 ```yaml
 - name: hide-pii
-  effect: permit
+  effect: deny
   obligations:
     - type: column_access
       schema: public
       table: customers
       columns: [ssn, credit_card]
-      action: deny
 ```
 
 ### Admin full access (MT-05)

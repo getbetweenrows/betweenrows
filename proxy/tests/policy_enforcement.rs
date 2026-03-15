@@ -64,7 +64,6 @@ async fn row_filter_tenant_isolation() {
                         "schema": schema,
                         "table": "orders",
                         "columns": ["*"],
-                        "action": "allow"
                     }
                 }),
             ],
@@ -137,7 +136,6 @@ async fn template_variable_injection() {
                         "schema": schema,
                         "table": "orders",
                         "columns": ["*"],
-                        "action": "allow"
                     }
                 }),
             ],
@@ -206,7 +204,6 @@ async fn table_alias_bypass() {
                         "schema": schema,
                         "table": "orders",
                         "columns": ["*"],
-                        "action": "allow"
                     }
                 }),
             ],
@@ -272,7 +269,6 @@ async fn cte_bypass() {
                         "schema": schema,
                         "table": "orders",
                         "columns": ["*"],
-                        "action": "allow"
                     }
                 }),
             ],
@@ -340,7 +336,6 @@ async fn subquery_bypass() {
                         "schema": schema,
                         "table": "orders",
                         "columns": ["*"],
-                        "action": "allow"
                     }
                 }),
             ],
@@ -419,7 +414,6 @@ async fn star_expansion_column_deny() {
                     "schema": schema,
                     "table": "employees",
                     "columns": ["*"],
-                    "action": "allow"
                 }
             })],
             ds_id,
@@ -487,7 +481,6 @@ async fn column_mask() {
                         "schema": schema,
                         "table": "customers",
                         "columns": ["*"],
-                        "action": "allow"
                     }
                 }),
                 json!({
@@ -564,7 +557,6 @@ async fn join_both_tables_filtered() {
                         "schema": schema,
                         "table": "customers",
                         "columns": ["*"],
-                        "action": "allow"
                     }
                 }),
                 json!({
@@ -581,7 +573,6 @@ async fn join_both_tables_filtered() {
                         "schema": schema,
                         "table": "orders",
                         "columns": ["*"],
-                        "action": "allow"
                     }
                 }),
             ],
@@ -697,7 +688,6 @@ async fn denied_column_error() {
                     "schema": schema,
                     "table": "employees",
                     "columns": ["*"],
-                    "action": "allow"
                 }
             })],
             ds_id,
@@ -761,7 +751,6 @@ async fn disabled_policy_not_enforced() {
                         "schema": schema,
                         "table": "orders",
                         "columns": ["*"],
-                        "action": "allow"
                     }
                 }),
             ],
@@ -782,7 +771,6 @@ async fn disabled_policy_not_enforced() {
                     "schema": schema,
                     "table": "orders",
                     "columns": ["*"],
-                    "action": "allow"
                 }
             })],
             ds_id,
@@ -860,7 +848,6 @@ async fn object_access_deny_schema() {
                     "schema": public_schema,
                     "table": "*",
                     "columns": ["*"],
-                    "action": "allow"
                 }
             })],
             ds_id,
@@ -934,7 +921,6 @@ async fn two_permits_and_semantics() {
                         "schema": schema,
                         "table": "orders",
                         "columns": ["*"],
-                        "action": "allow"
                     }
                 }),
             ],
@@ -1079,7 +1065,6 @@ async fn policy_required_column_access_limits_select_star() {
                     "schema": schema,
                     "table": "employees",
                     "columns": ["id", "name"],
-                    "action": "allow"
                 }
             })],
             ds_id,
@@ -1154,7 +1139,6 @@ async fn deny_overrides_allow_columns() {
                     "schema": schema,
                     "table": "employees",
                     "columns": ["*"],
-                    "action": "allow"
                 }
             })],
             ds_id,
@@ -1264,7 +1248,6 @@ async fn object_access_deny_table() {
                     "schema": schema,
                     "table": "orders",
                     "columns": ["*"],
-                    "action": "allow"
                 }
             })],
             ds_id,
@@ -1349,7 +1332,6 @@ async fn deny_overrides_mask() {
                         "schema": schema,
                         "table": "customers",
                         "columns": ["*"],
-                        "action": "allow"
                     }
                 }),
                 json!({
@@ -1438,7 +1420,6 @@ async fn template_variable_username() {
                         "schema": schema,
                         "table": "docs",
                         "columns": ["*"],
-                        "action": "allow"
                     }
                 }),
             ],
@@ -1522,7 +1503,6 @@ async fn template_variable_user_id() {
                         "schema": schema,
                         "table": "items",
                         "columns": ["*"],
-                        "action": "allow"
                     }
                 }),
             ],
@@ -1593,7 +1573,6 @@ async fn aggregate_with_row_filter() {
                         "schema": schema,
                         "table": "orders",
                         "columns": ["*"],
-                        "action": "allow"
                     }
                 }),
             ],
@@ -1723,7 +1702,6 @@ async fn single_policy_multiple_row_filters_same_table() {
                         "schema": schema,
                         "table": "orders",
                         "columns": ["*"],
-                        "action": "allow"
                     }
                 }),
             ],
@@ -1790,7 +1768,6 @@ async fn user_specific_vs_wildcard_policy() {
                     "schema": schema,
                     "table": "orders",
                     "columns": ["*"],
-                    "action": "allow"
                 }
             })],
             ds_id,
@@ -1876,8 +1853,7 @@ async fn column_glob_pattern_deny() {
                 "definition": {
                     "schema": schema,
                     "table": "vault",
-                    "columns": ["secret_*"],
-                    "action": "deny"
+                    "columns": ["secret_*"]
                 }
             })],
             ds_id,
@@ -1895,7 +1871,6 @@ async fn column_glob_pattern_deny() {
                     "schema": schema,
                     "table": "vault",
                     "columns": ["*"],
-                    "action": "allow"
                 }
             })],
             ds_id,
@@ -1969,7 +1944,6 @@ async fn live_policy_update_without_reconnect() {
                     "schema": schema,
                     "table": "orders",
                     "columns": ["*"],
-                    "action": "allow"
                 }
             })],
             ds_id,
@@ -2069,7 +2043,6 @@ async fn policy_required_with_allow_table_visible() {
                     "schema": schema,
                     "table": "orders",
                     "columns": ["*"],
-                    "action": "allow"
                 }
             })],
             ds_id,
@@ -2140,7 +2113,7 @@ async fn tc_join_01_join_column_collision() {
             "permit",
             vec![json!({
                 "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "orders", "columns": ["*"], "action": "allow"}
+                "definition": {"schema": schema, "table": "orders", "columns": ["*"]}
             })],
             ds_id,
             None,
@@ -2152,7 +2125,7 @@ async fn tc_join_01_join_column_collision() {
             "permit",
             vec![json!({
                 "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "customers", "columns": ["id", "name"], "action": "allow"}
+                "definition": {"schema": schema, "table": "customers", "columns": ["id", "name"]}
             })],
             ds_id,
             None,
@@ -2283,7 +2256,6 @@ async fn tc_zt_02_explicit_whitelist() {
                     "schema": schema,
                     "table": "users",
                     "columns": ["id", "name"],
-                    "action": "allow"
                 }
             })],
             ds_id,
@@ -2344,7 +2316,7 @@ async fn tc_zt_03_wildcard_whitelist() {
             vec![
                 json!({
                     "obligation_type": "column_access",
-                    "definition": {"schema": schema, "table": "orders", "columns": ["*"], "action": "allow"}
+                    "definition": {"schema": schema, "table": "orders", "columns": ["*"]}
                 }),
                 json!({
                     "obligation_type": "row_filter",
@@ -2411,7 +2383,7 @@ async fn tc_deny_01_deny_wins() {
             "permit",
             vec![json!({
                 "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "contacts", "columns": ["id", "email", "name"], "action": "allow"}
+                "definition": {"schema": schema, "table": "contacts", "columns": ["id", "email", "name"]}
             })],
             ds_id,
             None,
@@ -2485,7 +2457,7 @@ async fn tc_deny_02_absolute_veto() {
             "permit",
             vec![json!({
                 "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "records", "columns": ["id"], "action": "allow"}
+                "definition": {"schema": schema, "table": "records", "columns": ["id"]}
             })],
             ds_id,
             None,
@@ -2552,7 +2524,7 @@ async fn tc_glob_01_suffix_glob() {
             "permit",
             vec![json!({
                 "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "events", "columns": ["*"], "action": "allow"}
+                "definition": {"schema": schema, "table": "events", "columns": ["*"]}
             })],
             ds_id,
             None,
@@ -2625,7 +2597,7 @@ async fn tc_glob_03_case_sensitivity() {
             "permit",
             vec![json!({
                 "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "contacts", "columns": ["*"], "action": "allow"}
+                "definition": {"schema": schema, "table": "contacts", "columns": ["*"]}
             })],
             ds_id,
             None,
@@ -2640,7 +2612,7 @@ async fn tc_glob_03_case_sensitivity() {
             "deny",
             vec![json!({
                 "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "contacts", "columns": ["Email"], "action": "deny"}
+                "definition": {"schema": schema, "table": "contacts", "columns": ["Email"]}
             })],
             ds_id,
             None,
@@ -2662,4 +2634,82 @@ async fn tc_glob_03_case_sensitivity() {
         "TC-GLOB-03: case-sensitive deny 'Email' must NOT strip lowercase 'email'"
     );
     assert_eq!(rows[0][1], "alice@example.com");
+}
+
+// ===========================================================================
+// TC-RF-01: row_filter with != operator and double-quoted column identifier
+// Mirrors the "state-filter" policy in the admin DB:
+//   filter_expression: "\"state\" != 'WY'"
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_rf_01_neq_operator_quoted_column() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_rf01";
+
+    // Table has a `state` column — 5 rows, one is WY (should be excluded).
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.locations;
+             CREATE TABLE {schema}.locations (id INT, city TEXT, state TEXT);
+             INSERT INTO {schema}.locations VALUES
+               (1, 'Austin',   'TX'),
+               (2, 'Denver',   'CO'),
+               (3, 'Cheyenne', 'WY'),
+               (4, 'Seattle',  'WA'),
+               (5, 'Casper',   'WY');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rf01", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_rf01", "UserPass1!", "default", ds_id)
+        .await;
+
+    // row_filter using != and a double-quoted column identifier — mirrors
+    // the "state-filter" policy stored in the admin DB.
+    server
+        .create_and_assign_policy(
+            "state-filter-rf01",
+            "permit",
+            vec![json!({
+                "obligation_type": "row_filter",
+                "definition": {
+                    "schema": schema,
+                    "table": "locations",
+                    "filter_expression": "\"state\" != 'WY'"
+                }
+            })],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_rf01", "UserPass1!", "ds_rf01")
+        .await;
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT id, state FROM {schema}.locations ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    assert_eq!(
+        rows.len(),
+        3,
+        "WY rows must be filtered out; expected TX, CO, WA"
+    );
+    let states: Vec<&str> = rows.iter().map(|r| r[1].as_str()).collect();
+    assert!(
+        !states.contains(&"WY"),
+        "WY must not appear in results: {states:?}"
+    );
+    assert_eq!(rows[0][0], "1"); // Austin TX
+    assert_eq!(rows[1][0], "2"); // Denver CO
+    assert_eq!(rows[2][0], "4"); // Seattle WA
 }

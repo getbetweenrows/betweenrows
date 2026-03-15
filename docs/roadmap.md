@@ -216,11 +216,11 @@ Each obligation type gets an optional `condition` field:
   "definition": { "schema": "hr", "table": "employees", "column": "ssn", "mask_expression": "'***-**-****'" }
 }
 
-// Column access deny - hide columns conditionally
+// Column access deny - hide columns conditionally (policy effect = "deny")
 {
   "obligation_type": "column_access",
   "condition": "user.clearance_level < 5",
-  "definition": { "schema": "secret", "table": "files", "action": "deny", "columns": ["content"] }
+  "definition": { "schema": "secret", "table": "files", "columns": ["content"] }
 }
 
 // Object access deny - hide tables conditionally  

@@ -257,3 +257,52 @@ The `ColumnAccessDef` struct no longer has an `action` field. The API validation
 - Unit: `engine::tests::test_permit_column_access_wildcard_grants_full_visibility_policy_required` — permit policy with `column_access ["*"]` in a `policy_required` aliased datasource → table is visible, `visible_tables` non-empty.
 - Unit: `hooks::policy::tests::test_column_access_deny_no_table_permit` — deny policy with `column_access` in `policy_required` mode → `lit(false)` (deny policy alone does not grant table access).
 - Unit: `admin::policy_handlers::tests::create_policy_column_access_missing_columns_422` — `column_access` definition without `columns` field → `422`.
+
+
+---
+
+### 21. Denied queries leave no audit trail (silent denial)
+
+**Vector**: A user submits a query blocked by a deny policy. If the audit log is only written on the success path, there is no record of the denied access attempt — attackers can probe policy boundaries without leaving evidence.
+
+**Bug**: The `tokio::spawn` audit write in `PolicyHook::handle_query` was placed after all `return Some(Err(...))` paths. Any failed or denied query short-circuited before the audit write.
+
+**Defense**: `handle_query` now uses a labeled block (`'query: { ... }`) that returns `(result, status, error_message, rewritten_query)` on all paths. The audit write follows the block and runs unconditionally for every auditable query. Status values: `"success"`, `"error"`, `"denied"`.
+
+**Test**:
+- Integration: `tc_audit_01_success_audit_status` — successful query → `status: "success"`, `error_message: null`, `execution_time_ms ≥ 0`, `rewritten_query` contains actual SQL (not fake comment).
+- Integration: `tc_audit_02_denied_audit_status` — deny-policy query → `status: "denied"`, `error_message` contains the policy name.
+- Integration: `tc_audit_03_error_audit_status` — query for non-existent table → `status: "error"`, `error_message` populated.
+- Integration: `tc_audit_04_status_filter` — `GET /audit/queries?status=denied` returns only denied entries.
+
+---
+
+### 22. Audit duration excludes encode phase (misleading timing)
+
+**Vector**: `execution_time_ms` was captured after `execute_logical_plan` but before `encode_dataframe`. Since DataFusion returns a lazy `DataFrame`, the actual row-fetching happens during encoding. Timing was systematically under-reported.
+
+**Defense**: `elapsed_ms` is now captured after the labeled block exits, covering planning + policy eval + execution + encoding (full user-perceived latency).
+
+**Test**: Covered by `tc_audit_01_success_audit_status` — `execution_time_ms ≥ 0` (positive timing is asserted).
+
+---
+
+### 23. Rewritten query in audit log was fake (/* policy-rewritten */ comment only)
+
+**Vector**: The audit log's `rewritten_query` field previously just prepended `/* policy-rewritten */` to the original query string. The actual row filters and column masks applied by policies were not visible, defeating the purpose of the audit trail.
+
+**Defense**: DataFusion's `Unparser` with `BetweenRowsPostgresDialect` is used to serialize the final `LogicalPlan` (after all obligation rewrites) back to SQL. If unparsing fails, the fallback is `/* plan-to-sql failed */ {original_query}`.
+
+**Test**: `tc_audit_01_success_audit_status` — `rewritten_query` must not contain `/* policy-rewritten */` and must be non-empty when a row filter was applied.
+
+---
+
+### 24. Write statement rejected by ReadOnlyHook leaves no audit trail
+
+**Vector**: A user submits a write statement (INSERT, UPDATE, DELETE, DROP, SET, etc.). `ReadOnlyHook` rejects it before `PolicyHook` runs, so no audit record is created. An attacker can probe write access without evidence.
+
+**Bug**: Hook execution order was `[ReadOnlyHook, PolicyHook]`. `ReadOnlyHook` returned `Some(Err(...))` and short-circuited the chain, so `PolicyHook` never saw the statement.
+
+**Defense**: Hook order is now `[PolicyHook, ReadOnlyHook]`. `PolicyHook` runs first: for non-`Query` statements that are not on the read-only passthrough list, it calls `audit_write_rejected()` (writes a `"denied"` audit entry with `error_message: "Only read-only queries are allowed"`) then returns `None`. `ReadOnlyHook` then runs and enforces the rejection. A shared `is_allowed_statement()` function in `read_only.rs` is the single source of truth for the allowlist — `PolicyHook` uses it to decide which statements to audit without duplicating the logic.
+
+**Test**: `tc_audit_05_write_rejected_audit_status` — `INSERT` against the proxy → audit entry has `status: "denied"`, `error_message` contains `"read-only"`.

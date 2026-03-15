@@ -16,6 +16,8 @@ mod m20260307_000013_idx_policy_version;
 mod m20260307_000014_idx_query_audit_log_user_id;
 mod m20260307_000015_idx_query_audit_log_data_source_id;
 mod m20260307_000016_idx_query_audit_log_created_at;
+mod m20260315_000017_add_status_to_query_audit_log;
+mod m20260315_000018_add_error_message_to_query_audit_log;
 
 pub struct Migrator;
 
@@ -39,6 +41,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260307_000014_idx_query_audit_log_user_id::Migration),
             Box::new(m20260307_000015_idx_query_audit_log_data_source_id::Migration),
             Box::new(m20260307_000016_idx_query_audit_log_created_at::Migration),
+            Box::new(m20260315_000017_add_status_to_query_audit_log::Migration),
+            Box::new(m20260315_000018_add_error_message_to_query_audit_log::Migration),
         ]
     }
 }

@@ -7,6 +7,22 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use super::QueryHook;
 
+/// Returns `true` if the statement is on the read-only allowlist.
+///
+/// Used by `PolicyHook` to decide which non-`Query` statements to audit as
+/// rejected writes (anything not on this list will be rejected by `ReadOnlyHook`).
+pub fn is_allowed_statement(statement: &Statement) -> bool {
+    matches!(
+        statement,
+        Statement::Query(_)
+            | Statement::ShowVariable { .. }
+            | Statement::ExplainTable { .. }
+            | Statement::Explain { .. }
+            | Statement::ShowTables { .. }
+            | Statement::ShowColumns { .. }
+    )
+}
+
 /// Rejects any non-read SQL statement at the wire protocol level,
 /// before DataFusion or RLS processing.
 #[derive(Default)]
@@ -26,18 +42,9 @@ impl QueryHook for ReadOnlyHook {
         _session_context: &SessionContext,
         _client: &(dyn ClientInfo + Sync),
     ) -> Option<PgWireResult<Response>> {
-        // SECURITY: This is an allowlist — any new Statement variant must be reviewed before adding here.
-        let allowed = matches!(
-            statement,
-            Statement::Query(_)
-                | Statement::ShowVariable { .. }
-                | Statement::ExplainTable { .. }
-                | Statement::Explain { .. }
-                | Statement::ShowTables { .. }
-                | Statement::ShowColumns { .. }
-        );
-
-        if allowed {
+        // SECURITY: This is an allowlist — any new Statement variant must be reviewed before
+        // adding here AND to `is_allowed_statement` above (they must stay in sync).
+        if is_allowed_statement(statement) {
             None
         } else {
             let stmt_type = std::mem::discriminant(statement);
@@ -65,17 +72,7 @@ mod tests {
     }
 
     fn is_allowed(sql: &str) -> bool {
-        let stmt = parse_statement(sql);
-        // SECURITY: This is an allowlist — any new Statement variant must be reviewed before adding here.
-        matches!(
-            stmt,
-            Statement::Query(_)
-                | Statement::ShowVariable { .. }
-                | Statement::ExplainTable { .. }
-                | Statement::Explain { .. }
-                | Statement::ShowTables { .. }
-                | Statement::ShowColumns { .. }
-        )
+        is_allowed_statement(&parse_statement(sql))
     }
 
     #[test]

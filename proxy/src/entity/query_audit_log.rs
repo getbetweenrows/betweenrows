@@ -19,6 +19,9 @@ pub struct Model {
     pub client_ip: Option<String>,
     pub client_info: Option<String>,
     pub created_at: DateTime,
+    /// "success" | "error" | "denied"
+    pub status: String,
+    pub error_message: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -487,12 +487,6 @@ Benefit: This ensures that if we need to override a "v1" style for a specific ed
 - View past versions of policies in the policy UI
 - Ability to link to policy from audit log page when user clicks on a policy listed in the query log
 
-### Audit Log Bug - Tenant Filter Not Shown in Rewritten Query
-
-- For queries that should have tenant filter, the rewritten query in audit log does not show the tenant filter
-- However, data is filtered correctly when querying via the proxy
-- Suspect: Query is working correctly but not recorded correctly in audit log
-- Need to investigate how rewritten queries are captured in audit log
 
 ## Code Review & Refactoring
 

@@ -72,7 +72,9 @@ impl ProxyHandler {
         engine_cache: Arc<EngineCache>,
         policy_hook: Arc<PolicyHook>,
     ) -> Self {
-        let hooks: Vec<Arc<dyn QueryHook>> = vec![Arc::new(ReadOnlyHook::new()), policy_hook];
+        // PolicyHook runs first so it can audit all statements (including writes that
+        // ReadOnlyHook will reject). ReadOnlyHook runs second and enforces the allowlist.
+        let hooks: Vec<Arc<dyn QueryHook>> = vec![policy_hook, Arc::new(ReadOnlyHook::new())];
 
         tracing::info!(hook_count = hooks.len(), "Initialized query hooks");
 

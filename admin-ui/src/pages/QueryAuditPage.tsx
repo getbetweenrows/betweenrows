@@ -1,7 +1,16 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { format } from 'sql-formatter'
 import { listAuditLogs } from '../api/audit'
 import type { AuditLogEntry } from '../api/audit'
+
+function formatSql(sql: string): string {
+  try {
+    return format(sql, { language: 'postgresql', tabWidth: 2, keywordCase: 'upper' })
+  } catch {
+    return sql
+  }
+}
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleString()
@@ -11,6 +20,28 @@ function truncate(s: string, n: number) {
   return s.length > n ? s.slice(0, n) + '…' : s
 }
 
+function StatusBadge({ status }: { status: AuditLogEntry['status'] }) {
+  if (status === 'success') {
+    return (
+      <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-green-50 text-green-700">
+        success
+      </span>
+    )
+  }
+  if (status === 'denied') {
+    return (
+      <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-amber-50 text-amber-700">
+        denied
+      </span>
+    )
+  }
+  return (
+    <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-red-50 text-red-700">
+      error
+    </span>
+  )
+}
+
 export function QueryAuditPage() {
   const [page, setPage] = useState(1)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
@@ -18,11 +49,13 @@ export function QueryAuditPage() {
   const [filterDs, setFilterDs] = useState('')
   const [filterFrom, setFilterFrom] = useState('')
   const [filterTo, setFilterTo] = useState('')
+  const [filterStatus, setFilterStatus] = useState('')
   const [appliedFilters, setAppliedFilters] = useState<{
     user_id?: string
     datasource_id?: string
     from?: string
     to?: string
+    status?: string
   }>({})
 
   const { data, isLoading, isError } = useQuery({
@@ -42,6 +75,7 @@ export function QueryAuditPage() {
       datasource_id: filterDs || undefined,
       from: filterFrom || undefined,
       to: filterTo || undefined,
+      status: filterStatus || undefined,
     })
     setPage(1)
   }
@@ -51,6 +85,7 @@ export function QueryAuditPage() {
     setFilterDs('')
     setFilterFrom('')
     setFilterTo('')
+    setFilterStatus('')
     setAppliedFilters({})
     setPage(1)
   }
@@ -81,7 +116,7 @@ export function QueryAuditPage() {
 
       {/* Filters */}
       <form onSubmit={handleFilter} className="bg-white rounded-xl border border-gray-200 p-4 mb-4">
-        <div className="grid grid-cols-4 gap-3 mb-3">
+        <div className="grid grid-cols-5 gap-3 mb-3">
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">User ID</label>
             <input
@@ -120,6 +155,19 @@ export function QueryAuditPage() {
               className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
           </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Status</label>
+            <select
+              value={filterStatus}
+              onChange={(e) => setFilterStatus(e.target.value)}
+              className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+            >
+              <option value="">All</option>
+              <option value="success">Success</option>
+              <option value="error">Error</option>
+              <option value="denied">Denied</option>
+            </select>
+          </div>
         </div>
         <div className="flex gap-2">
           <button
@@ -156,6 +204,7 @@ export function QueryAuditPage() {
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">User</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Data Source</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Query</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Status</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Policies</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Duration</th>
                 <th className="px-4 py-3" />
@@ -172,6 +221,9 @@ export function QueryAuditPage() {
                     <td className="px-4 py-3 text-gray-600 text-xs font-mono">{entry.datasource_name}</td>
                     <td className="px-4 py-3 text-xs font-mono text-gray-700 max-w-xs">
                       {truncate(entry.original_query, 80)}
+                    </td>
+                    <td className="px-4 py-3 text-xs">
+                      <StatusBadge status={entry.status} />
                     </td>
                     <td className="px-4 py-3 text-xs text-gray-600">
                       {entry.policies_applied.length > 0 ? (
@@ -196,19 +248,25 @@ export function QueryAuditPage() {
                   </tr>
                   {expanded.has(entry.id) && (
                     <tr key={`${entry.id}-detail`} className="bg-gray-50">
-                      <td colSpan={7} className="px-4 py-4">
+                      <td colSpan={8} className="px-4 py-4">
                         <div className="space-y-3">
+                          {entry.error_message && (
+                            <div className="bg-red-50 border border-red-200 rounded p-3">
+                              <p className="text-xs font-semibold text-red-700 mb-1">Error</p>
+                              <p className="text-xs font-mono text-red-800">{entry.error_message}</p>
+                            </div>
+                          )}
                           <div>
                             <p className="text-xs font-semibold text-gray-600 mb-1">Original query</p>
                             <pre className="text-xs font-mono text-gray-800 bg-white border border-gray-200 rounded p-3 overflow-auto whitespace-pre-wrap">
-                              {entry.original_query}
+                              {formatSql(entry.original_query)}
                             </pre>
                           </div>
                           {entry.rewritten_query && (
                             <div>
                               <p className="text-xs font-semibold text-gray-600 mb-1">Rewritten query</p>
                               <pre className="text-xs font-mono text-gray-800 bg-white border border-gray-200 rounded p-3 overflow-auto whitespace-pre-wrap">
-                                {entry.rewritten_query}
+                                {formatSql(entry.rewritten_query)}
                               </pre>
                             </div>
                           )}

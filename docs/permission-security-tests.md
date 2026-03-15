@@ -238,3 +238,22 @@ WITH data AS (SELECT * FROM orders) SELECT * FROM data
 **Defense**: `matches_pattern()` in `policy_match.rs` supports prefix glob: if the pattern ends with `*`, it uses `starts_with(prefix)` matching. `matches_schema_table()` delegates to `matches_pattern()` for both schema and table fields. The same function is used by both `PolicyHook` (query-time) and `compute_user_visibility()` (connect-time), ensuring consistent semantics.
 
 **Test**: 14 unit tests in `proxy/src/policy_match.rs` cover exact match, `*` wildcard, prefix glob on table, prefix glob on schema, combined globs, alias resolution, and non-matching cases (`orders_raw` does not match `raw_*`).
+
+---
+
+### 20. `column_access` obligation `action` field caused incorrect visibility in `policy_required` mode
+
+**Vector**: Admin creates a `permit`-effect policy intended to grant access to all columns (`columns: ["*"]`) but the stored obligation JSON has `"action": "deny"` (from a prior schema where the action was set per-obligation). In `policy_required` mode the table is completely inaccessible — the user sees a "table not found" error instead of data.
+
+**Bug**: The `column_access` obligation definition previously contained an `action` field (`"allow"` or `"deny"`). `compute_user_visibility()` and `ObligationEffects::collect()` both checked `col_def.action == "allow"` to decide whether a permit policy's `column_access` obligation grants table visibility. When `action` was `"deny"` inside a permit policy, the obligation was silently treated as a denylist and never added to `visible_tables`. In `policy_required` mode, `visible_tables` remained empty → the table was filtered out of the user's `SessionContext` → DataFusion returned "table not found".
+
+**Defense**: The `action` field was removed from `column_access` obligations entirely. Intent is now determined solely by the enclosing policy's `effect`:
+- `permit` policy + `column_access` → always an allowlist (adds to `visible_tables` and specifies visible columns)
+- `deny` policy + `column_access` → always a denylist (strips columns from results, does not grant access)
+
+The `ColumnAccessDef` struct no longer has an `action` field. The API validation layer (`dto.rs`) no longer requires or accepts `action` in `column_access` definitions. Existing stored obligations with an `action` field are silently ignored (serde unknown-field tolerance).
+
+**Test**:
+- Unit: `engine::tests::test_permit_column_access_wildcard_grants_full_visibility_policy_required` — permit policy with `column_access ["*"]` in a `policy_required` aliased datasource → table is visible, `visible_tables` non-empty.
+- Unit: `hooks::policy::tests::test_column_access_deny_no_table_permit` — deny policy with `column_access` in `policy_required` mode → `lit(false)` (deny policy alone does not grant table access).
+- Unit: `admin::policy_handlers::tests::create_policy_column_access_missing_columns_422` — `column_access` definition without `columns` field → `422`.

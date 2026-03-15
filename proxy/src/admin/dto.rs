@@ -358,6 +358,8 @@ pub fn validate_obligation(obl: &ObligationRequest) -> Result<(), String> {
             require_str_field(def, "column_mask", "mask_expression")?;
         }
         ObligationType::ColumnAccess => {
+            // Intent (allowlist vs denylist) is determined by the enclosing policy's effect.
+            // No obligation-level 'action' field is required or accepted.
             require_str_field(def, "column_access", "schema")?;
             require_str_field(def, "column_access", "table")?;
             match def.get("columns") {
@@ -373,14 +375,6 @@ pub fn validate_obligation(obl: &ObligationRequest) -> Result<(), String> {
                         "column_access obligation: missing required field 'columns'".to_string()
                     );
                 }
-            }
-            let action = def.get("action").and_then(|v| v.as_str()).ok_or_else(|| {
-                "column_access obligation: missing required field 'action'".to_string()
-            })?;
-            if action != "allow" && action != "deny" {
-                return Err(
-                    "column_access obligation: 'action' must be 'allow' or 'deny'".to_string(),
-                );
             }
         }
         ObligationType::ObjectAccess => {

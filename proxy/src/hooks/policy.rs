@@ -717,14 +717,14 @@ impl PolicyError {
 struct ObligationEffects {
     /// Combined row filter per (df_schema, table): AND within a policy, AND across policies.
     row_filters: HashMap<(String, String), datafusion::logical_expr::Expr>,
-    /// Raw column allow patterns per (df_schema, table). Only `column_access "allow"` populates
-    /// this. Expanded against actual column names at TableScan injection time.
+    /// Raw column allow patterns per (df_schema, table). Populated by `column_access` obligations
+    /// on permit-effect policies. Expanded against actual column names at TableScan injection time.
     column_allow_patterns: HashMap<(String, String), Vec<String>>,
     /// Raw column deny patterns per (df_schema, table). Expanded at TableScan injection time.
     column_deny_patterns: HashMap<(String, String), Vec<String>>,
     /// Column mask expressions keyed by (df_schema, table, column). First wins per column.
     column_masks: HashMap<(String, String, String), datafusion::logical_expr::Expr>,
-    /// Tables that have at least one `column_access "allow"` permit obligation.
+    /// Tables that have at least one `column_access` obligation from a permit policy.
     /// `row_filter` and `column_mask` do NOT grant table access (zero-trust model).
     tables_with_permit: HashSet<(String, String)>,
     /// If set, a deny-effect row_filter matched the query — must reject before executing.
@@ -855,6 +855,8 @@ impl ObligationEffects {
                         }
                     }
                     "column_access" => {
+                        // Permit policy: column_access is an allowlist — grants table access.
+                        // Intent is determined by policy effect, not an obligation-level action.
                         if let Ok(def) =
                             serde_json::from_value::<ColumnAccessDef>(obl.definition.clone())
                         {
@@ -867,22 +869,12 @@ impl ObligationEffects {
                                     &session.df_to_upstream,
                                 ) {
                                     let key = (df_schema.clone(), table.clone());
-                                    if def.action == "allow" {
-                                        // Only column_access "allow" grants table access.
-                                        effects.tables_with_permit.insert(key.clone());
-                                        effects
-                                            .column_allow_patterns
-                                            .entry(key)
-                                            .or_default()
-                                            .extend(def.columns.iter().cloned());
-                                    } else if def.action == "deny" {
-                                        // Deny does not grant access; just records the deny.
-                                        effects
-                                            .column_deny_patterns
-                                            .entry(key)
-                                            .or_default()
-                                            .extend(def.columns.iter().cloned());
-                                    }
+                                    effects.tables_with_permit.insert(key.clone());
+                                    effects
+                                        .column_allow_patterns
+                                        .entry(key)
+                                        .or_default()
+                                        .extend(def.columns.iter().cloned());
                                 }
                             }
                         }
@@ -899,7 +891,7 @@ impl ObligationEffects {
             }
         }
 
-        // Also apply column_access deny from deny-effect policies.
+        // Apply column_access from deny-effect policies as a denylist.
         for policy in &session.deny_policies {
             for obl in &policy.obligations {
                 if obl.obligation_type == "column_access"
@@ -913,8 +905,7 @@ impl ObligationEffects {
                             df_schema,
                             table,
                             &session.df_to_upstream,
-                        ) && def.action == "deny"
-                        {
+                        ) {
                             let key = (df_schema.clone(), table.clone());
                             effects
                                 .column_deny_patterns
@@ -1320,7 +1311,6 @@ mod tests {
                 "schema": schema,
                 "table": table,
                 "columns": columns,
-                "action": "allow",
             }),
         }
     }
@@ -1360,7 +1350,6 @@ mod tests {
                 "schema": schema,
                 "table": table,
                 "columns": columns,
-                "action": "deny",
             }),
         }
     }
@@ -1666,13 +1655,13 @@ mod tests {
     #[tokio::test]
     async fn test_column_deny_strips_column() {
         let session = make_session(
+            vec![],
             vec![make_policy(
                 "p1",
-                "permit",
+                "deny",
                 1,
                 vec![make_column_deny_obl("public", "customers", &["ssn"])],
             )],
-            vec![],
             "open",
             HashMap::new(),
         );
@@ -1700,13 +1689,13 @@ mod tests {
     #[tokio::test]
     async fn test_column_deny_all_columns_error() {
         let session = make_session(
+            vec![],
             vec![make_policy(
                 "p1",
-                "permit",
+                "deny",
                 1,
                 vec![make_column_deny_obl("public", "customers", &["id", "name"])],
             )],
-            vec![],
             "open",
             HashMap::new(),
         );
@@ -1903,19 +1892,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_deny_overrides_mask() {
-        // Column is both denied (via column_deny) and would be masked;
+        // Column is both denied (via deny policy) and would be masked (via permit policy);
         // deny takes priority — column is removed, mask expression never applied.
         let session = make_session(
             vec![make_policy(
                 "p1",
                 "permit",
                 1,
-                vec![
-                    make_column_deny_obl("public", "customers", &["ssn"]),
-                    make_column_mask_obl("public", "customers", "ssn", "'***'"),
-                ],
+                vec![make_column_mask_obl("public", "customers", "ssn", "'***'")],
             )],
-            vec![],
+            vec![make_policy(
+                "deny_p",
+                "deny",
+                2,
+                vec![make_column_deny_obl("public", "customers", &["ssn"])],
+            )],
             "open",
             HashMap::new(),
         );
@@ -2064,13 +2055,13 @@ mod tests {
         // column_access deny on ssn → output has 4 columns (not 5), ssn absent.
         let ctx = setup_customers_ctx().await;
         let session = make_session(
+            vec![],
             vec![make_policy(
                 "p1",
-                "permit",
+                "deny",
                 1,
                 vec![make_column_deny_obl("*", "customers", &["ssn"])],
             )],
-            vec![],
             "open",
             HashMap::new(),
         );
@@ -2332,12 +2323,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_deny_all_columns_error() {
-        // All columns denied → AllColumnsDenied error.
+        // All columns denied by deny policy → AllColumnsDenied error.
         let ctx = setup_customers_ctx().await;
         let session = make_session(
+            vec![],
             vec![make_policy(
                 "p1",
-                "permit",
+                "deny",
                 1,
                 vec![make_column_deny_obl(
                     "*",
@@ -2345,7 +2337,6 @@ mod tests {
                     &["id", "org_id", "name", "ssn", "credit_card"],
                 )],
             )],
-            vec![],
             "open",
             HashMap::new(),
         );
@@ -2362,19 +2353,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec_full_composition() {
-        // Tenant isolation (row_filter) + column hiding (credit_card deny) in one session.
+        // Tenant isolation (row_filter via permit) + column hiding (credit_card deny via deny).
         let ctx = setup_customers_ctx().await;
         let session = make_session(
             vec![make_policy(
                 "tenant_policy",
                 "permit",
                 1,
-                vec![
-                    make_row_filter_obl("*", "customers", "org_id = 'acme'"),
-                    make_column_deny_obl("*", "customers", &["credit_card"]),
-                ],
+                vec![make_row_filter_obl("*", "customers", "org_id = 'acme'")],
             )],
-            vec![],
+            vec![make_policy(
+                "deny_cc",
+                "deny",
+                2,
+                vec![make_column_deny_obl("*", "customers", &["credit_card"])],
+            )],
             "open",
             HashMap::new(),
         );
@@ -2438,13 +2431,13 @@ mod tests {
     async fn test_apply_projection_suffix_glob() {
         // columns: ["*_at"] → strips created_at and updated_at, keeps others.
         let session = make_session(
+            vec![],
             vec![make_policy(
                 "p1",
-                "permit",
+                "deny",
                 1,
                 vec![make_column_deny_obl("public", "events", &["*_at"])],
             )],
-            vec![],
             "open",
             HashMap::new(),
         );
@@ -2485,13 +2478,13 @@ mod tests {
     async fn test_apply_projection_star_all_denied() {
         // columns: ["*"] → all columns denied → AllColumnsDenied error.
         let session = make_session(
+            vec![],
             vec![make_policy(
                 "p1",
-                "permit",
+                "deny",
                 1,
                 vec![make_column_deny_obl("public", "events", &["*"])],
             )],
-            vec![],
             "open",
             HashMap::new(),
         );
@@ -2510,18 +2503,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_apply_projection_mask_vs_deny_priority() {
-        // Column is both masked and denied via glob → deny wins (column removed).
+        // Column is both masked (permit) and denied via glob (deny) → deny wins (column removed).
         let session = make_session(
             vec![make_policy(
                 "p1",
                 "permit",
                 1,
-                vec![
-                    make_column_deny_obl("public", "events", &["secret_*"]),
-                    make_column_mask_obl("public", "events", "secret_val", "'***'"),
-                ],
+                vec![make_column_mask_obl(
+                    "public",
+                    "events",
+                    "secret_val",
+                    "'***'",
+                )],
             )],
-            vec![],
+            vec![make_policy(
+                "deny_p",
+                "deny",
+                2,
+                vec![make_column_deny_obl("public", "events", &["secret_*"])],
+            )],
             "open",
             HashMap::new(),
         );
@@ -2586,13 +2586,13 @@ mod tests {
         // FIX: per-TableScan injection scopes column deny to its source table.
         // Denying "email" on customers must NOT strip "email" from orders.
         let session = make_session(
+            vec![],
             vec![make_policy(
                 "p1",
-                "permit",
+                "deny",
                 1,
                 vec![make_column_deny_obl("public", "customers", &["email"])],
             )],
-            vec![],
             "open",
             HashMap::new(),
         );
@@ -2641,13 +2641,13 @@ mod tests {
     async fn test_apply_projection_exact_uses_set_path() {
         // Exact name deny — "ssn" is denied, other columns survive.
         let session = make_session(
+            vec![],
             vec![make_policy(
                 "p1",
-                "permit",
+                "deny",
                 1,
                 vec![make_column_deny_obl("public", "events", &["ssn"])],
             )],
-            vec![],
             "open",
             HashMap::new(),
         );
@@ -2678,13 +2678,13 @@ mod tests {
     async fn test_exact_deny_no_glob_overhead() {
         // Deny ["ssn"] (no *) → stored as raw pattern in column_deny_patterns; ssn denied.
         let session = make_session(
+            vec![],
             vec![make_policy(
                 "p1",
-                "permit",
+                "deny",
                 1,
                 vec![make_column_deny_obl("public", "events", &["ssn"])],
             )],
-            vec![],
             "open",
             HashMap::new(),
         );
@@ -2839,16 +2839,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_column_access_deny_no_table_permit() {
-        // column_access "deny" in a permit policy does NOT grant table access.
-        // In policy_required mode, table stays blocked (lit(false)).
+        // A deny policy with column_access does NOT grant table access.
+        // In policy_required mode, without a permit policy the table stays blocked (lit(false)).
         let session = make_session(
+            vec![],
             vec![make_policy(
-                "p1",
-                "permit",
+                "deny_p",
+                "deny",
                 1,
                 vec![make_column_deny_obl("public", "customers", &["ssn"])],
             )],
-            vec![],
             "policy_required",
             HashMap::new(),
         );
@@ -2866,7 +2866,7 @@ mod tests {
         let display = plan_display(&result_plan);
         assert!(
             display.contains("false"),
-            "Expected lit(false) — column_access deny alone does not grant access: {display}"
+            "Expected lit(false) — deny policy alone does not grant table access: {display}"
         );
     }
 
@@ -2875,13 +2875,13 @@ mod tests {
         // Deny email on customers only — orders.email must survive.
         // This is the core JOIN collision regression test.
         let session = make_session(
+            vec![],
             vec![make_policy(
                 "p1",
-                "permit",
+                "deny",
                 1,
                 vec![make_column_deny_obl("public", "customers", &["email"])],
             )],
-            vec![],
             "open",
             HashMap::new(),
         );

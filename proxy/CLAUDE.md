@@ -75,9 +75,40 @@ Policy CRUD handlers also call `state.proxy_handler.rebuild_contexts_for_datasou
 
 **Audit logging**: after each query, `PolicyHook` spawns a `tokio::spawn` task to insert a `query_audit_log` row asynchronously. The row captures `original_query`, `rewritten_query`, `policies_applied` (JSON with name+version snapshot), `client_ip`, and `client_info` (application_name from pgwire startup params).
 
+## Testing
+
+Data security and robustness are core product requirements. Every feature must ship with comprehensive unit and integration tests covering happy paths, edge cases, and security boundaries. Aim for best-in-class coverage — not just "it works", but "it cannot be bypassed".
+
+### Unit tests (`src/**`)
+Inline `#[cfg(test)]` modules in each source file. No external dependencies — run with `cargo test --lib`.
+
+### Integration tests (`tests/`)
+Two test binaries: `policy_enforcement.rs` (security/policy scenarios) and `protocol.rs` (pgwire protocol). Shared infrastructure in `tests/support/mod.rs`.
+
+Run with `cargo test --test policy_enforcement` or `cargo test --test protocol`. Require Docker — skipped gracefully via `require_postgres!()` if unavailable.
+
+**`ProxyTestServer::start()`** spins up a complete isolated stack per test:
+- One shared `testcontainers` Postgres container per test binary (`OnceLock`) — not per-test.
+- Fresh in-memory SQLite admin DB per test with all migrations applied.
+- Real `ProxyHandler` on a random TCP port with a live pgwire accept loop.
+- `axum_test::TestServer` wrapping the admin API for HTTP calls.
+
+**Conventions:**
+- Each test uses a unique upstream schema name (e.g. `"t1_rowfilt"`, `"tc_rf01"`) to avoid collisions during parallel execution.
+- TC-prefixed tests map to security vector numbers in `docs/permission-security-tests.md`.
+- Template vars in `filter_expression` must not be quoted: `tenant = {user.tenant}` ✓, `tenant = '{user.tenant}'` ✗.
+
+### Documentation requirements (non-optional)
+After completing any feature or adding tests, always update:
+- **`docs/permission-security-tests.md`** — add a new vector entry for any new attack surface or bypass that was tested (Vector → Bug/Defense → Test format).
+- **`docs/permission-system.md`** — keep the conceptual model, obligation descriptions, and examples in sync with the current implementation.
+
 ## Bug Fix Protocol
-- Every bug fix MUST include a regression test (unit or integration) that fails before the fix and passes after.
-- Security-related bugs (policy bypass, access control, injection) MUST also be documented in `docs/permission-security-tests.md` following the existing Vector → Bug → Defense → Test format.
+Use TDD: write the failing test(s) first to reproduce the bug, then fix the code until they pass. Never fix first and test after.
+
+1. Write unit and integration tests that reproduce the bug and fail on the current code. Cover all relevant edge cases — add as many tests as needed, not just one of each.
+2. Fix the code until the test passes.
+3. Security-related bugs (policy bypass, access control, injection) MUST also be documented in `docs/permission-security-tests.md` following the existing Vector → Bug → Defense → Test format.
 
 ## Known Issues
 - **regclass / regproc not supported** — `datafusion-table-providers` drops these columns. Catalog stores `arrow_type = NULL`; `build_arrow_schema` skips them.

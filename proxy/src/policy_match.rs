@@ -53,12 +53,16 @@ pub struct ColumnMaskDef {
 }
 
 /// Parsed definition for a `column_access` obligation.
+///
+/// The obligation's intent (allow vs deny) is determined entirely by the enclosing
+/// policy's `effect` field ("permit" → allowlist, "deny" → denylist).
+/// The `action` field is no longer part of the schema; any legacy `action` in stored
+/// JSON is silently ignored during deserialization.
 #[derive(Debug, serde::Deserialize, Clone)]
 pub struct ColumnAccessDef {
     pub schema: String,
     pub table: String,
     pub columns: Vec<String>,
-    pub action: String,
 }
 
 /// Parsed definition for an `object_access` obligation.

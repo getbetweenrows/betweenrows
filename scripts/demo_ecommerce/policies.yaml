@@ -65,7 +65,7 @@ policies:
 
   # DS-10: Remove credit card column entirely
   - name: hide-credit-card
-    effect: permit
+    effect: deny
     description: Remove credit_card column from all queries
     is_enabled: true
     obligations:
@@ -74,11 +74,10 @@ policies:
         table: customers
         columns:
           - credit_card
-        action: deny
 
   # DS-02: Hide cost_price and margin from non-finance users
   - name: hide-product-financials
-    effect: permit
+    effect: deny
     description: Remove cost_price and margin from product queries
     is_enabled: true
     obligations:
@@ -88,7 +87,6 @@ policies:
         columns:
           - cost_price
           - margin
-        action: deny
 
   # MT-05: Admin full access (assign to admin users)
   - name: admin-full-access

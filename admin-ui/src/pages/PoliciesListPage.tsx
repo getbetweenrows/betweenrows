@@ -102,8 +102,8 @@ export function PoliciesListPage() {
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Name</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-600">Effect</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-600">Obligations</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600">Type</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600">Targets</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Assignments</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Enabled</th>
                 <th className="px-4 py-3" />
@@ -123,15 +123,15 @@ export function PoliciesListPage() {
                   <td className="px-4 py-3">
                     <span
                       className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
-                        policy.effect === 'permit'
-                          ? 'bg-green-100 text-green-700'
-                          : 'bg-red-100 text-red-700'
+                        policy.policy_type === 'column_deny' || policy.policy_type === 'table_deny'
+                          ? 'bg-red-100 text-red-700'
+                          : 'bg-blue-100 text-blue-700'
                       }`}
                     >
-                      {policy.effect}
+                      {policy.policy_type}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-gray-600">{policy.obligation_count}</td>
+                  <td className="px-4 py-3 text-gray-600">{policy.targets?.length ?? 0}</td>
                   <td className="px-4 py-3 text-gray-600">{policy.assignment_count}</td>
                   <td className="px-4 py-3">
                     <button

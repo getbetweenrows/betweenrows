@@ -173,7 +173,7 @@ betweenrows/
     │                                 policy_handlers, audit_handlers, policy_yaml
     ├── discovery/                    DiscoveryProvider trait + Postgres impl
     ├── entity/                       SeaORM entities (proxy_user, data_source, policy,
-    │                                 policy_obligation, policy_assignment, policy_version,
+    │                                 policy_assignment, policy_version,
     │                                 query_audit_log, …)
     ├── engine/mod.rs                 EngineCache, VirtualCatalogProvider, build_arrow_schema()
     └── hooks/                        QueryHook trait, ReadOnlyHook, PolicyHook
@@ -424,8 +424,8 @@ All policy endpoints require admin (`is_admin = true`).
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/policies` | List policies (paginated) |
-| POST | `/policies` | Create policy with obligations |
-| GET | `/policies/{id}` | Get policy + obligations + assignment count |
+| POST | `/policies` | Create policy |
+| GET | `/policies/{id}` | Get policy + assignment count |
 | PUT | `/policies/{id}` | Update policy (requires `version` for optimistic concurrency → 409 on conflict) |
 | DELETE | `/policies/{id}` | Delete policy (cascades) |
 | GET | `/policies/export` | Export all policies as YAML |
@@ -467,9 +467,8 @@ discovered_table  (id UUID v5, discovered_schema_id, table_name, table_type, is_
 discovered_column (id UUID v5, discovered_table_id, column_name, ordinal_position,
                    data_type, is_nullable, column_default, arrow_type)
 
-policy            (id UUID v7, name, description, effect, is_enabled, version, …)
+policy            (id UUID v7, name, description, policy_type, is_enabled, version, targets JSON, definition JSON, …)
 policy_version    (id UUID v7, policy_id, version, snapshot JSON, change_type, changed_by)
-policy_obligation (id UUID v7, policy_id, obligation_type, definition JSON)
 policy_assignment (id UUID v7, policy_id, data_source_id, user_id?, priority)
 query_audit_log   (id UUID v7, user_id, username, data_source_id, datasource_name,
                    original_query, rewritten_query, policies_applied JSON,

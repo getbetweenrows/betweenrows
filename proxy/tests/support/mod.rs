@@ -457,21 +457,31 @@ impl ProxyTestServer {
     pub async fn create_and_assign_policy(
         &self,
         name: &str,
-        effect: &str,
-        obligations: Vec<Value>,
+        policy_type: &str,
+        targets: Vec<Value>,
+        definition: Option<Value>,
         ds_id: Uuid,
         user_id: Option<Uuid>,
     ) -> Uuid {
-        self.create_and_assign_policy_enabled(name, effect, obligations, ds_id, user_id, true)
-            .await
+        self.create_and_assign_policy_enabled(
+            name,
+            policy_type,
+            targets,
+            definition,
+            ds_id,
+            user_id,
+            true,
+        )
+        .await
     }
 
     /// Create a policy (with is_enabled control) and assign it to a datasource.
     pub async fn create_and_assign_policy_enabled(
         &self,
         name: &str,
-        effect: &str,
-        obligations: Vec<Value>,
+        policy_type: &str,
+        targets: Vec<Value>,
+        definition: Option<Value>,
         ds_id: Uuid,
         user_id: Option<Uuid>,
         is_enabled: bool,
@@ -483,9 +493,10 @@ impl ProxyTestServer {
             .authorization_bearer(&self.admin_token)
             .json(&json!({
                 "name": name,
-                "effect": effect,
+                "policy_type": policy_type,
                 "is_enabled": is_enabled,
-                "obligations": obligations,
+                "targets": targets,
+                "definition": definition,
             }))
             .await;
         resp.assert_status(axum::http::StatusCode::CREATED);
@@ -508,6 +519,116 @@ impl ProxyTestServer {
         assign_resp.assert_status(axum::http::StatusCode::CREATED);
 
         policy_id
+    }
+
+    /// Shortcut: create a row_filter policy.
+    #[allow(dead_code)]
+    pub async fn create_row_filter(
+        &self,
+        name: &str,
+        schema: &str,
+        table: &str,
+        filter: &str,
+        ds_id: Uuid,
+        user_id: Option<Uuid>,
+    ) -> Uuid {
+        self.create_and_assign_policy(
+            name,
+            "row_filter",
+            vec![json!({"schemas": [schema], "tables": [table]})],
+            Some(json!({"filter_expression": filter})),
+            ds_id,
+            user_id,
+        )
+        .await
+    }
+
+    /// Shortcut: create a column_allow policy.
+    #[allow(dead_code)]
+    pub async fn create_column_allow(
+        &self,
+        name: &str,
+        schema: &str,
+        table: &str,
+        columns: &[&str],
+        ds_id: Uuid,
+        user_id: Option<Uuid>,
+    ) -> Uuid {
+        self.create_and_assign_policy(
+            name,
+            "column_allow",
+            vec![json!({"schemas": [schema], "tables": [table], "columns": columns})],
+            None,
+            ds_id,
+            user_id,
+        )
+        .await
+    }
+
+    /// Shortcut: create a column_deny policy.
+    #[allow(dead_code)]
+    pub async fn create_column_deny(
+        &self,
+        name: &str,
+        schema: &str,
+        table: &str,
+        columns: &[&str],
+        ds_id: Uuid,
+        user_id: Option<Uuid>,
+    ) -> Uuid {
+        self.create_and_assign_policy(
+            name,
+            "column_deny",
+            vec![json!({"schemas": [schema], "tables": [table], "columns": columns})],
+            None,
+            ds_id,
+            user_id,
+        )
+        .await
+    }
+
+    /// Shortcut: create a column_mask policy.
+    #[allow(dead_code)]
+    pub async fn create_column_mask(
+        &self,
+        name: &str,
+        schema: &str,
+        table: &str,
+        column: &str,
+        mask: &str,
+        ds_id: Uuid,
+        user_id: Option<Uuid>,
+    ) -> Uuid {
+        self.create_and_assign_policy(
+            name,
+            "column_mask",
+            vec![json!({"schemas": [schema], "tables": [table], "columns": [column]})],
+            Some(json!({"mask_expression": mask})),
+            ds_id,
+            user_id,
+        )
+        .await
+    }
+
+    /// Shortcut: create a table_deny policy.
+    #[allow(dead_code)]
+    pub async fn create_table_deny(
+        &self,
+        name: &str,
+        schema: &str,
+        table: &str,
+        ds_id: Uuid,
+        user_id: Option<Uuid>,
+    ) -> Uuid {
+        self.create_and_assign_policy(
+            name,
+            "table_deny",
+            vec![json!({"schemas": [schema], "tables": [table]})],
+            None,
+            ds_id,
+            user_id,
+        )
+        .await
     }
 
     /// Execute SQL directly on the upstream Postgres container (not through proxy).

@@ -8,9 +8,9 @@ pub struct Model {
     pub id: Uuid,
     pub policy_id: Uuid,
     pub version: i32,
-    /// Full JSON snapshot: {name, effect, obligations: [...], assignments: [...]}
+    /// Full JSON snapshot: {name, policy_type, targets, definition, assignments: [...]}
     pub snapshot: String,
-    /// "create" | "update" | "delete" | "obligation_change" | "assignment_change"
+    /// "create" | "update" | "delete" | "assignment_change"
     pub change_type: String,
     pub changed_by: Uuid,
     pub created_at: DateTime,

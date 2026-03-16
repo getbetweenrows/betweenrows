@@ -1,6 +1,6 @@
 import type { User, LoginResponse, PaginatedResponse } from '../types/user'
 import type { DataSource, DataSourceType, FieldDef } from '../types/datasource'
-import type { PolicyResponse, PolicyAssignmentResponse, ObligationResponse } from '../types/policy'
+import type { PolicyResponse, PolicyAssignmentResponse } from '../types/policy'
 import type {
   CatalogResponse,
   DiscoveredSchemaResponse,
@@ -120,17 +120,6 @@ export function makeEmptyCatalog(): CatalogResponse {
   return { schemas: [] }
 }
 
-export function makeObligation(overrides: Partial<ObligationResponse> = {}): ObligationResponse {
-  return {
-    id: id(),
-    obligation_type: 'row_filter',
-    definition: { filter: "tenant_id = '{user.tenant}'" },
-    created_at: '2024-01-01T00:00:00Z',
-    updated_at: '2024-01-01T00:00:00Z',
-    ...overrides,
-  }
-}
-
 export function makePolicyAssignment(
   overrides: Partial<PolicyAssignmentResponse> = {},
 ): PolicyAssignmentResponse {
@@ -153,15 +142,17 @@ export function makePolicy(overrides: Partial<PolicyResponse> = {}): PolicyRespo
     id: id(),
     name: `policy_${counter}`,
     description: null,
-    effect: 'permit',
+    policy_type: 'row_filter',
+    targets: [{ schemas: ['public'], tables: ['orders'] }],
+    definition: { filter_expression: 'tenant = 1' },
     is_enabled: true,
     version: 1,
-    obligation_count: 0,
     assignment_count: 0,
-    obligations: [],
-    assignments: [],
+    created_by: 'user-1',
+    updated_by: 'user-1',
     created_at: '2024-01-01T00:00:00Z',
     updated_at: '2024-01-01T00:00:00Z',
+    assignments: [],
     ...overrides,
   }
 }

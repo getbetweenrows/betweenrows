@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::entity::{
     data_source, discovered_column, discovered_schema, discovered_table, policy, policy_assignment,
-    policy_obligation, user_data_source,
+    user_data_source,
 };
 
 // ---------- custom dialect for JSON pushdown ----------
@@ -303,7 +303,7 @@ struct CachedCatalog {
     access_mode: String,
 }
 
-/// Computed per-user visibility derived from policy obligations.
+/// Computed per-user visibility derived from policy assignments.
 struct UserVisibility {
     /// None = no filtering needed (open mode, no denies)
     filter: Option<VisibilityFilter>,
@@ -320,7 +320,7 @@ struct VisibilityFilter {
     denied_tables: HashSet<(String, String)>,
 }
 
-use crate::policy_match::ObjectAccessDef;
+use crate::policy_match::{PolicyType, TargetEntry};
 
 // ---------- lazy pool ----------
 
@@ -889,98 +889,110 @@ impl EngineCache {
             .await
             .map_err(|e| EngineError(format!("DB error loading policies: {e}")))?;
 
-        let permit_policy_ids: HashSet<Uuid> = policies
-            .iter()
-            .filter(|p| p.effect == "permit")
-            .map(|p| p.id)
-            .collect();
-
-        let enabled_policy_ids: Vec<Uuid> = policies.iter().map(|p| p.id).collect();
-
-        let obligations = policy_obligation::Entity::find()
-            .filter(policy_obligation::Column::PolicyId.is_in(enabled_policy_ids))
-            .all(&self.db)
-            .await
-            .map_err(|e| EngineError(format!("DB error loading obligations: {e}")))?;
-
         let mut visible_tables: HashSet<(String, String)> = HashSet::new();
         let mut denied_columns: HashSet<(String, String, String)> = HashSet::new();
         let mut denied_schemas: HashSet<String> = HashSet::new();
         let mut denied_tables: HashSet<(String, String)> = HashSet::new();
-        // Track column_access "allow" patterns per table to compute denied columns.
+        // Track column_allow patterns per table to compute denied columns later.
         let mut column_allow_patterns: HashMap<(String, String), Vec<String>> = HashMap::new();
 
-        for obl in &obligations {
-            // Only column_access from permit policies grants table visibility.
-            // row_filter and column_mask do NOT grant access (zero-trust model).
-            // The obligation's intent is derived from the policy effect: permit → allowlist,
-            // deny → denylist. There is no obligation-level action field.
-            if permit_policy_ids.contains(&obl.policy_id)
-                && obl.obligation_type == "column_access"
-                && let Ok(col_def) =
-                    serde_json::from_str::<crate::policy_match::ColumnAccessDef>(&obl.definition)
-            {
-                for (df_alias, vs) in &catalog.schemas {
-                    for table_name in vs.tables.keys() {
-                        if crate::policy_match::matches_schema_table(
-                            &col_def.schema,
-                            &col_def.table,
-                            df_alias,
-                            table_name,
-                            &df_to_upstream,
-                        ) {
-                            let key = (df_alias.clone(), table_name.clone());
-                            visible_tables.insert(key.clone());
-                            column_allow_patterns
-                                .entry(key)
-                                .or_default()
-                                .extend(col_def.columns.iter().cloned());
-                        }
-                    }
-                }
-            }
+        for p in &policies {
+            let policy_type = match p.policy_type.parse::<PolicyType>() {
+                Ok(pt) => pt,
+                Err(_) => continue,
+            };
+            let targets: Vec<TargetEntry> = serde_json::from_str(&p.targets).unwrap_or_default();
 
-            // column_access from deny-effect policies hides columns from the schema.
-            // Patterns are expanded against actual field names at build time so that
-            // glob patterns (*_name, secret_*) are resolved to exact column names here.
-            if !permit_policy_ids.contains(&obl.policy_id)
-                && obl.obligation_type == "column_access"
-                && let Ok(col_def) =
-                    serde_json::from_str::<crate::policy_match::ColumnAccessDef>(&obl.definition)
-            {
-                for (df_alias, vs) in &catalog.schemas {
-                    for (table_name, table) in &vs.tables {
-                        if crate::policy_match::matches_schema_table(
-                            &col_def.schema,
-                            &col_def.table,
-                            df_alias,
-                            table_name,
-                            &df_to_upstream,
-                        ) {
-                            let actual_cols: Vec<&str> = table
-                                .arrow_schema
-                                .fields()
-                                .iter()
-                                .map(|f| f.name().as_str())
-                                .collect();
-                            for col_name in crate::policy_match::expand_column_patterns(
-                                &col_def.columns,
-                                &actual_cols,
-                            ) {
-                                denied_columns.insert((
-                                    df_alias.clone(),
-                                    table_name.clone(),
-                                    col_name,
-                                ));
+            match policy_type {
+                PolicyType::ColumnAllow => {
+                    // Grants table visibility and restricts columns to the allow list.
+                    for (df_alias, vs) in &catalog.schemas {
+                        for table_name in vs.tables.keys() {
+                            for entry in &targets {
+                                if entry.matches_table(df_alias, table_name, &df_to_upstream) {
+                                    let key = (df_alias.clone(), table_name.clone());
+                                    visible_tables.insert(key.clone());
+                                    if let Some(cols) = &entry.columns {
+                                        column_allow_patterns
+                                            .entry(key)
+                                            .or_default()
+                                            .extend(cols.iter().cloned());
+                                    }
+                                    break;
+                                }
                             }
                         }
                     }
                 }
+                PolicyType::ColumnDeny => {
+                    // Hides specific columns in the schema.
+                    for (df_alias, vs) in &catalog.schemas {
+                        for (table_name, table) in &vs.tables {
+                            for entry in &targets {
+                                if entry.matches_table(df_alias, table_name, &df_to_upstream) {
+                                    if let Some(cols) = &entry.columns {
+                                        let actual_cols: Vec<&str> = table
+                                            .arrow_schema
+                                            .fields()
+                                            .iter()
+                                            .map(|f| f.name().as_str())
+                                            .collect();
+                                        for col_name in crate::policy_match::expand_column_patterns(
+                                            cols,
+                                            &actual_cols,
+                                        ) {
+                                            denied_columns.insert((
+                                                df_alias.clone(),
+                                                table_name.clone(),
+                                                col_name,
+                                            ));
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                PolicyType::TableDeny => {
+                    // Hides entire tables or schemas.
+                    for (df_alias, vs) in &catalog.schemas {
+                        let upstream = df_to_upstream
+                            .get(df_alias)
+                            .map(|s| s.as_str())
+                            .unwrap_or(df_alias.as_str());
+                        for entry in &targets {
+                            if !entry
+                                .schemas
+                                .iter()
+                                .any(|sp| crate::policy_match::matches_pattern(sp, upstream))
+                            {
+                                continue;
+                            }
+                            // tables: ["*"] or absent → deny entire schema
+                            let all_tables = entry.tables.iter().any(|t| t == "*");
+                            if all_tables {
+                                denied_schemas.insert(df_alias.clone());
+                            } else {
+                                for table_name in vs.tables.keys() {
+                                    if entry.tables.iter().any(|tp| {
+                                        crate::policy_match::matches_pattern(tp, table_name)
+                                    }) {
+                                        denied_tables
+                                            .insert((df_alias.clone(), table_name.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // RowFilter and ColumnMask don't affect catalog-level visibility.
+                PolicyType::RowFilter | PolicyType::ColumnMask => {}
             }
         }
 
-        // Convert column_access "allow" restrictions into denied_columns entries.
-        // Any field not in the allowed set is denied from the schema.
+        // Convert column_allow restrictions into denied_columns entries.
+        // Any field not in the allowed set is denied.
         for ((df_alias, table_name), allow_patterns) in &column_allow_patterns {
             if let Some(vs) = catalog.schemas.get(df_alias)
                 && let Some(table) = vs.tables.get(table_name)
@@ -1000,50 +1012,6 @@ impl EngineCache {
                             table_name.clone(),
                             field.name().clone(),
                         ));
-                    }
-                }
-            }
-        }
-
-        // object_access deny — applies in both open and policy_required modes
-        for obl in &obligations {
-            if obl.obligation_type != "object_access" {
-                continue;
-            }
-            let def: ObjectAccessDef = match serde_json::from_str(&obl.definition) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            if def.action != "deny" {
-                continue;
-            }
-            // treat absent or "*" table as schema-level deny
-            let table_opt = def.table.as_deref().filter(|t| *t != "*");
-            match table_opt {
-                None => {
-                    for df_alias in catalog.schemas.keys() {
-                        if crate::policy_match::matches_schema_only(
-                            &def.schema,
-                            df_alias,
-                            &df_to_upstream,
-                        ) {
-                            denied_schemas.insert(df_alias.clone());
-                        }
-                    }
-                }
-                Some(tbl) => {
-                    for (df_alias, vs) in &catalog.schemas {
-                        for table_name in vs.tables.keys() {
-                            if crate::policy_match::matches_schema_table(
-                                &def.schema,
-                                tbl,
-                                df_alias,
-                                table_name,
-                                &df_to_upstream,
-                            ) {
-                                denied_tables.insert((df_alias.clone(), table_name.clone()));
-                            }
-                        }
                     }
                 }
             }
@@ -1109,7 +1077,7 @@ impl EngineCache {
             }
         };
 
-        // Compute per-user visibility from policy obligations
+        // Compute per-user visibility from policy assignments
         let visibility = self.compute_user_visibility(user_id, &catalog).await?;
 
         // Build filtered catalog schemas
@@ -2002,14 +1970,14 @@ mod tests {
         ds_id: Uuid,
         user_id: Uuid,
         is_enabled: bool,
-        effect: &str,
+        // ignored — column_deny type is always a deny type now
+        _effect: &str,
     ) {
         insert_policy_with_custom_column_deny(
             db,
             ds_id,
             user_id,
             is_enabled,
-            effect,
             "public",
             "employees",
             &["ssn"],
@@ -2022,46 +1990,35 @@ mod tests {
         ds_id: Uuid,
         user_id: Uuid,
         is_enabled: bool,
-        effect: &str,
         schema: &str,
         table: &str,
         columns: &[&str],
     ) {
-        use crate::entity::{policy, policy_assignment, policy_obligation};
+        use crate::entity::{policy, policy_assignment};
         use chrono::Utc;
         use sea_orm::ActiveModelTrait;
 
         let policy_id = Uuid::now_v7();
         let now = Utc::now().naive_utc();
+        let cols: Vec<serde_json::Value> = columns.iter().map(|c| serde_json::json!(c)).collect();
+        let targets_json = serde_json::json!([{
+            "schemas": [schema],
+            "tables": [table],
+            "columns": cols
+        }])
+        .to_string();
 
         policy::ActiveModel {
             id: sea_orm::Set(policy_id),
             name: sea_orm::Set(format!("test-policy-{policy_id}")),
             description: sea_orm::Set(None),
-            effect: sea_orm::Set(effect.to_string()),
+            policy_type: sea_orm::Set("column_deny".to_string()),
+            targets: sea_orm::Set(targets_json),
+            definition: sea_orm::Set(None),
             is_enabled: sea_orm::Set(is_enabled),
             version: sea_orm::Set(1),
             created_by: sea_orm::Set(user_id),
             updated_by: sea_orm::Set(user_id),
-            created_at: sea_orm::Set(now),
-            updated_at: sea_orm::Set(now),
-        }
-        .insert(db)
-        .await
-        .unwrap();
-
-        let obl_def = serde_json::json!({
-            "schema": schema,
-            "table": table,
-            "columns": columns
-        })
-        .to_string();
-
-        policy_obligation::ActiveModel {
-            id: sea_orm::Set(Uuid::now_v7()),
-            policy_id: sea_orm::Set(policy_id),
-            obligation_type: sea_orm::Set("column_access".to_string()),
-            definition: sea_orm::Set(obl_def),
             created_at: sea_orm::Set(now),
             updated_at: sea_orm::Set(now),
         }
@@ -2083,7 +2040,7 @@ mod tests {
         .unwrap();
     }
 
-    /// Disabled policy's `column_access deny` obligation must NOT appear in denied_columns.
+    /// Disabled `column_deny` policy must NOT appear in denied_columns.
     #[tokio::test]
     async fn test_disabled_policy_column_deny_not_applied() {
         let db = setup_visibility_db().await;
@@ -2101,7 +2058,7 @@ mod tests {
             .await
             .unwrap();
 
-        // No obligations from disabled policy → no denied columns
+        // No effects from disabled policy → no denied columns
         match vis.filter {
             None => {} // expected for open mode with no denies
             Some(f) => assert!(
@@ -2112,7 +2069,7 @@ mod tests {
         }
     }
 
-    /// Enabled policy's `column_access deny` obligation MUST appear in denied_columns.
+    /// Enabled `column_deny` policy MUST appear in denied_columns.
     #[tokio::test]
     async fn test_enabled_policy_column_deny_applied() {
         let db = setup_visibility_db().await;
@@ -2170,7 +2127,6 @@ mod tests {
             ds_id,
             user_id,
             true,
-            "deny",
             "public",
             "employees",
             &["*"],
@@ -2220,7 +2176,6 @@ mod tests {
             ds_id,
             user_id,
             true,
-            "deny",
             "public",
             "employees",
             &["*_name"],
@@ -2277,7 +2232,6 @@ mod tests {
             ds_id,
             user_id,
             true,
-            "deny",
             "public",
             "employees",
             &["secret_*"],
@@ -2333,7 +2287,6 @@ mod tests {
             ds_id,
             user_id,
             true,
-            "deny",
             "public",
             "employees",
             &["*_at", "secret_*"],
@@ -2381,7 +2334,6 @@ mod tests {
             ds_id,
             user_id,
             true,
-            "deny",
             "public",
             "employees",
             &["*"],
@@ -2421,7 +2373,6 @@ mod tests {
             ds_id,
             user_id,
             true,
-            "deny",
             "public",
             "employees",
             &["ssn"],
@@ -2462,7 +2413,6 @@ mod tests {
             ds_id,
             user_id,
             true,
-            "deny",
             "public",
             "big_table",
             &["*"],
@@ -2547,18 +2497,26 @@ mod tests {
         ds_id: Uuid,
         user_id: Uuid,
     ) {
-        use crate::entity::{policy, policy_assignment, policy_obligation};
+        use crate::entity::{policy, policy_assignment};
         use chrono::Utc;
         use sea_orm::ActiveModelTrait;
 
         let policy_id = Uuid::now_v7();
         let now = Utc::now().naive_utc();
+        let targets_json = serde_json::json!([{
+            "schemas": ["*"],
+            "tables": ["*"],
+            "columns": ["*"]
+        }])
+        .to_string();
 
         policy::ActiveModel {
             id: sea_orm::Set(policy_id),
-            name: sea_orm::Set(format!("permit-col-access-all-{policy_id}")),
+            name: sea_orm::Set(format!("permit-col-allow-all-{policy_id}")),
             description: sea_orm::Set(None),
-            effect: sea_orm::Set("permit".to_string()),
+            policy_type: sea_orm::Set("column_allow".to_string()),
+            targets: sea_orm::Set(targets_json),
+            definition: sea_orm::Set(None),
             is_enabled: sea_orm::Set(true),
             version: sea_orm::Set(1),
             created_by: sea_orm::Set(user_id),
@@ -2570,31 +2528,11 @@ mod tests {
         .await
         .unwrap();
 
-        // column_access with columns:["*"] — no action field; intent from policy effect.
-        policy_obligation::ActiveModel {
-            id: sea_orm::Set(Uuid::now_v7()),
-            policy_id: sea_orm::Set(policy_id),
-            obligation_type: sea_orm::Set("column_access".to_string()),
-            definition: sea_orm::Set(
-                serde_json::json!({
-                    "schema": "*",
-                    "table": "*",
-                    "columns": ["*"]
-                })
-                .to_string(),
-            ),
-            created_at: sea_orm::Set(now),
-            updated_at: sea_orm::Set(now),
-        }
-        .insert(db)
-        .await
-        .unwrap();
-
         policy_assignment::ActiveModel {
             id: sea_orm::Set(Uuid::now_v7()),
             policy_id: sea_orm::Set(policy_id),
             data_source_id: sea_orm::Set(ds_id),
-            user_id: sea_orm::Set(None), // wildcard
+            user_id: sea_orm::Set(None), // wildcard — applies to all users
             priority: sea_orm::Set(100),
             created_at: sea_orm::Set(now),
             updated_at: sea_orm::Set(now),

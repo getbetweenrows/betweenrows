@@ -101,10 +101,10 @@ describe('PolicyAssignmentPanel', () => {
   })
 
   it('populates policy dropdown from listPolicies', async () => {
-    const policy = makePolicy({ id: 'p-1', name: 'deny-cols', effect: 'deny' })
+    const policy = makePolicy({ id: 'p-1', name: 'deny-cols', policy_type: 'column_deny' })
     mockListPolicies.mockResolvedValue({ data: [policy], total: 1, page: 1, page_size: 100 })
     renderWithProviders(<PolicyAssignmentPanel datasourceId="ds-1" />, { authenticated: true })
-    await waitFor(() => expect(screen.getByText(/deny-cols.*deny/)).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(/deny-cols.*column_deny/)).toBeInTheDocument())
   })
 
   it('populates user dropdown from listUsers', async () => {

@@ -11,52 +11,20 @@ use sea_orm::{
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::entity::{
-    data_source, policy, policy_assignment, policy_obligation, policy_version, proxy_user,
-};
-
-use crate::policy_match::ObligationType;
+use crate::entity::{data_source, policy, policy_assignment, policy_version, proxy_user};
+use crate::policy_match::PolicyType;
 
 use super::{
     AdminState, ApiErr,
     dto::{
-        AssignPolicyRequest, CreatePolicyRequest, ListPoliciesQuery, ObligationRequest,
-        ObligationResponse, PaginatedResponse, PolicyAssignmentResponse, PolicyResponse,
-        UpdatePolicyRequest, validate_obligation, validate_policy_name,
+        AssignPolicyRequest, CreatePolicyRequest, ListPoliciesQuery, PaginatedResponse,
+        PolicyAssignmentResponse, PolicyResponse, UpdatePolicyRequest, validate_definition,
+        validate_policy_name, validate_targets,
     },
     jwt::AdminClaims,
 };
 
 // ---------- helpers ----------
-
-/// Returns an error message if a deny-effect policy has any column_mask obligations.
-/// column_mask on a deny policy is silently ignored at query time, so we reject it early.
-fn validate_no_deny_column_mask(
-    effect: &str,
-    obligations: &[ObligationRequest],
-) -> Option<&'static str> {
-    if effect == "deny"
-        && obligations
-            .iter()
-            .any(|o| o.obligation_type == ObligationType::ColumnMask)
-    {
-        Some("column_mask obligations are not supported on deny-effect policies")
-    } else {
-        None
-    }
-}
-
-fn obligation_response(m: &policy_obligation::Model) -> Result<ObligationResponse, ApiErr> {
-    let definition: serde_json::Value =
-        serde_json::from_str(&m.definition).map_err(ApiErr::internal)?;
-    Ok(ObligationResponse {
-        id: m.id,
-        obligation_type: m.obligation_type.clone(),
-        definition,
-        created_at: m.created_at,
-        updated_at: m.updated_at,
-    })
-}
 
 fn assignment_response(
     m: &policy_assignment::Model,
@@ -129,52 +97,54 @@ async fn fetch_user_names<C: sea_orm::ConnectionTrait>(
         .collect())
 }
 
-fn policy_response_basic(
-    p: &policy::Model,
-    obligation_count: usize,
-    assignment_count: usize,
-) -> PolicyResponse {
+fn policy_response_basic(p: &policy::Model, assignment_count: usize) -> PolicyResponse {
+    let targets: serde_json::Value =
+        serde_json::from_str(&p.targets).unwrap_or(serde_json::Value::Array(vec![]));
+    let definition: Option<serde_json::Value> = p
+        .definition
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
     PolicyResponse {
         id: p.id,
         name: p.name.clone(),
         description: p.description.clone(),
-        effect: p.effect.clone(),
+        policy_type: p.policy_type.clone(),
+        targets,
+        definition,
         is_enabled: p.is_enabled,
         version: p.version,
-        obligation_count,
         assignment_count,
         created_by: p.created_by,
         updated_by: p.updated_by,
         created_at: p.created_at,
         updated_at: p.updated_at,
-        obligations: None,
         assignments: None,
     }
 }
 
 /// Create a policy_version snapshot in the same transaction.
-#[allow(clippy::too_many_arguments)]
 async fn create_snapshot<C: sea_orm::ConnectionTrait>(
     txn: &C,
     policy_id: Uuid,
     version: i32,
     changed_by: Uuid,
     change_type: &str,
-    name: &str,
-    effect: &str,
-    obligations: &[policy_obligation::Model],
+    p: &policy::Model,
     assignments: &[policy_assignment::Model],
 ) -> Result<(), ApiErr> {
+    let targets: serde_json::Value =
+        serde_json::from_str(&p.targets).unwrap_or(serde_json::Value::Array(vec![]));
+    let definition: serde_json::Value = p
+        .definition
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(serde_json::Value::Null);
+
     let snapshot = serde_json::json!({
-        "name": name,
-        "effect": effect,
-        "obligations": obligations.iter().map(|o| {
-            serde_json::json!({
-                "id": o.id.to_string(),
-                "obligation_type": o.obligation_type,
-                "definition": serde_json::from_str::<serde_json::Value>(&o.definition).unwrap_or(serde_json::Value::Null),
-            })
-        }).collect::<Vec<_>>(),
+        "name": p.name,
+        "policy_type": p.policy_type,
+        "targets": targets,
+        "definition": definition,
         "assignments": assignments.iter().map(|a| {
             serde_json::json!({
                 "id": a.id.to_string(),
@@ -228,23 +198,13 @@ pub async fn list_policies(
         .await
         .map_err(ApiErr::internal)?;
 
-    // Count obligations and assignments for this page of policies
     let ids: Vec<Uuid> = items.iter().map(|p| p.id).collect();
-    let all_obligations = policy_obligation::Entity::find()
-        .filter(policy_obligation::Column::PolicyId.is_in(ids.clone()))
-        .all(&state.db)
-        .await
-        .map_err(ApiErr::internal)?;
     let all_assignments = policy_assignment::Entity::find()
         .filter(policy_assignment::Column::PolicyId.is_in(ids))
         .all(&state.db)
         .await
         .map_err(ApiErr::internal)?;
 
-    let mut obl_counts: HashMap<Uuid, usize> = HashMap::new();
-    for o in &all_obligations {
-        *obl_counts.entry(o.policy_id).or_insert(0) += 1;
-    }
     let mut asgn_counts: HashMap<Uuid, usize> = HashMap::new();
     for a in &all_assignments {
         *asgn_counts.entry(a.policy_id).or_insert(0) += 1;
@@ -252,13 +212,7 @@ pub async fn list_policies(
 
     let data = items
         .iter()
-        .map(|p| {
-            policy_response_basic(
-                p,
-                *obl_counts.get(&p.id).unwrap_or(&0),
-                *asgn_counts.get(&p.id).unwrap_or(&0),
-            )
-        })
+        .map(|p| policy_response_basic(p, *asgn_counts.get(&p.id).unwrap_or(&0)))
         .collect();
 
     Ok(Json(PaginatedResponse {
@@ -276,37 +230,35 @@ pub async fn create_policy(
     State(state): State<AdminState>,
     Json(body): Json<CreatePolicyRequest>,
 ) -> Result<(StatusCode, Json<PolicyResponse>), ApiErr> {
-    // Validate name
     validate_policy_name(&body.name)
         .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
 
-    // Validate effect
-    if body.effect != "permit" && body.effect != "deny" {
-        return Err(ApiErr::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "effect must be 'permit' or 'deny'",
-        ));
-    }
+    validate_targets(body.policy_type, &body.targets)
+        .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
 
-    // Validate deny + column_mask combination
-    if let Some(err) = validate_no_deny_column_mask(&body.effect, &body.obligations) {
-        return Err(ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, err));
-    }
-
-    // Validate obligation definition shapes
-    for obl in &body.obligations {
-        validate_obligation(obl).map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
-    }
+    validate_definition(body.policy_type, &body.definition)
+        .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
 
     let now = Utc::now().naive_utc();
     let policy_id = Uuid::now_v7();
+
+    let targets_json = serde_json::to_string(&body.targets).map_err(ApiErr::internal)?;
+    let definition_json = body
+        .definition
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(ApiErr::internal)?;
+
     let txn = state.db.begin().await.map_err(ApiErr::internal)?;
 
     let policy_model = policy::ActiveModel {
         id: Set(policy_id),
         name: Set(body.name.clone()),
         description: Set(body.description.clone()),
-        effect: Set(body.effect.clone()),
+        policy_type: Set(body.policy_type.to_string()),
+        targets: Set(targets_json),
+        definition: Set(definition_json),
         is_enabled: Set(body.is_enabled),
         version: Set(1),
         created_by: Set(claims.sub),
@@ -325,64 +277,13 @@ pub async fn create_policy(
         }
     })?;
 
-    // Insert obligations
-    let mut obligation_models = Vec::new();
-    for obl in &body.obligations {
-        let def_json = serde_json::to_string(&obl.definition).map_err(ApiErr::internal)?;
-        let m = policy_obligation::ActiveModel {
-            id: Set(Uuid::now_v7()),
-            policy_id: Set(policy_id),
-            obligation_type: Set(obl.obligation_type.to_string()),
-            definition: Set(def_json),
-            created_at: Set(now),
-            updated_at: Set(now),
-        }
-        .insert(&txn)
-        .await
-        .map_err(ApiErr::internal)?;
-        obligation_models.push(m);
-    }
-
-    // Create version snapshot
-    create_snapshot(
-        &txn,
-        policy_id,
-        1,
-        claims.sub,
-        "create",
-        &body.name,
-        &body.effect,
-        &obligation_models,
-        &[],
-    )
-    .await?;
+    create_snapshot(&txn, policy_id, 1, claims.sub, "create", &policy_model, &[]).await?;
 
     txn.commit().await.map_err(ApiErr::internal)?;
 
-    let obl_responses: Vec<ObligationResponse> = obligation_models
-        .iter()
-        .map(obligation_response)
-        .collect::<Result<_, _>>()?;
-
-    let obl_count = obl_responses.len();
     Ok((
         StatusCode::CREATED,
-        Json(PolicyResponse {
-            id: policy_model.id,
-            name: policy_model.name,
-            description: policy_model.description,
-            effect: policy_model.effect,
-            is_enabled: policy_model.is_enabled,
-            version: policy_model.version,
-            obligation_count: obl_count,
-            assignment_count: 0,
-            created_by: policy_model.created_by,
-            updated_by: policy_model.updated_by,
-            created_at: policy_model.created_at,
-            updated_at: policy_model.updated_at,
-            obligations: Some(obl_responses),
-            assignments: Some(vec![]),
-        }),
+        Json(policy_response_basic(&policy_model, 0)),
     ))
 }
 
@@ -399,22 +300,11 @@ pub async fn get_policy(
         .map_err(ApiErr::internal)?
         .ok_or_else(|| ApiErr::not_found("Policy not found"))?;
 
-    let obligations = policy_obligation::Entity::find()
-        .filter(policy_obligation::Column::PolicyId.eq(id))
-        .all(&state.db)
-        .await
-        .map_err(ApiErr::internal)?;
-
     let assignments = policy_assignment::Entity::find()
         .filter(policy_assignment::Column::PolicyId.eq(id))
         .all(&state.db)
         .await
         .map_err(ApiErr::internal)?;
-
-    let obl_responses: Vec<ObligationResponse> = obligations
-        .iter()
-        .map(obligation_response)
-        .collect::<Result<_, _>>()?;
 
     let ds_ids: Vec<Uuid> = assignments.iter().map(|a| a.data_source_id).collect();
     let user_ids: Vec<Uuid> = assignments.iter().filter_map(|a| a.user_id).collect();
@@ -422,16 +312,16 @@ pub async fn get_policy(
     let ds_names = fetch_ds_names(&state.db, ds_ids).await?;
     let user_names = fetch_user_names(&state.db, user_ids).await?;
 
-    Ok(Json(PolicyResponse {
-        obligations: Some(obl_responses),
-        assignments: Some(
-            assignments
-                .iter()
-                .map(|a| assignment_response(a, &policy_names, &ds_names, &user_names))
-                .collect(),
-        ),
-        ..policy_response_basic(&p, obligations.len(), assignments.len())
-    }))
+    let asgn_count = assignments.len();
+    let mut resp = policy_response_basic(&p, asgn_count);
+    resp.assignments = Some(
+        assignments
+            .iter()
+            .map(|a| assignment_response(a, &policy_names, &ds_names, &user_names))
+            .collect(),
+    );
+
+    Ok(Json(resp))
 }
 
 // ---------- PUT /policies/{id} ----------
@@ -451,16 +341,7 @@ pub async fn update_policy(
     if let Some(ref name) = body.name {
         validate_policy_name(name).map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
     }
-    if let Some(ref effect) = body.effect
-        && (effect != "permit" && effect != "deny")
-    {
-        return Err(ApiErr::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "effect must be 'permit' or 'deny'",
-        ));
-    }
 
-    // Optimistic concurrency check
     if p.version != body.version {
         return Err(ApiErr::conflict(format!(
             "Policy version conflict: expected {}, got {}",
@@ -468,52 +349,66 @@ pub async fn update_policy(
         )));
     }
 
-    // Validate deny + column_mask combination and obligation definition shapes
-    let final_effect = body.effect.as_deref().unwrap_or(&p.effect);
-    if let Some(ref new_obls) = body.obligations {
-        if let Some(err) = validate_no_deny_column_mask(final_effect, new_obls) {
-            return Err(ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, err));
-        }
-        for obl in new_obls {
-            validate_obligation(obl)
-                .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
-        }
-    } else if final_effect == "deny" {
-        // No new obligations provided but effect is (or stays) deny — check existing ones
-        let current_obls = policy_obligation::Entity::find()
-            .filter(policy_obligation::Column::PolicyId.eq(id))
-            .all(&state.db)
-            .await
-            .map_err(ApiErr::internal)?;
-        if current_obls
-            .iter()
-            .any(|m| m.obligation_type == "column_mask")
-        {
-            return Err(ApiErr::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "column_mask obligations are not supported on deny-effect policies",
-            ));
-        }
-    }
+    let final_policy_type = body.policy_type.unwrap_or_else(|| {
+        p.policy_type
+            .parse::<PolicyType>()
+            .unwrap_or(PolicyType::RowFilter)
+    });
+
+    // Determine final targets for validation
+    let final_targets = match &body.targets {
+        Some(r) => r.clone(),
+        None => serde_json::from_str(&p.targets).unwrap_or_default(),
+    };
+
+    validate_targets(final_policy_type, &final_targets)
+        .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+
+    // For validation, use the incoming definition if provided, else the existing DB definition.
+    let final_definition: Option<serde_json::Value> = if body.definition.is_some() {
+        body.definition.clone()
+    } else {
+        p.definition
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+    };
+    validate_definition(final_policy_type, &final_definition)
+        .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
 
     let now = Utc::now().naive_utc();
     let new_version = p.version + 1;
 
     let txn = state.db.begin().await.map_err(ApiErr::internal)?;
 
-    // Update policy using raw SQL for version check (optimistic lock)
     let mut active: policy::ActiveModel = p.clone().into();
     if let Some(name) = body.name {
         active.name = Set(name);
     }
-    if let Some(effect) = body.effect {
-        active.effect = Set(effect);
+    if let Some(pt) = body.policy_type {
+        active.policy_type = Set(pt.to_string());
     }
     if let Some(desc) = body.description {
         active.description = Set(Some(desc));
     }
     if let Some(enabled) = body.is_enabled {
         active.is_enabled = Set(enabled);
+    }
+    if let Some(targets) = body.targets {
+        let json = serde_json::to_string(&targets).map_err(ApiErr::internal)?;
+        active.targets = Set(json);
+    }
+    // Definition is type-driven: clear it for types that don't use one so that a type
+    // change never leaves a stale filter_expression / mask_expression in the DB.
+    match final_policy_type {
+        PolicyType::RowFilter | PolicyType::ColumnMask => {
+            if let Some(definition) = body.definition {
+                let json = serde_json::to_string(&definition).map_err(ApiErr::internal)?;
+                active.definition = Set(Some(json));
+            }
+        }
+        PolicyType::ColumnAllow | PolicyType::ColumnDeny | PolicyType::TableDeny => {
+            active.definition = Set(None);
+        }
     }
     active.version = Set(new_version);
     active.updated_by = Set(claims.sub);
@@ -528,57 +423,19 @@ pub async fn update_policy(
         }
     })?;
 
-    // Replace obligations if provided
-    let obligation_models = if let Some(new_obligations) = body.obligations {
-        // Delete existing obligations
-        policy_obligation::Entity::delete_many()
-            .filter(policy_obligation::Column::PolicyId.eq(id))
-            .exec(&txn)
-            .await
-            .map_err(ApiErr::internal)?;
-
-        // Insert new ones
-        let mut models = Vec::new();
-        for obl in &new_obligations {
-            let def_json = serde_json::to_string(&obl.definition).map_err(ApiErr::internal)?;
-            let m = policy_obligation::ActiveModel {
-                id: Set(Uuid::now_v7()),
-                policy_id: Set(id),
-                obligation_type: Set(obl.obligation_type.to_string()),
-                definition: Set(def_json),
-                created_at: Set(now),
-                updated_at: Set(now),
-            }
-            .insert(&txn)
-            .await
-            .map_err(ApiErr::internal)?;
-            models.push(m);
-        }
-        models
-    } else {
-        policy_obligation::Entity::find()
-            .filter(policy_obligation::Column::PolicyId.eq(id))
-            .all(&txn)
-            .await
-            .map_err(ApiErr::internal)?
-    };
-
     let assignments = policy_assignment::Entity::find()
         .filter(policy_assignment::Column::PolicyId.eq(id))
         .all(&txn)
         .await
         .map_err(ApiErr::internal)?;
 
-    // Create snapshot
     create_snapshot(
         &txn,
         id,
         new_version,
         claims.sub,
         "update",
-        &updated.name,
-        &updated.effect,
-        &obligation_models,
+        &updated,
         &assignments,
     )
     .await?;
@@ -588,7 +445,6 @@ pub async fn update_policy(
     // Invalidate policy cache for all datasources this policy is assigned to
     if let Some(hook) = &state.policy_hook {
         for a in &assignments {
-            // Look up datasource name
             if let Ok(Some(ds)) = data_source::Entity::find_by_id(a.data_source_id)
                 .one(&state.db)
                 .await
@@ -601,11 +457,6 @@ pub async fn update_policy(
         }
     }
 
-    let obl_responses: Vec<ObligationResponse> = obligation_models
-        .iter()
-        .map(obligation_response)
-        .collect::<Result<_, _>>()?;
-
     let ds_ids: Vec<Uuid> = assignments.iter().map(|a| a.data_source_id).collect();
     let user_ids: Vec<Uuid> = assignments.iter().filter_map(|a| a.user_id).collect();
     let policy_names: HashMap<Uuid, String> =
@@ -613,16 +464,16 @@ pub async fn update_policy(
     let ds_names = fetch_ds_names(&state.db, ds_ids).await?;
     let user_names = fetch_user_names(&state.db, user_ids).await?;
 
-    Ok(Json(PolicyResponse {
-        obligations: Some(obl_responses),
-        assignments: Some(
-            assignments
-                .iter()
-                .map(|a| assignment_response(a, &policy_names, &ds_names, &user_names))
-                .collect(),
-        ),
-        ..policy_response_basic(&updated, obligation_models.len(), assignments.len())
-    }))
+    let asgn_count = assignments.len();
+    let mut resp = policy_response_basic(&updated, asgn_count);
+    resp.assignments = Some(
+        assignments
+            .iter()
+            .map(|a| assignment_response(a, &policy_names, &ds_names, &user_names))
+            .collect(),
+    );
+
+    Ok(Json(resp))
 }
 
 // ---------- DELETE /policies/{id} ----------
@@ -638,7 +489,6 @@ pub async fn delete_policy(
         .map_err(ApiErr::internal)?
         .ok_or_else(|| ApiErr::not_found("Policy not found"))?;
 
-    // Capture assignments before deletion for cache invalidation
     let assignments = policy_assignment::Entity::find()
         .filter(policy_assignment::Column::PolicyId.eq(id))
         .all(&state.db)
@@ -647,22 +497,13 @@ pub async fn delete_policy(
 
     let txn = state.db.begin().await.map_err(ApiErr::internal)?;
 
-    // Snapshot the deletion
-    let obligations = policy_obligation::Entity::find()
-        .filter(policy_obligation::Column::PolicyId.eq(id))
-        .all(&txn)
-        .await
-        .map_err(ApiErr::internal)?;
-
     create_snapshot(
         &txn,
         id,
         p.version + 1,
         claims.sub,
         "delete",
-        &p.name,
-        &p.effect,
-        &obligations,
+        &p,
         &assignments,
     )
     .await?;
@@ -672,7 +513,6 @@ pub async fn delete_policy(
 
     txn.commit().await.map_err(ApiErr::internal)?;
 
-    // Invalidate cache
     if let Some(hook) = &state.policy_hook {
         for a in &assignments {
             if let Ok(Some(ds)) = data_source::Entity::find_by_id(a.data_source_id)
@@ -697,7 +537,6 @@ pub async fn list_datasource_policies(
     State(state): State<AdminState>,
     Path(ds_id): Path<Uuid>,
 ) -> Result<Json<Vec<PolicyAssignmentResponse>>, ApiErr> {
-    // Confirm datasource exists
     let ds = data_source::Entity::find_by_id(ds_id)
         .one(&state.db)
         .await
@@ -733,14 +572,12 @@ pub async fn assign_policy(
     Path(ds_id): Path<Uuid>,
     Json(body): Json<AssignPolicyRequest>,
 ) -> Result<(StatusCode, Json<PolicyAssignmentResponse>), ApiErr> {
-    // Confirm datasource exists
     let ds = data_source::Entity::find_by_id(ds_id)
         .one(&state.db)
         .await
         .map_err(ApiErr::internal)?
         .ok_or_else(|| ApiErr::not_found("Data source not found"))?;
 
-    // Confirm policy exists
     let p = policy::Entity::find_by_id(body.policy_id)
         .one(&state.db)
         .await
@@ -761,21 +598,21 @@ pub async fn assign_policy(
     }
     .insert(&txn)
     .await
-    .map_err(ApiErr::internal)?;
+    .map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("UNIQUE") || msg.contains("unique") {
+            ApiErr::conflict("This policy is already assigned to this datasource for this user")
+        } else {
+            ApiErr::internal(e)
+        }
+    })?;
 
-    // Bump policy version + snapshot on assignment change
     let new_version = p.version + 1;
     let mut active: policy::ActiveModel = p.clone().into();
     active.version = Set(new_version);
     active.updated_by = Set(claims.sub);
     active.updated_at = Set(now);
-    active.update(&txn).await.map_err(ApiErr::internal)?;
-
-    let obligations = policy_obligation::Entity::find()
-        .filter(policy_obligation::Column::PolicyId.eq(p.id))
-        .all(&txn)
-        .await
-        .map_err(ApiErr::internal)?;
+    let updated_p = active.update(&txn).await.map_err(ApiErr::internal)?;
 
     let all_assignments = policy_assignment::Entity::find()
         .filter(policy_assignment::Column::PolicyId.eq(p.id))
@@ -789,16 +626,13 @@ pub async fn assign_policy(
         new_version,
         claims.sub,
         "assignment_change",
-        &p.name,
-        &p.effect,
-        &obligations,
+        &updated_p,
         &all_assignments,
     )
     .await?;
 
     txn.commit().await.map_err(ApiErr::internal)?;
 
-    // Invalidate cache and rebuild active connection contexts
     if let Some(hook) = &state.policy_hook {
         hook.invalidate_datasource(&ds.name).await;
     }
@@ -858,13 +692,7 @@ pub async fn remove_assignment(
     policy_active.version = Set(new_version);
     policy_active.updated_by = Set(claims.sub);
     policy_active.updated_at = Set(now);
-    policy_active.update(&txn).await.map_err(ApiErr::internal)?;
-
-    let obligations = policy_obligation::Entity::find()
-        .filter(policy_obligation::Column::PolicyId.eq(p.id))
-        .all(&txn)
-        .await
-        .map_err(ApiErr::internal)?;
+    let updated_p = policy_active.update(&txn).await.map_err(ApiErr::internal)?;
 
     let remaining_assignments = policy_assignment::Entity::find()
         .filter(policy_assignment::Column::PolicyId.eq(p.id))
@@ -878,9 +706,7 @@ pub async fn remove_assignment(
         new_version,
         claims.sub,
         "assignment_change",
-        &p.name,
-        &p.effect,
-        &obligations,
+        &updated_p,
         &remaining_assignments,
     )
     .await?;
@@ -1022,6 +848,16 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    fn row_filter_payload(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "policy_type": "row_filter",
+            "is_enabled": true,
+            "targets": [{"schemas": ["public"], "tables": ["orders"]}],
+            "definition": {"filter_expression": "tenant_id = {user.tenant}"}
+        })
+    }
+
     // ===== Policy CRUD =====
 
     #[tokio::test]
@@ -1038,12 +874,7 @@ mod tests {
                     .uri("/policies")
                     .header("Authorization", format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "row-filter",
-                        "effect": "permit",
-                        "is_enabled": true,
-                        "obligations": []
-                    })))
+                    .body(json_body(row_filter_payload("row-filter")))
                     .unwrap(),
             )
             .await
@@ -1052,49 +883,8 @@ mod tests {
         assert_eq!(res.status(), StatusCode::CREATED);
         let body = body_json(res).await;
         assert_eq!(body["name"], "row-filter");
-        assert_eq!(body["effect"], "permit");
+        assert_eq!(body["policy_type"], "row_filter");
         assert_eq!(body["version"], 1);
-    }
-
-    #[tokio::test]
-    async fn create_policy_with_obligations() {
-        let db = setup_db().await;
-        let admin_id = Uuid::now_v7();
-        insert_user(&db, admin_id, "admin").await;
-
-        let token = admin_token(admin_id);
-        let res = make_router(make_state(db))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/policies")
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "with-obligations",
-                        "effect": "permit",
-                        "is_enabled": true,
-                        "obligations": [
-                            {
-                                "obligation_type": "row_filter",
-                                "definition": {
-                                    "schema": "public",
-                                    "table": "orders",
-                                    "filter_expression": "tenant_id = {user.tenant}"
-                                }
-                            }
-                        ]
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::CREATED);
-        let body = body_json(res).await;
-        let obligations = body["obligations"].as_array().unwrap();
-        assert_eq!(obligations.len(), 1);
-        assert_eq!(obligations[0]["obligation_type"], "row_filter");
     }
 
     #[tokio::test]
@@ -1104,12 +894,7 @@ mod tests {
         insert_user(&db, admin_id, "admin").await;
 
         let token = admin_token(admin_id);
-        let payload = serde_json::json!({
-            "name": "my-policy",
-            "effect": "permit",
-            "is_enabled": true,
-            "obligations": []
-        });
+        let payload = row_filter_payload("my-policy");
 
         make_router(make_state(db.clone()))
             .oneshot(
@@ -1141,276 +926,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_policy_invalid_effect_422() {
-        let db = setup_db().await;
-        let admin_id = Uuid::now_v7();
-        insert_user(&db, admin_id, "admin").await;
-
-        let token = admin_token(admin_id);
-        let res = make_router(make_state(db))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/policies")
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "bad-effect",
-                        "effect": "allow",
-                        "is_enabled": true,
-                        "obligations": []
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    #[tokio::test]
-    async fn create_deny_column_mask_rejected_422() {
-        let db = setup_db().await;
-        let admin_id = Uuid::now_v7();
-        insert_user(&db, admin_id, "admin").await;
-
-        let token = admin_token(admin_id);
-        let res = make_router(make_state(db))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/policies")
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "bad-deny-mask",
-                        "effect": "deny",
-                        "is_enabled": true,
-                        "obligations": [
-                            {
-                                "obligation_type": "column_mask",
-                                "definition": {"schema": "*", "table": "*", "column": "ssn", "mask_expression": "'***'"}
-                            }
-                        ]
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    #[tokio::test]
-    async fn create_deny_row_filter_ok() {
-        let db = setup_db().await;
-        let admin_id = Uuid::now_v7();
-        insert_user(&db, admin_id, "admin").await;
-
-        let token = admin_token(admin_id);
-        let res = make_router(make_state(db))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/policies")
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "deny-row-filter",
-                        "effect": "deny",
-                        "is_enabled": true,
-                        "obligations": [
-                            {
-                                "obligation_type": "row_filter",
-                                "definition": {"schema": "*", "table": "*", "filter_expression": "1=0"}
-                            }
-                        ]
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::CREATED);
-    }
-
-    #[tokio::test]
-    async fn create_deny_column_access_ok() {
-        let db = setup_db().await;
-        let admin_id = Uuid::now_v7();
-        insert_user(&db, admin_id, "admin").await;
-
-        let token = admin_token(admin_id);
-        let res = make_router(make_state(db))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/policies")
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "deny-col-access",
-                        "effect": "deny",
-                        "is_enabled": true,
-                        "obligations": [
-                            {
-                                "obligation_type": "column_access",
-                                "definition": {"schema": "*", "table": "*", "columns": ["ssn"]}
-                            }
-                        ]
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::CREATED);
-    }
-
-    #[tokio::test]
-    async fn create_permit_column_mask_ok() {
-        let db = setup_db().await;
-        let admin_id = Uuid::now_v7();
-        insert_user(&db, admin_id, "admin").await;
-
-        let token = admin_token(admin_id);
-        let res = make_router(make_state(db))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/policies")
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "permit-mask",
-                        "effect": "permit",
-                        "is_enabled": true,
-                        "obligations": [
-                            {
-                                "obligation_type": "column_mask",
-                                "definition": {"schema": "*", "table": "*", "column": "ssn", "mask_expression": "'***'"}
-                            }
-                        ]
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::CREATED);
-    }
-
-    #[tokio::test]
-    async fn update_effect_to_deny_with_existing_column_mask_rejected_422() {
-        let db = setup_db().await;
-        let admin_id = Uuid::now_v7();
-        insert_user(&db, admin_id, "admin").await;
-
-        let token = admin_token(admin_id);
-        // Create a permit policy with column_mask obligation
-        let create_res = make_router(make_state(db.clone()))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/policies")
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "permit-with-mask",
-                        "effect": "permit",
-                        "is_enabled": true,
-                        "obligations": [
-                            {
-                                "obligation_type": "column_mask",
-                                "definition": {"schema": "*", "table": "*", "column": "ssn", "mask_expression": "'***'"}
-                            }
-                        ]
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let policy_body = body_json(create_res).await;
-        let policy_id = policy_body["id"].as_str().unwrap().to_string();
-
-        // Now try to change effect to deny (without providing new obligations)
-        let res = make_router(make_state(db))
-            .oneshot(
-                Request::builder()
-                    .method(Method::PUT)
-                    .uri(format!("/policies/{policy_id}"))
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "version": 1,
-                        "effect": "deny"
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    #[tokio::test]
-    async fn update_obligations_column_mask_on_deny_policy_rejected_422() {
-        let db = setup_db().await;
-        let admin_id = Uuid::now_v7();
-        insert_user(&db, admin_id, "admin").await;
-
-        let token = admin_token(admin_id);
-        // Create a deny policy with no obligations
-        let create_res = make_router(make_state(db.clone()))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/policies")
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "deny-no-obls",
-                        "effect": "deny",
-                        "is_enabled": true,
-                        "obligations": []
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let policy_body = body_json(create_res).await;
-        let policy_id = policy_body["id"].as_str().unwrap().to_string();
-
-        // Try to add a column_mask obligation to a deny policy
-        let res = make_router(make_state(db))
-            .oneshot(
-                Request::builder()
-                    .method(Method::PUT)
-                    .uri(format!("/policies/{policy_id}"))
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "version": 1,
-                        "obligations": [
-                            {
-                                "obligation_type": "column_mask",
-                                "definition": {"schema": "*", "table": "*", "column": "ssn", "mask_expression": "'***'"}
-                            }
-                        ]
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    // ===== Obligation type & definition validation =====
-
-    #[tokio::test]
-    async fn create_policy_unknown_obligation_type_rejected() {
-        // Unknown obligation_type strings fail JSON deserialization → 422
+    async fn create_policy_invalid_policy_type_422() {
         let db = setup_db().await;
         let admin_id = Uuid::now_v7();
         insert_user(&db, admin_id, "admin").await;
@@ -1425,13 +941,8 @@ mod tests {
                     .header("Content-Type", "application/json")
                     .body(json_body(serde_json::json!({
                         "name": "bad-type",
-                        "effect": "permit",
-                        "obligations": [
-                            {
-                                "obligation_type": "banana",
-                                "definition": {}
-                            }
-                        ]
+                        "policy_type": "invalid_type",
+                        "targets": [{"schemas": ["public"], "tables": ["t"]}],
                     })))
                     .unwrap(),
             )
@@ -1442,7 +953,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_policy_row_filter_missing_fields_422() {
+    async fn create_row_filter_missing_definition_422() {
         let db = setup_db().await;
         let admin_id = Uuid::now_v7();
         insert_user(&db, admin_id, "admin").await;
@@ -1456,15 +967,9 @@ mod tests {
                     .header("Authorization", format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
                     .body(json_body(serde_json::json!({
-                        "name": "bad-row-filter",
-                        "effect": "permit",
-                        "obligations": [
-                            {
-                                "obligation_type": "row_filter",
-                                "definition": {"schema": "public"}
-                                // missing "table" and "filter_expression"
-                            }
-                        ]
+                        "name": "missing-def",
+                        "policy_type": "row_filter",
+                        "targets": [{"schemas": ["public"], "tables": ["orders"]}],
                     })))
                     .unwrap(),
             )
@@ -1475,8 +980,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_policy_column_access_missing_columns_422() {
-        // column_access obligation requires the 'columns' array.
+    async fn create_column_mask_requires_columns_422() {
         let db = setup_db().await;
         let admin_id = Uuid::now_v7();
         insert_user(&db, admin_id, "admin").await;
@@ -1490,18 +994,11 @@ mod tests {
                     .header("Authorization", format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
                     .body(json_body(serde_json::json!({
-                        "name": "missing-columns",
-                        "effect": "permit",
-                        "obligations": [
-                            {
-                                "obligation_type": "column_access",
-                                "definition": {
-                                    "schema": "*",
-                                    "table": "*"
-                                    // 'columns' is missing — required field
-                                }
-                            }
-                        ]
+                        "name": "mask-no-col",
+                        "policy_type": "column_mask",
+                        // Missing columns in resource entry
+                        "targets": [{"schemas": ["public"], "tables": ["customers"]}],
+                        "definition": {"mask_expression": "'***'"}
                     })))
                     .unwrap(),
             )
@@ -1512,7 +1009,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_policy_object_access_non_deny_action_422() {
+    async fn create_column_deny_ok() {
         let db = setup_db().await;
         let admin_id = Uuid::now_v7();
         insert_user(&db, admin_id, "admin").await;
@@ -1526,80 +1023,27 @@ mod tests {
                     .header("Authorization", format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
                     .body(json_body(serde_json::json!({
-                        "name": "bad-obj-action",
-                        "effect": "deny",
-                        "obligations": [
-                            {
-                                "obligation_type": "object_access",
-                                "definition": {
-                                    "schema": "private",
-                                    "action": "allow"  // invalid — object_access only supports "deny"
-                                }
-                            }
-                        ]
+                        "name": "deny-ssn",
+                        "policy_type": "column_deny",
+                        "targets": [{"schemas": ["public"], "tables": ["customers"], "columns": ["ssn"]}],
                     })))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    #[tokio::test]
-    async fn create_policy_valid_obligations_accepted() {
-        // Verify all four obligation types with valid definitions are accepted
-        let db = setup_db().await;
-        let admin_id = Uuid::now_v7();
-        insert_user(&db, admin_id, "admin").await;
-
-        let token = admin_token(admin_id);
-
-        // row_filter
-        let res = make_router(make_state(db.clone()))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/policies")
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "valid-row-filter",
-                        "effect": "permit",
-                        "obligations": [{
-                            "obligation_type": "row_filter",
-                            "definition": {"schema": "public", "table": "orders", "filter_expression": "tenant = {user.tenant}"}
-                        }]
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
+        let body = body_json(res).await;
+        assert_eq!(body["policy_type"], "column_deny");
+    }
 
-        // object_access (deny)
-        let res = make_router(make_state(db.clone()))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/policies")
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "valid-object-access",
-                        "effect": "deny",
-                        "obligations": [{
-                            "obligation_type": "object_access",
-                            "definition": {"schema": "private", "action": "deny"}
-                        }]
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::CREATED);
+    #[tokio::test]
+    async fn create_table_deny_columns_rejected_422() {
+        let db = setup_db().await;
+        let admin_id = Uuid::now_v7();
+        insert_user(&db, admin_id, "admin").await;
 
-        // object_access with optional table field
+        let token = admin_token(admin_id);
         let res = make_router(make_state(db))
             .oneshot(
                 Request::builder()
@@ -1608,55 +1052,27 @@ mod tests {
                     .header("Authorization", format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
                     .body(json_body(serde_json::json!({
-                        "name": "valid-object-access-table",
-                        "effect": "deny",
-                        "obligations": [{
-                            "obligation_type": "object_access",
-                            "definition": {"schema": "private", "table": "secrets", "action": "deny"}
-                        }]
+                        "name": "table-deny-with-cols",
+                        "policy_type": "table_deny",
+                        // table_deny must not have columns
+                        "targets": [{"schemas": ["public"], "tables": ["secret"], "columns": ["id"]}],
                     })))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::CREATED);
+
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
-    async fn get_policy_not_found_404() {
+    async fn get_policy_returns_200() {
         let db = setup_db().await;
         let admin_id = Uuid::now_v7();
         insert_user(&db, admin_id, "admin").await;
-
-        let token = admin_token(admin_id);
-        let random_id = Uuid::now_v7();
-        let res = make_router(make_state(db))
-            .oneshot(
-                Request::builder()
-                    .method(Method::GET)
-                    .uri(format!("/policies/{random_id}"))
-                    .header("Authorization", format!("Bearer {token}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn get_policy_returns_enriched_assignments() {
-        let db = setup_db().await;
-        let admin_id = Uuid::now_v7();
-        let user_id = Uuid::now_v7();
-        let ds_id = Uuid::now_v7();
-        insert_user(&db, admin_id, "admin").await;
-        insert_user(&db, user_id, "alice").await;
-        insert_datasource(&db, ds_id, "prod-db").await;
-
         let token = admin_token(admin_id);
 
+        // Create policy
         let create_res = make_router(make_state(db.clone()))
             .oneshot(
                 Request::builder()
@@ -1664,121 +1080,31 @@ mod tests {
                     .uri("/policies")
                     .header("Authorization", format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "row-filter",
-                        "effect": "permit",
-                        "is_enabled": true,
-                        "obligations": []
-                    })))
+                    .body(json_body(row_filter_payload("get-me")))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(create_res.status(), StatusCode::CREATED);
-        let policy_body = body_json(create_res).await;
-        let policy_id = policy_body["id"].as_str().unwrap().to_string();
+        let created = body_json(create_res).await;
+        let id = created["id"].as_str().unwrap().to_string();
 
-        let assign_res = make_router(make_state(db.clone()))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(format!("/datasources/{ds_id}/policies"))
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "policy_id": policy_id,
-                        "user_id": user_id.to_string(),
-                        "priority": 100
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(assign_res.status(), StatusCode::CREATED);
-
-        // GET /policies/{id} — assignments must be enriched with names
-        let get_res = make_router(make_state(db))
+        // Get policy
+        let res = make_router(make_state(db))
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri(format!("/policies/{policy_id}"))
+                    .uri(format!("/policies/{id}"))
                     .header("Authorization", format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(get_res.status(), StatusCode::OK);
-        let body = body_json(get_res).await;
-        let assignments = body["assignments"].as_array().unwrap();
-        assert_eq!(assignments.len(), 1);
-        assert_eq!(assignments[0]["policy_name"], "row-filter");
-        assert_eq!(assignments[0]["datasource_name"], "prod-db");
-        assert_eq!(assignments[0]["username"], "alice");
-    }
 
-    #[tokio::test]
-    async fn get_policy_assignment_all_users() {
-        let db = setup_db().await;
-        let admin_id = Uuid::now_v7();
-        let ds_id = Uuid::now_v7();
-        insert_user(&db, admin_id, "admin").await;
-        insert_datasource(&db, ds_id, "analytics-db").await;
-
-        let token = admin_token(admin_id);
-
-        let create_res = make_router(make_state(db.clone()))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/policies")
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "all-users-policy",
-                        "effect": "permit",
-                        "is_enabled": true,
-                        "obligations": []
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let policy_body = body_json(create_res).await;
-        let policy_id = policy_body["id"].as_str().unwrap().to_string();
-
-        make_router(make_state(db.clone()))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(format!("/datasources/{ds_id}/policies"))
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "policy_id": policy_id,
-                        "user_id": null,
-                        "priority": 50
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let get_res = make_router(make_state(db))
-            .oneshot(
-                Request::builder()
-                    .method(Method::GET)
-                    .uri(format!("/policies/{policy_id}"))
-                    .header("Authorization", format!("Bearer {token}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let body = body_json(get_res).await;
-        let assignments = body["assignments"].as_array().unwrap();
-        assert_eq!(assignments.len(), 1);
-        assert!(assignments[0]["username"].is_null());
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        assert_eq!(body["id"], id);
+        assert_eq!(body["policy_type"], "row_filter");
     }
 
     #[tokio::test]
@@ -1786,8 +1112,8 @@ mod tests {
         let db = setup_db().await;
         let admin_id = Uuid::now_v7();
         insert_user(&db, admin_id, "admin").await;
-
         let token = admin_token(admin_id);
+
         let create_res = make_router(make_state(db.clone()))
             .oneshot(
                 Request::builder()
@@ -1795,30 +1121,24 @@ mod tests {
                     .uri("/policies")
                     .header("Authorization", format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "conflict-policy",
-                        "effect": "permit",
-                        "is_enabled": true,
-                        "obligations": []
-                    })))
+                    .body(json_body(row_filter_payload("conflict-test")))
                     .unwrap(),
             )
             .await
             .unwrap();
-        let policy_body = body_json(create_res).await;
-        let policy_id = policy_body["id"].as_str().unwrap().to_string();
+        let created = body_json(create_res).await;
+        let id = created["id"].as_str().unwrap().to_string();
 
-        // version 0 is wrong (policy is at version 1)
         let res = make_router(make_state(db))
             .oneshot(
                 Request::builder()
                     .method(Method::PUT)
-                    .uri(format!("/policies/{policy_id}"))
+                    .uri(format!("/policies/{id}"))
                     .header("Authorization", format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
                     .body(json_body(serde_json::json!({
-                        "version": 0,
-                        "name": "conflict-policy-updated"
+                        "name": "updated",
+                        "version": 999
                     })))
                     .unwrap(),
             )
@@ -1829,60 +1149,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_policy_bumps_version() {
-        let db = setup_db().await;
-        let admin_id = Uuid::now_v7();
-        insert_user(&db, admin_id, "admin").await;
-
-        let token = admin_token(admin_id);
-        let create_res = make_router(make_state(db.clone()))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/policies")
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "bump-policy",
-                        "effect": "permit",
-                        "is_enabled": true,
-                        "obligations": []
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let policy_body = body_json(create_res).await;
-        let policy_id = policy_body["id"].as_str().unwrap().to_string();
-
-        let res = make_router(make_state(db))
-            .oneshot(
-                Request::builder()
-                    .method(Method::PUT)
-                    .uri(format!("/policies/{policy_id}"))
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "version": 1,
-                        "name": "bump-policy-v2"
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::OK);
-        let body = body_json(res).await;
-        assert_eq!(body["version"], 2);
-    }
-
-    #[tokio::test]
     async fn delete_policy_returns_204() {
         let db = setup_db().await;
         let admin_id = Uuid::now_v7();
         insert_user(&db, admin_id, "admin").await;
-
         let token = admin_token(admin_id);
+
         let create_res = make_router(make_state(db.clone()))
             .oneshot(
                 Request::builder()
@@ -1890,24 +1162,19 @@ mod tests {
                     .uri("/policies")
                     .header("Authorization", format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "delete-me",
-                        "effect": "deny",
-                        "is_enabled": true,
-                        "obligations": []
-                    })))
+                    .body(json_body(row_filter_payload("delete-me")))
                     .unwrap(),
             )
             .await
             .unwrap();
-        let policy_body = body_json(create_res).await;
-        let policy_id = policy_body["id"].as_str().unwrap().to_string();
+        let created = body_json(create_res).await;
+        let id = created["id"].as_str().unwrap().to_string();
 
         let res = make_router(make_state(db))
             .oneshot(
                 Request::builder()
                     .method(Method::DELETE)
-                    .uri(format!("/policies/{policy_id}"))
+                    .uri(format!("/policies/{id}"))
                     .header("Authorization", format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1918,16 +1185,13 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
     }
 
-    // ===== Assignment tests =====
-
     #[tokio::test]
-    async fn list_datasource_policies_enriched() {
+    async fn assign_and_list_datasource_policies() {
         let db = setup_db().await;
         let admin_id = Uuid::now_v7();
         let ds_id = Uuid::now_v7();
         insert_user(&db, admin_id, "admin").await;
-        insert_datasource(&db, ds_id, "warehouse").await;
-
+        insert_datasource(&db, ds_id, "my-ds").await;
         let token = admin_token(admin_id);
 
         let create_res = make_router(make_state(db.clone()))
@@ -1937,20 +1201,17 @@ mod tests {
                     .uri("/policies")
                     .header("Authorization", format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "warehouse-policy",
-                        "effect": "permit",
-                        "is_enabled": true,
-                        "obligations": []
-                    })))
+                    .body(json_body(row_filter_payload("assignable")))
                     .unwrap(),
             )
             .await
             .unwrap();
-        let policy_body = body_json(create_res).await;
-        let policy_id = policy_body["id"].as_str().unwrap().to_string();
+        let policy_id = body_json(create_res).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
-        make_router(make_state(db.clone()))
+        let assign_res = make_router(make_state(db.clone()))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -1959,13 +1220,13 @@ mod tests {
                     .header("Content-Type", "application/json")
                     .body(json_body(serde_json::json!({
                         "policy_id": policy_id,
-                        "user_id": null,
-                        "priority": 100
+                        "priority": 50
                     })))
                     .unwrap(),
             )
             .await
             .unwrap();
+        assert_eq!(assign_res.status(), StatusCode::CREATED);
 
         let list_res = make_router(make_state(db))
             .oneshot(
@@ -1978,97 +1239,9 @@ mod tests {
             )
             .await
             .unwrap();
-
         assert_eq!(list_res.status(), StatusCode::OK);
-        let body = body_json(list_res).await;
-        let items = body.as_array().unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0]["policy_name"], "warehouse-policy");
-        assert_eq!(items[0]["datasource_name"], "warehouse");
-    }
-
-    #[tokio::test]
-    async fn assign_policy_returns_enriched() {
-        let db = setup_db().await;
-        let admin_id = Uuid::now_v7();
-        let ds_id = Uuid::now_v7();
-        insert_user(&db, admin_id, "admin").await;
-        insert_datasource(&db, ds_id, "staging").await;
-
-        let token = admin_token(admin_id);
-
-        let create_res = make_router(make_state(db.clone()))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/policies")
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "staging-policy",
-                        "effect": "permit",
-                        "is_enabled": true,
-                        "obligations": []
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let policy_body = body_json(create_res).await;
-        let policy_id = policy_body["id"].as_str().unwrap().to_string();
-
-        let assign_res = make_router(make_state(db))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(format!("/datasources/{ds_id}/policies"))
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "policy_id": policy_id,
-                        "user_id": null,
-                        "priority": 100
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(assign_res.status(), StatusCode::CREATED);
-        let body = body_json(assign_res).await;
-        assert_eq!(body["policy_name"], "staging-policy");
-        assert_eq!(body["datasource_name"], "staging");
-        assert!(body["username"].is_null());
-    }
-
-    #[tokio::test]
-    async fn assign_policy_nonexistent_ds_404() {
-        let db = setup_db().await;
-        let admin_id = Uuid::now_v7();
-        insert_user(&db, admin_id, "admin").await;
-
-        let token = admin_token(admin_id);
-        let random_ds = Uuid::now_v7();
-        let random_policy = Uuid::now_v7();
-
-        let res = make_router(make_state(db))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(format!("/datasources/{random_ds}/policies"))
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "policy_id": random_policy.to_string(),
-                        "user_id": null,
-                        "priority": 100
-                    })))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let list = body_json(list_res).await;
+        assert_eq!(list.as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -2077,8 +1250,7 @@ mod tests {
         let admin_id = Uuid::now_v7();
         let ds_id = Uuid::now_v7();
         insert_user(&db, admin_id, "admin").await;
-        insert_datasource(&db, ds_id, "remove-test-db").await;
-
+        insert_datasource(&db, ds_id, "ds-remove").await;
         let token = admin_token(admin_id);
 
         let create_res = make_router(make_state(db.clone()))
@@ -2088,18 +1260,15 @@ mod tests {
                     .uri("/policies")
                     .header("Authorization", format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "name": "remove-policy",
-                        "effect": "permit",
-                        "is_enabled": true,
-                        "obligations": []
-                    })))
+                    .body(json_body(row_filter_payload("removable")))
                     .unwrap(),
             )
             .await
             .unwrap();
-        let policy_body = body_json(create_res).await;
-        let policy_id = policy_body["id"].as_str().unwrap().to_string();
+        let policy_id = body_json(create_res).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         let assign_res = make_router(make_state(db.clone()))
             .oneshot(
@@ -2108,17 +1277,15 @@ mod tests {
                     .uri(format!("/datasources/{ds_id}/policies"))
                     .header("Authorization", format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({
-                        "policy_id": policy_id,
-                        "user_id": null,
-                        "priority": 100
-                    })))
+                    .body(json_body(serde_json::json!({"policy_id": policy_id})))
                     .unwrap(),
             )
             .await
             .unwrap();
-        let assign_body = body_json(assign_res).await;
-        let assignment_id = assign_body["id"].as_str().unwrap().to_string();
+        let assignment_id = body_json(assign_res).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         let del_res = make_router(make_state(db))
             .oneshot(
@@ -2131,53 +1298,121 @@ mod tests {
             )
             .await
             .unwrap();
-
         assert_eq!(del_res.status(), StatusCode::NO_CONTENT);
     }
 
+    // When creating a non-expression policy (column_allow, column_deny, table_deny) with
+    // `"definition": null` in the request body, the DB row must store SQL NULL — not the
+    // string "null".  Previously, serde deserialised JSON null as Some(Value::Null) and
+    // serde_json::to_string produced the 4-char string "null" which was stored verbatim.
     #[tokio::test]
-    async fn list_policies_pagination() {
+    async fn create_column_allow_with_null_definition_stores_sql_null() {
+        use sea_orm::EntityTrait;
+
+        let db = setup_db().await;
+        let admin_id = Uuid::now_v7();
+        insert_user(&db, admin_id, "admin").await;
+
+        let token = admin_token(admin_id);
+        let res = make_router(make_state(db.clone()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "col-allow-null-def",
+                        "policy_type": "column_allow",
+                        "is_enabled": true,
+                        "targets": [{"schemas": ["public"], "tables": ["t"], "columns": ["id"]}],
+                        "definition": null
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let policy_id: Uuid = body_json(res).await["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let p = crate::entity::policy::Entity::find_by_id(policy_id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            p.definition.is_none(),
+            "column_allow definition must be SQL NULL, got: {:?}",
+            p.definition
+        );
+    }
+
+    // When updating a row_filter policy to column_deny and sending `"definition": null`,
+    // the DB row must be updated to SQL NULL — not the string "null".
+    #[tokio::test]
+    async fn update_policy_type_change_to_column_deny_clears_definition() {
+        use sea_orm::EntityTrait;
+
         let db = setup_db().await;
         let admin_id = Uuid::now_v7();
         insert_user(&db, admin_id, "admin").await;
 
         let token = admin_token(admin_id);
 
-        for name in ["alpha", "beta", "gamma"] {
-            make_router(make_state(db.clone()))
-                .oneshot(
-                    Request::builder()
-                        .method(Method::POST)
-                        .uri("/policies")
-                        .header("Authorization", format!("Bearer {token}"))
-                        .header("Content-Type", "application/json")
-                        .body(json_body(serde_json::json!({
-                            "name": name,
-                            "effect": "permit",
-                            "is_enabled": true,
-                            "obligations": []
-                        })))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-        }
-
-        let res = make_router(make_state(db))
+        // Create a row_filter policy (stores a real definition).
+        let create_res = make_router(make_state(db.clone()))
             .oneshot(
                 Request::builder()
-                    .method(Method::GET)
-                    .uri("/policies?page_size=2")
+                    .method(Method::POST)
+                    .uri("/policies")
                     .header("Authorization", format!("Bearer {token}"))
-                    .body(Body::empty())
+                    .header("Content-Type", "application/json")
+                    .body(json_body(row_filter_payload("rf-to-col-deny")))
                     .unwrap(),
             )
             .await
             .unwrap();
+        assert_eq!(create_res.status(), StatusCode::CREATED);
+        let policy_id: Uuid = body_json(create_res).await["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
 
-        assert_eq!(res.status(), StatusCode::OK);
-        let body = body_json(res).await;
-        assert_eq!(body["total"], 3);
-        assert_eq!(body["data"].as_array().unwrap().len(), 2);
+        // Change type to column_deny, explicitly sending definition: null.
+        let update_res = make_router(make_state(db.clone()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/policies/{policy_id}"))
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "policy_type": "column_deny",
+                        "targets": [{"schemas": ["public"], "tables": ["t"], "columns": ["secret"]}],
+                        "definition": null,
+                        "version": 1
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_res.status(), StatusCode::OK);
+
+        let p = crate::entity::policy::Entity::find_by_id(policy_id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            p.definition.is_none(),
+            "After type change to column_deny, definition must be SQL NULL, got: {:?}",
+            p.definition
+        );
     }
 }

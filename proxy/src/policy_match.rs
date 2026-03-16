@@ -1,76 +1,101 @@
 use std::collections::{HashMap, HashSet};
 
-// ---------- obligation type enum ----------
+// ---------- policy type enum ----------
 
-/// Strongly-typed obligation type identifier.
-///
-/// Serialized as snake_case (e.g. `"row_filter"`, `"column_mask"`) in JSON.
-/// Unknown values are rejected at deserialization time, which catches
-/// typos and invalid obligation types before they reach the database.
+/// Strongly-typed policy type identifier. Encodes both the semantic intent
+/// (permit/deny) and the kind of enforcement (row, column, table).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ObligationType {
+pub enum PolicyType {
     RowFilter,
     ColumnMask,
-    ColumnAccess,
-    ObjectAccess,
+    ColumnAllow,
+    ColumnDeny,
+    TableDeny,
 }
 
-impl ObligationType {
+impl PolicyType {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::RowFilter => "row_filter",
             Self::ColumnMask => "column_mask",
-            Self::ColumnAccess => "column_access",
-            Self::ObjectAccess => "object_access",
+            Self::ColumnAllow => "column_allow",
+            Self::ColumnDeny => "column_deny",
+            Self::TableDeny => "table_deny",
         }
+    }
+
+    /// Returns true for deny-type policies (ColumnDeny, TableDeny).
+    pub fn is_deny(self) -> bool {
+        matches!(self, Self::ColumnDeny | Self::TableDeny)
     }
 }
 
-impl std::fmt::Display for ObligationType {
+impl std::fmt::Display for PolicyType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-// ---------- obligation definitions ----------
+impl std::str::FromStr for PolicyType {
+    type Err = String;
 
-/// Parsed definition for a `row_filter` obligation.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "row_filter" => Ok(Self::RowFilter),
+            "column_mask" => Ok(Self::ColumnMask),
+            "column_allow" => Ok(Self::ColumnAllow),
+            "column_deny" => Ok(Self::ColumnDeny),
+            "table_deny" => Ok(Self::TableDeny),
+            other => Err(format!("Unknown policy_type: '{other}'")),
+        }
+    }
+}
+
+// ---------- resource targeting ----------
+
+/// A resource targeting entry: which schemas, tables, and optionally columns a policy applies to.
+///
+/// Supports `"*"` and prefix/suffix globs (`"prefix*"`, `"*suffix"`) in any field.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct TargetEntry {
+    pub schemas: Vec<String>,
+    pub tables: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<String>>,
+}
+
+impl TargetEntry {
+    /// Returns true if this entry matches the given (df_schema, table) pair.
+    ///
+    /// Resolves df_schema aliases via `df_to_upstream` before matching.
+    pub fn matches_table(
+        &self,
+        df_schema: &str,
+        table: &str,
+        df_to_upstream: &HashMap<String, String>,
+    ) -> bool {
+        let upstream = df_to_upstream
+            .get(df_schema)
+            .map(|s| s.as_str())
+            .unwrap_or(df_schema);
+        self.schemas.iter().any(|sp| matches_pattern(sp, upstream))
+            && self.tables.iter().any(|tp| matches_pattern(tp, table))
+    }
+}
+
+// ---------- policy definitions ----------
+
+/// Parsed definition for a `row_filter` policy.
 #[derive(Debug, serde::Deserialize, Clone)]
 pub struct RowFilterDef {
-    pub schema: String,
-    pub table: String,
     pub filter_expression: String,
 }
 
-/// Parsed definition for a `column_mask` obligation.
+/// Parsed definition for a `column_mask` policy.
 #[derive(Debug, serde::Deserialize, Clone)]
 pub struct ColumnMaskDef {
-    pub schema: String,
-    pub table: String,
-    pub column: String,
     pub mask_expression: String,
-}
-
-/// Parsed definition for a `column_access` obligation.
-///
-/// The obligation's intent (allow vs deny) is determined entirely by the enclosing
-/// policy's `effect` field ("permit" → allowlist, "deny" → denylist).
-/// The `action` field is no longer part of the schema; any legacy `action` in stored
-/// JSON is silently ignored during deserialization.
-#[derive(Debug, serde::Deserialize, Clone)]
-pub struct ColumnAccessDef {
-    pub schema: String,
-    pub table: String,
-    pub columns: Vec<String>,
-}
-
-/// Parsed definition for an `object_access` obligation.
-#[derive(Debug, serde::Deserialize, Clone)]
-pub struct ObjectAccessDef {
-    pub schema: String,
-    pub table: Option<String>,
-    pub action: String,
 }
 
 // ---------- pattern matching ----------
@@ -93,8 +118,6 @@ pub fn matches_pattern(pattern: &str, value: &str) -> bool {
 /// Expand column patterns (including globs) against actual column names.
 ///
 /// Returns the set of concrete column names matching any pattern.
-/// Consistent with `matches_schema_table` / `matches_schema_only` for pattern semantics.
-/// Called by `PolicyHook` at `TableScan` time and by the engine at catalog-build time.
 pub fn expand_column_patterns(patterns: &[String], actual_columns: &[&str]) -> HashSet<String> {
     actual_columns
         .iter()
@@ -103,35 +126,30 @@ pub fn expand_column_patterns(patterns: &[String], actual_columns: &[&str]) -> H
         .collect()
 }
 
-/// Check whether an obligation's (schema, table) pattern matches a DataFusion table scan.
+/// Check whether a (schema, table) pattern matches a DataFusion table scan.
 ///
 /// Supports `"*"` and prefix globs (e.g., `"raw_*"`) for either field.
 /// `df_schema` is the DataFusion schema alias; `df_to_upstream` maps it to the upstream name.
-///
-/// This is the single source of truth shared by `PolicyHook` and the engine's
-/// `compute_user_visibility`. Any changes to matching semantics must be made here.
 pub fn matches_schema_table(
-    obl_schema: &str,
-    obl_table: &str,
+    res_schema: &str,
+    res_table: &str,
     df_schema: &str,
     table: &str,
     df_to_upstream: &HashMap<String, String>,
 ) -> bool {
-    if !matches_pattern(obl_table, table) {
+    if !matches_pattern(res_table, table) {
         return false;
     }
     let upstream_schema = df_to_upstream
         .get(df_schema)
         .map(|s| s.as_str())
         .unwrap_or(df_schema);
-    matches_pattern(obl_schema, upstream_schema)
+    matches_pattern(res_schema, upstream_schema)
 }
 
-/// Check whether an obligation's schema pattern matches a DataFusion schema alias.
-///
-/// Used for schema-level `object_access` obligations that don't specify a table.
+/// Check whether a schema pattern matches a DataFusion schema alias.
 pub fn matches_schema_only(
-    obl_schema: &str,
+    res_schema: &str,
     df_schema: &str,
     df_to_upstream: &HashMap<String, String>,
 ) -> bool {
@@ -139,7 +157,7 @@ pub fn matches_schema_only(
         .get(df_schema)
         .map(|s| s.as_str())
         .unwrap_or(df_schema);
-    matches_pattern(obl_schema, upstream)
+    matches_pattern(res_schema, upstream)
 }
 
 #[cfg(test)]
@@ -159,7 +177,7 @@ mod tests {
     fn test_matches_pattern_prefix_glob() {
         assert!(matches_pattern("user_*", "user_id"));
         assert!(matches_pattern("user_*", "user_name"));
-        assert!(!matches_pattern("user_*", "id_user")); // suffix doesn't match prefix glob
+        assert!(!matches_pattern("user_*", "id_user"));
         assert!(!matches_pattern("user_*", "email"));
     }
 
@@ -168,7 +186,7 @@ mod tests {
         assert!(matches_pattern("*_date", "created_date"));
         assert!(matches_pattern("*_date", "updated_date"));
         assert!(!matches_pattern("*_date", "date_created"));
-        assert!(!matches_pattern("*_date", "date")); // exact "_date" not matching "*_date" against "date"
+        assert!(!matches_pattern("*_date", "date"));
     }
 
     #[test]
@@ -180,7 +198,6 @@ mod tests {
 
     #[test]
     fn test_matches_pattern_case_sensitive() {
-        // Postgres folds identifiers to lowercase — patterns are case-sensitive by design.
         assert!(!matches_pattern("Email", "email"));
         assert!(matches_pattern("Email", "Email"));
     }
@@ -343,7 +360,6 @@ mod tests {
     #[test]
     fn test_glob_both_schema_and_table() {
         let map = HashMap::new();
-        // Both must prefix-match
         assert!(matches_schema_table(
             "raw_*",
             "events_*",
@@ -351,11 +367,9 @@ mod tests {
             "events_2024",
             &map
         ));
-        // Schema matches but table doesn't
         assert!(!matches_schema_table(
             "raw_*", "events_*", "raw_prod", "orders", &map
         ));
-        // Table matches but schema doesn't
         assert!(!matches_schema_table(
             "raw_*",
             "events_*",
@@ -397,10 +411,6 @@ mod tests {
 
     #[test]
     fn test_glob_empty_prefix() {
-        // strip_suffix('*') on "*" gives "" as prefix → starts_with("") is always true
-        // But matches_pattern checks == "*" first, so this path hits the first branch anyway.
-        // Test the strip_suffix("*") case with a non-"*" pattern that strips to empty prefix:
-        // Actually "**" strips to "*" prefix. Let's just verify "*" matches everything.
         let map = HashMap::new();
         assert!(matches_schema_table("*", "*", "", "", &map));
         assert!(matches_schema_table("*", "*", "x", "y", &map));
@@ -435,5 +445,63 @@ mod tests {
         map.insert("ds_alias".to_string(), "public".to_string());
         assert!(matches_schema_only("public", "ds_alias", &map));
         assert!(!matches_schema_only("private", "ds_alias", &map));
+    }
+
+    // --- PolicyType tests ---
+
+    #[test]
+    fn test_policy_type_is_deny() {
+        assert!(!PolicyType::RowFilter.is_deny());
+        assert!(!PolicyType::ColumnMask.is_deny());
+        assert!(!PolicyType::ColumnAllow.is_deny());
+        assert!(PolicyType::ColumnDeny.is_deny());
+        assert!(PolicyType::TableDeny.is_deny());
+    }
+
+    #[test]
+    fn test_policy_type_as_str() {
+        assert_eq!(PolicyType::RowFilter.as_str(), "row_filter");
+        assert_eq!(PolicyType::ColumnMask.as_str(), "column_mask");
+        assert_eq!(PolicyType::ColumnAllow.as_str(), "column_allow");
+        assert_eq!(PolicyType::ColumnDeny.as_str(), "column_deny");
+        assert_eq!(PolicyType::TableDeny.as_str(), "table_deny");
+    }
+
+    #[test]
+    fn test_target_entry_matches_table() {
+        let map = HashMap::new();
+        let entry = TargetEntry {
+            schemas: vec!["public".to_string()],
+            tables: vec!["customers".to_string(), "employees".to_string()],
+            columns: None,
+        };
+        assert!(entry.matches_table("public", "customers", &map));
+        assert!(entry.matches_table("public", "employees", &map));
+        assert!(!entry.matches_table("public", "orders", &map));
+        assert!(!entry.matches_table("private", "customers", &map));
+    }
+
+    #[test]
+    fn test_target_entry_matches_table_wildcard() {
+        let map = HashMap::new();
+        let entry = TargetEntry {
+            schemas: vec!["*".to_string()],
+            tables: vec!["*".to_string()],
+            columns: None,
+        };
+        assert!(entry.matches_table("any_schema", "any_table", &map));
+    }
+
+    #[test]
+    fn test_target_entry_matches_table_alias() {
+        let mut map = HashMap::new();
+        map.insert("sales".to_string(), "public".to_string());
+        let entry = TargetEntry {
+            schemas: vec!["public".to_string()],
+            tables: vec!["orders".to_string()],
+            columns: None,
+        };
+        assert!(entry.matches_table("sales", "orders", &map));
+        assert!(!entry.matches_table("private", "orders", &map));
     }
 }

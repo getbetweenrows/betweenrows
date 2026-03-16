@@ -18,9 +18,15 @@ export function PolicyCreatePage() {
       await createPolicy({
         name: values.name,
         description: values.description || undefined,
-        effect: values.effect,
+        policy_type: values.policy_type,
         is_enabled: values.is_enabled,
-        obligations: values.obligations,
+        targets: values.targets,
+        definition:
+          values.policy_type === 'row_filter'
+            ? { filter_expression: values.filter_expression }
+            : values.policy_type === 'column_mask'
+              ? { mask_expression: values.mask_expression }
+              : null,
       })
       queryClient.invalidateQueries({ queryKey: ['policies'] })
       navigate('/policies')

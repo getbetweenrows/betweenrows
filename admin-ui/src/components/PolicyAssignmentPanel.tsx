@@ -178,7 +178,7 @@ export function PolicyAssignmentPanel({ datasourceId }: PolicyAssignmentPanelPro
               <option value="">Select a policy…</option>
               {allPolicies.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.name} ({p.effect})
+                  {p.name} ({p.policy_type})
                 </option>
               ))}
             </select>

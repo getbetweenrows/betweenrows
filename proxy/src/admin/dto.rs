@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::entity::proxy_user;
-use crate::policy_match::ObligationType;
+use crate::policy_match::{PolicyType, TargetEntry};
 
 // ---------- user requests ----------
 
@@ -330,91 +330,93 @@ pub struct CatalogColumnResponse {
 
 // ---------- policy requests ----------
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct ObligationRequest {
-    pub obligation_type: ObligationType,
-    pub definition: serde_json::Value,
-}
-
-/// Validate the shape of an obligation's `definition` JSON.
+/// Validate a policy's `definition` JSON for a given `policy_type`.
 ///
-/// Checks that all required fields are present and have the correct types.
-/// Additional unknown fields are allowed (forward-compatible for future extensions
-/// like `condition`, `priority`, etc.).
-///
-/// Returns `Err(String)` with a human-readable message on failure.
-pub fn validate_obligation(obl: &ObligationRequest) -> Result<(), String> {
-    let def = &obl.definition;
-    match obl.obligation_type {
-        ObligationType::RowFilter => {
-            require_str_field(def, "row_filter", "schema")?;
-            require_str_field(def, "row_filter", "table")?;
-            require_str_field(def, "row_filter", "filter_expression")?;
-        }
-        ObligationType::ColumnMask => {
-            require_str_field(def, "column_mask", "schema")?;
-            require_str_field(def, "column_mask", "table")?;
-            require_str_field(def, "column_mask", "column")?;
-            require_str_field(def, "column_mask", "mask_expression")?;
-        }
-        ObligationType::ColumnAccess => {
-            // Intent (allowlist vs denylist) is determined by the enclosing policy's effect.
-            // No obligation-level 'action' field is required or accepted.
-            require_str_field(def, "column_access", "schema")?;
-            require_str_field(def, "column_access", "table")?;
-            match def.get("columns") {
-                Some(v) if v.is_array() => {}
-                Some(_) => {
-                    return Err(
-                        "column_access obligation: 'columns' must be an array of strings"
-                            .to_string(),
-                    );
-                }
-                None => {
-                    return Err(
-                        "column_access obligation: missing required field 'columns'".to_string()
-                    );
-                }
+/// - `row_filter`: requires `filter_expression` (string)
+/// - `column_mask`: requires `mask_expression` (string)
+/// - Others: definition must be absent or null
+pub fn validate_definition(
+    policy_type: PolicyType,
+    definition: &Option<serde_json::Value>,
+) -> Result<(), String> {
+    match policy_type {
+        PolicyType::RowFilter => {
+            let def = definition
+                .as_ref()
+                .ok_or("row_filter policy requires a 'definition' with 'filter_expression'")?;
+            match def.get("filter_expression") {
+                Some(v) if v.is_string() => Ok(()),
+                Some(_) => Err("row_filter: 'filter_expression' must be a string".to_string()),
+                None => Err("row_filter: missing required field 'filter_expression'".to_string()),
             }
         }
-        ObligationType::ObjectAccess => {
-            require_str_field(def, "object_access", "schema")?;
-            let action = def.get("action").and_then(|v| v.as_str()).ok_or_else(|| {
-                "object_access obligation: missing required field 'action'".to_string()
-            })?;
-            if action != "deny" {
-                return Err("object_access obligation: 'action' must be 'deny'".to_string());
+        PolicyType::ColumnMask => {
+            let def = definition
+                .as_ref()
+                .ok_or("column_mask policy requires a 'definition' with 'mask_expression'")?;
+            match def.get("mask_expression") {
+                Some(v) if v.is_string() => Ok(()),
+                Some(_) => Err("column_mask: 'mask_expression' must be a string".to_string()),
+                None => Err("column_mask: missing required field 'mask_expression'".to_string()),
+            }
+        }
+        PolicyType::ColumnAllow | PolicyType::ColumnDeny | PolicyType::TableDeny => Ok(()),
+    }
+}
+
+/// Validate the `targets` array for a given `policy_type`.
+///
+/// - All types require at least one resource entry.
+/// - `column_mask`, `column_allow`, `column_deny`: each entry must have non-empty `columns`.
+/// - `row_filter`, `table_deny`: `columns` must be absent.
+pub fn validate_targets(policy_type: PolicyType, targets: &[TargetEntry]) -> Result<(), String> {
+    if targets.is_empty() {
+        return Err("'targets' must not be empty".to_string());
+    }
+    for (i, entry) in targets.iter().enumerate() {
+        if entry.schemas.is_empty() {
+            return Err(format!("targets[{i}]: 'schemas' must not be empty"));
+        }
+        if entry.tables.is_empty() {
+            return Err(format!("targets[{i}]: 'tables' must not be empty"));
+        }
+        match policy_type {
+            PolicyType::ColumnMask | PolicyType::ColumnAllow | PolicyType::ColumnDeny => {
+                match &entry.columns {
+                    None => {
+                        return Err(format!(
+                            "targets[{i}]: '{policy_type}' requires non-empty 'columns'"
+                        ));
+                    }
+                    Some(cols) if cols.is_empty() => {
+                        return Err(format!(
+                            "targets[{i}]: '{policy_type}' requires non-empty 'columns'"
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            PolicyType::RowFilter | PolicyType::TableDeny => {
+                if entry.columns.is_some() {
+                    return Err(format!(
+                        "targets[{i}]: '{policy_type}' must not have 'columns'"
+                    ));
+                }
             }
         }
     }
     Ok(())
 }
 
-fn require_str_field(
-    def: &serde_json::Value,
-    obligation_type: &str,
-    field: &str,
-) -> Result<(), String> {
-    match def.get(field) {
-        Some(v) if v.is_string() => Ok(()),
-        Some(_) => Err(format!(
-            "{obligation_type} obligation: field '{field}' must be a string"
-        )),
-        None => Err(format!(
-            "{obligation_type} obligation: missing required field '{field}'"
-        )),
-    }
-}
-
 #[derive(Debug, Deserialize)]
 pub struct CreatePolicyRequest {
     pub name: String,
-    pub effect: String, // "permit" | "deny"
+    pub policy_type: PolicyType,
     pub description: Option<String>,
     #[serde(default = "default_true")]
     pub is_enabled: bool,
-    #[serde(default)]
-    pub obligations: Vec<ObligationRequest>,
+    pub targets: Vec<TargetEntry>,
+    pub definition: Option<serde_json::Value>,
 }
 
 fn default_true() -> bool {
@@ -424,10 +426,11 @@ fn default_true() -> bool {
 #[derive(Debug, Deserialize)]
 pub struct UpdatePolicyRequest {
     pub name: Option<String>,
-    pub effect: Option<String>,
+    pub policy_type: Option<PolicyType>,
     pub description: Option<String>,
     pub is_enabled: Option<bool>,
-    pub obligations: Option<Vec<ObligationRequest>>,
+    pub targets: Option<Vec<TargetEntry>>,
+    pub definition: Option<serde_json::Value>,
     /// Optimistic concurrency: client must send the current version
     pub version: i32,
 }
@@ -453,31 +456,21 @@ fn default_priority() -> i32 {
 
 // ---------- policy responses ----------
 
-#[derive(Debug, Serialize, Clone)]
-pub struct ObligationResponse {
-    pub id: uuid::Uuid,
-    pub obligation_type: String,
-    pub definition: serde_json::Value,
-    pub created_at: chrono::NaiveDateTime,
-    pub updated_at: chrono::NaiveDateTime,
-}
-
 #[derive(Debug, Serialize)]
 pub struct PolicyResponse {
     pub id: uuid::Uuid,
     pub name: String,
     pub description: Option<String>,
-    pub effect: String,
+    pub policy_type: String,
+    pub targets: serde_json::Value,
+    pub definition: Option<serde_json::Value>,
     pub is_enabled: bool,
     pub version: i32,
-    pub obligation_count: usize,
     pub assignment_count: usize,
     pub created_by: uuid::Uuid,
     pub updated_by: uuid::Uuid,
     pub created_at: chrono::NaiveDateTime,
     pub updated_at: chrono::NaiveDateTime,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub obligations: Option<Vec<ObligationResponse>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assignments: Option<Vec<PolicyAssignmentResponse>>,
 }

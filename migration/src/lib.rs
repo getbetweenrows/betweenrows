@@ -18,6 +18,11 @@ mod m20260307_000015_idx_query_audit_log_data_source_id;
 mod m20260307_000016_idx_query_audit_log_created_at;
 mod m20260315_000017_add_status_to_query_audit_log;
 mod m20260315_000018_add_error_message_to_query_audit_log;
+mod m20260316_000019_drop_policy_obligation;
+mod m20260316_000020_drop_policy_tables;
+mod m20260316_000021_create_policy_v2;
+mod m20260316_000022_create_policy_version_v2;
+mod m20260316_000023_create_policy_assignment_v2;
 
 pub struct Migrator;
 
@@ -43,6 +48,11 @@ impl MigratorTrait for Migrator {
             Box::new(m20260307_000016_idx_query_audit_log_created_at::Migration),
             Box::new(m20260315_000017_add_status_to_query_audit_log::Migration),
             Box::new(m20260315_000018_add_error_message_to_query_audit_log::Migration),
+            Box::new(m20260316_000019_drop_policy_obligation::Migration),
+            Box::new(m20260316_000020_drop_policy_tables::Migration),
+            Box::new(m20260316_000021_create_policy_v2::Migration),
+            Box::new(m20260316_000022_create_policy_version_v2::Migration),
+            Box::new(m20260316_000023_create_policy_assignment_v2::Migration),
         ]
     }
 }

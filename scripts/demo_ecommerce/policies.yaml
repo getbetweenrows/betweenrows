@@ -1,100 +1,88 @@
 version: 1
 policies:
-  # MT-01: Tenant isolation — users only see their org's rows
+  # MT-01: Tenant isolation — users only see their org's rows (orders, customers, products)
   - name: tenant-isolation
-    effect: permit
-    description: Filter all tables to the authenticated user's organization
+    policy_type: row_filter
+    description: Filter tables to the authenticated user's organization
     is_enabled: true
-    obligations:
-      - type: row_filter
-        schema: public
-        table: orders
-        filter_expression: "organization_id = {user.tenant}"
-      - type: row_filter
-        schema: public
-        table: customers
-        filter_expression: "organization_id = {user.tenant}"
-      - type: row_filter
-        schema: public
-        table: products
-        filter_expression: "organization_id = {user.tenant}"
-      - type: row_filter
-        schema: public
-        table: payments
-        filter_expression: "order_id IN (SELECT id FROM orders WHERE organization_id = {user.tenant})"
+    targets:
+      - schemas: [public]
+        tables: [orders, customers, products]
+    definition:
+      filter_expression: "organization_id = {user.tenant}"
+
+  # MT-01 (payments): payments filtered via orders join
+  - name: tenant-isolation-payments
+    policy_type: row_filter
+    description: Filter payments to the authenticated user's organization via orders
+    is_enabled: true
+    targets:
+      - schemas: [public]
+        tables: [payments]
+    definition:
+      filter_expression: "order_id IN (SELECT id FROM orders WHERE organization_id = {user.tenant})"
 
   # RE-01: Join-based row filter for order_items (no direct organization_id column)
   - name: tenant-isolation-order-items
-    effect: permit
+    policy_type: row_filter
     description: Filter order_items via parent orders table
     is_enabled: true
-    obligations:
-      - type: row_filter
-        schema: public
-        table: order_items
-        filter_expression: "organization_id = {user.tenant}"
-        join_through:
-          schema: public
-          table: orders
-          local_key: order_id
-          foreign_key: id
+    targets:
+      - schemas: [public]
+        tables: [order_items]
+    definition:
+      filter_expression: "order_id IN (SELECT id FROM orders WHERE organization_id = {user.tenant})"
 
   # DS-01: Partial SSN masking for support staff
   - name: mask-ssn-partial
-    effect: permit
+    policy_type: column_mask
     description: Show only last 4 digits of SSN
     is_enabled: true
-    obligations:
-      - type: column_mask
-        schema: public
-        table: customers
-        column: ssn
-        mask_expression: "'***-**-' || RIGHT(ssn, 4)"
+    targets:
+      - schemas: [public]
+        tables: [customers]
+        columns: [ssn]
+    definition:
+      mask_expression: "'***-**-' || RIGHT(ssn, 4)"
 
   # DS-04: Full SSN redaction for untrusted users
   - name: mask-ssn-full
-    effect: permit
+    policy_type: column_mask
     description: Fully redact SSN for users without clearance
     is_enabled: true
-    obligations:
-      - type: column_mask
-        schema: public
-        table: customers
-        column: ssn
-        mask_expression: "'[RESTRICTED]'"
+    targets:
+      - schemas: [public]
+        tables: [customers]
+        columns: [ssn]
+    definition:
+      mask_expression: "'[RESTRICTED]'"
 
   # DS-10: Remove credit card column entirely
   - name: hide-credit-card
-    effect: deny
+    policy_type: column_deny
     description: Remove credit_card column from all queries
     is_enabled: true
-    obligations:
-      - type: column_access
-        schema: public
-        table: customers
-        columns:
-          - credit_card
+    targets:
+      - schemas: [public]
+        tables: [customers]
+        columns: [credit_card]
 
   # DS-02: Hide cost_price and margin from non-finance users
   - name: hide-product-financials
-    effect: deny
+    policy_type: column_deny
     description: Remove cost_price and margin from product queries
     is_enabled: true
-    obligations:
-      - type: column_access
-        schema: public
-        table: products
-        columns:
-          - cost_price
-          - margin
+    targets:
+      - schemas: [public]
+        tables: [products]
+        columns: [cost_price, margin]
 
   # MT-05: Admin full access (assign to admin users)
   - name: admin-full-access
-    effect: permit
+    policy_type: column_allow
     description: Full unrestricted access for admin users (assign per user)
     is_enabled: true
-    obligations:
-      - type: row_filter
-        schema: "*"
-        table: "*"
-        filter_expression: "1=1"
+    targets:
+      - schemas: ["*"]
+        tables: ["*"]
+        columns: ["*"]

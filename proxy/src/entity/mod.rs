@@ -4,7 +4,6 @@ pub mod discovered_schema;
 pub mod discovered_table;
 pub mod policy;
 pub mod policy_assignment;
-pub mod policy_obligation;
 pub mod policy_version;
 pub mod proxy_user;
 pub mod query_audit_log;

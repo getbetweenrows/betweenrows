@@ -124,15 +124,13 @@ WITH data AS (SELECT * FROM orders) SELECT * FROM data
 
 ---
 
-### 11. `column_access deny` on deny-effect policies ignored at query time
+### 11. `column_deny` policy type strips columns at query time
 
-**Vector**: Admin creates a **deny-effect** policy with a `column_access deny` obligation on `ssn`, expecting the column to be stripped from query results immediately.
+**Vector**: Admin creates a `column_deny` policy on `ssn`, expecting the column to be stripped from query results immediately — without requiring the user to reconnect.
 
-**Bug**: `PolicyHook` only processed `column_access` obligations from *permit* policies (the loop at `handle_query` iterated over `session.permit_policies`). Deny-effect policies were only checked for table-level "Access denied" errors. So `column_access deny` on a deny policy had no query-time effect — the column appeared in results until the user reconnected (when `compute_user_visibility()` hid it from the schema).
+**Defense**: `column_deny` is a first-class policy type. `PolicyHook::handle_query` processes all deny-type policies in the session, matches `column_deny` policies against the queried tables using `TargetEntry` pattern matching, and adds matched columns to `column_denies`. The column is stripped from the `Projection` node before execution. Unlike `table_deny`, `column_deny` does NOT short-circuit the query — all non-denied columns are still returned.
 
-**Defense**: `PolicyHook::handle_query` now runs a second loop over `session.deny_policies` after the permit loop, processing only `column_access` obligations and adding matched columns to `column_denies`.
-
-**Test**: Create a deny-effect policy with `column_access deny` on `ssn`. Assign to datasource. Without reconnecting, run `SELECT ssn FROM employees`. Verify `ssn` column is absent from the result set.
+**Test**: Create a `column_deny` policy on `ssn`. Assign to datasource. Without reconnecting, run `SELECT ssn FROM employees`. Verify `ssn` column is absent from the result set.
 
 ---
 
@@ -140,9 +138,9 @@ WITH data AS (SELECT * FROM orders) SELECT * FROM data
 
 **Vector**: Admin disables a policy with `column_access deny`, expecting the column to reappear in `information_schema.columns` on next reconnect.
 
-**Bug**: `compute_user_visibility()` loaded obligations for ALL assigned policy IDs, including those belonging to disabled policies. The `column_access deny` block didn't check if the parent policy was enabled, so disabling a policy had no effect on schema visibility.
+**Bug**: `compute_user_visibility()` loaded policies for ALL assigned policy IDs, including those belonging to disabled policies. The `column_access deny` block didn't check if the parent policy was enabled, so disabling a policy had no effect on schema visibility.
 
-**Defense**: `compute_user_visibility()` now loads obligations only for *enabled* policy IDs (those from the `is_enabled = true` filtered query). Disabled policies contribute neither to `visible_tables` nor `denied_columns`.
+**Defense**: `compute_user_visibility()` now loads policies only for *enabled* policy IDs (those from the `is_enabled = true` filtered query). Disabled policies contribute neither to `visible_tables` nor `denied_columns`.
 
 **Test**:
 - Unit: `engine::tests::test_disabled_policy_column_deny_not_applied` — disabled policy → `denied_columns` is empty.
@@ -153,7 +151,7 @@ WITH data AS (SELECT * FROM orders) SELECT * FROM data
 
 ### 13. Column mask had no effect — original values returned
 
-**Vector**: Admin creates a `column_mask` obligation expecting `ssn` values to be masked (e.g. `'***-**-' || RIGHT(ssn, 4)`). Data is queried and original SSN values are returned as-is.
+**Vector**: Admin creates a `column_mask` policy expecting `ssn` values to be masked (e.g. `'***-**-' || RIGHT(ssn, 4)`). Data is queried and original SSN values are returned as-is.
 
 **Bug**: `parse_mask_expr` built a standalone SQL plan (`SELECT {mask} AS {col} FROM {schema}.{table}`) via `ctx.sql()`, then extracted the first `Projection` expression. Two problems:
 1. **Double alias**: the extracted expression was already `Alias(inner, "ssn")` from the `AS ssn` clause; `apply_projection` then wrapped it again with `.alias(col_name)` producing `Alias(Alias(...))`, which DataFusion silently resolved by dropping the inner alias — causing column not found or type mismatches at execution time.
@@ -170,11 +168,11 @@ WITH data AS (SELECT * FROM orders) SELECT * FROM data
 
 ### 14. Two permit policies with row_filter produced a union (OR) instead of intersection (AND)
 
-**Vector**: Two permit policies both have `row_filter` obligations on the same table with different conditions (e.g. Policy A: `org_id = 'acme'`, Policy B: `status = 'active'`). A user assigned both policies can see ALL rows matching either condition — including rows from other tenants or inactive records that neither policy alone intended to expose.
+**Vector**: Two permit policies both have `row_filter` policies on the same table with different conditions (e.g. Policy A: `org_id = 'acme'`, Policy B: `status = 'active'`). A user assigned both policies can see ALL rows matching either condition — including rows from other tenants or inactive records that neither policy alone intended to expose.
 
-**Bug**: In `ObligationEffects::collect()`, cross-policy row filters were combined with OR semantics (seed `lit(false)`, combinator `.or()`). The intent was "any permit match grants access", but this allows a user assigned multiple narrow policies to see the union of all their allowed sets — potentially broader than any single policy intended.
+**Bug**: In `PolicyEffects::collect()`, cross-policy row filters were combined with OR semantics (seed `lit(false)`, combinator `.or()`). The intent was "any permit match grants access", but this allows a user assigned multiple narrow policies to see the union of all their allowed sets — potentially broader than any single policy intended.
 
-**Defense**: Cross-policy row filters are now combined with AND semantics (seed `lit(true)`, combinator `.and()`). Each permit policy adds a restriction; users see the intersection. Within a single policy, multiple `row_filter` obligations are still AND'd (unchanged). Deny policies are unaffected — the deny short-circuit on first match is equivalent to OR across denies.
+**Defense**: Cross-policy row filters are now combined with AND semantics (seed `lit(true)`, combinator `.and()`). Each permit policy adds a restriction; users see the intersection. Within a single policy, multiple `row_filter` policies are still AND'd (unchanged). Deny policies are unaffected — the deny short-circuit on first match is equivalent to OR across denies.
 
 **Test**:
 - Unit: `hooks::policy::tests::test_exec_two_permits_row_filter_and` — two disjoint filters (`acme` / `globex`) → AND → 0 rows.
@@ -195,39 +193,38 @@ WITH data AS (SELECT * FROM orders) SELECT * FROM data
 
 ---
 
-### 16. `column_mask` obligation accepted on a `deny`-effect policy
+### 16. Deny semantics and `column_mask` are mutually exclusive by type system construction
 
-**Vector**: Admin creates a `deny`-effect policy with a `column_mask` obligation, expecting the column to be masked. Because `PolicyHook` only applies `column_mask` from permit policies, the mask silently has no effect — the column's real value is returned.
+**Vector**: In a prior design (effect + obligation_type), an admin could create a `deny`-effect policy with a `column_mask` obligation. `PolicyHook` only applied `column_mask` from permit policies, so the mask silently had no effect — the column's real value was returned.
 
-**Defense**: `validate_no_deny_column_mask()` in `policy_handlers.rs` is called in both `create_policy` and `update_policy`. If `effect = "deny"` and any obligation has `obligation_type = "column_mask"`, the API returns HTTP `422 Unprocessable Entity` before the record is written. The admin UI hides `column_mask` from the obligation type picker when `deny` is selected and auto-removes any existing `column_mask` obligations when the effect is switched to `deny`.
+**Defense**: The flat `policy_type` enum eliminates this class of misconfiguration entirely. There is no `effect` field. `column_mask` is a specific policy type (always permit semantics). `column_deny` is a different policy type (always deny semantics). It is structurally impossible to express "deny + column_mask" — the policy has exactly one type. `validate_definition()` in `dto.rs` enforces that `column_mask` policies must have a `mask_expression`, while `column_deny` and `table_deny` must have no `definition` at all.
 
 **Test**:
-- `create_deny_column_mask_rejected_422` — POST a deny policy with `column_mask` → `422`.
-- `update_effect_to_deny_with_existing_column_mask_rejected_422` — create a permit policy with `column_mask`, then PATCH effect to `deny` → `422`.
-- `update_obligations_column_mask_on_deny_policy_rejected_422` — create a deny policy, then PATCH obligations to add `column_mask` → `422`.
+- `create_policy_column_mask_missing_mask_expression_422` — `column_mask` without `mask_expression` → `422`.
+- `create_policy_column_deny_with_definition_422` — `column_deny` with a `definition` object → `422`.
+- `create_policy_table_deny_with_definition_422` — `table_deny` with a `definition` object → `422`.
 
 ---
 
-### 17. `object_access deny` — schema hidden at query time
+### 17. `table_deny` with `tables: ["*"]` — schema blocked at query time
 
-**Vector**: Admin creates an `object_access deny` obligation on schema `analytics`, expecting all tables in that schema to be invisible to the assigned user. Without the implementation, the user can still see and query `analytics.*` tables.
+**Vector**: Admin creates a `table_deny` policy targeting schema `analytics` with `tables: ["*"]`, expecting all tables in that schema to be blocked for the assigned user. Without the implementation, the user can still query `analytics.*` tables.
 
-**Defense**: `compute_user_visibility()` in `engine/mod.rs` parses `object_access` obligations and populates `denied_schemas`. `build_user_context()` skips entire schemas that appear in `denied_schemas` when building the user's filtered `SessionContext`. This applies in both `open` and `policy_required` modes.
+**Defense**: `compute_user_visibility()` in `engine/mod.rs` processes `table_deny` policies and populates `denied_tables` with all matching `(df_alias, table)` pairs. `build_user_context()` skips tables in `denied_tables` when building the user's filtered `SessionContext`. Because `tables: ["*"]` matches every table in the schema, the entire schema becomes inaccessible. This applies in both `open` and `policy_required` modes. At query time, `PolicyHook` also short-circuits on the first `table_deny` match with a descriptive error.
 
 **Test**:
-- Unit: `engine::tests::test_disabled_policy_column_deny_not_applied` (existing) — verify disabled policy does not populate denied sets.
-- Integration: Create a deny policy with `object_access { schema: "analytics", action: "deny" }`. Assign to datasource for a test user. Connect as that user and run `SELECT * FROM information_schema.schemata`. Verify `analytics` is absent. Run `SELECT * FROM analytics.reports`. Verify a "schema not found" error (not data rows).
+- Integration: Create a `table_deny` policy with `targets: [{ schemas: ["analytics"], tables: ["*"] }]`. Assign to datasource for a test user. Connect as that user and run `SELECT * FROM analytics.reports`. Verify a "table not found" or policy-denied error (not data rows).
 
 ---
 
-### 18. `object_access deny` — table hidden at query time
+### 18. `table_deny` — specific table blocked at query time
 
-**Vector**: Admin creates an `object_access deny` obligation on table `public.payments`, expecting that table to be invisible to the assigned user while the rest of `public` remains accessible.
+**Vector**: Admin creates a `table_deny` policy on table `public.payments`, expecting that table to be blocked for the assigned user while the rest of `public` remains accessible.
 
-**Defense**: `compute_user_visibility()` populates `denied_tables` with `(df_alias, table_name)` pairs. `build_user_context()` skips tables in `denied_tables` when building the virtual schema, leaving all other tables in the schema visible.
+**Defense**: `compute_user_visibility()` processes `table_deny` policies and populates `denied_tables` with matching `(df_alias, table_name)` pairs. `build_user_context()` skips tables in `denied_tables` when building the user's filtered `SessionContext`, leaving all other tables in the schema visible. At query time, `PolicyHook` short-circuits on the first `table_deny` match with a descriptive error before plan execution.
 
 **Test**:
-- Integration: Create a deny policy with `object_access { schema: "public", table: "payments", action: "deny" }`. Assign to datasource. Connect as that user and run `SELECT * FROM information_schema.tables WHERE table_schema = 'public'`. Verify `payments` is absent but `orders` and `customers` are present. Run `SELECT * FROM payments`. Verify a "table not found" error.
+- Integration: Create a `table_deny` policy with `targets: [{ schemas: ["public"], tables: ["payments"] }]`. Assign to datasource. Connect as that user and run `SELECT * FROM public.payments`. Verify a policy-denied error. Run `SELECT * FROM public.orders`. Verify normal results (other tables unaffected).
 
 ---
 
@@ -241,22 +238,20 @@ WITH data AS (SELECT * FROM orders) SELECT * FROM data
 
 ---
 
-### 20. `column_access` obligation `action` field caused incorrect visibility in `policy_required` mode
+### 20. Policy type encodes grant vs. strip — no ambiguous `action` field
 
-**Vector**: Admin creates a `permit`-effect policy intended to grant access to all columns (`columns: ["*"]`) but the stored obligation JSON has `"action": "deny"` (from a prior schema where the action was set per-obligation). In `policy_required` mode the table is completely inaccessible — the user sees a "table not found" error instead of data.
+**Vector**: In a prior design, `column_access` obligations had an `action` field (`"allow"` or `"deny"`) inside the definition JSON. With a `permit`-effect policy containing `"action": "deny"`, `compute_user_visibility()` checked `col_def.action == "allow"` to decide whether to grant table access. A mismatch silently denied access — the user saw "table not found" instead of data in `policy_required` mode.
 
-**Bug**: The `column_access` obligation definition previously contained an `action` field (`"allow"` or `"deny"`). `compute_user_visibility()` and `ObligationEffects::collect()` both checked `col_def.action == "allow"` to decide whether a permit policy's `column_access` obligation grants table visibility. When `action` was `"deny"` inside a permit policy, the obligation was silently treated as a denylist and never added to `visible_tables`. In `policy_required` mode, `visible_tables` remained empty → the table was filtered out of the user's `SessionContext` → DataFusion returned "table not found".
+**Defense**: The `action` field was removed entirely. Intent is now encoded directly in `policy_type`:
+- `column_allow` — always an allowlist (grants table access in `policy_required` mode, specifies visible columns)
+- `column_deny` — always a denylist (strips columns at query time, does not grant access)
 
-**Defense**: The `action` field was removed from `column_access` obligations entirely. Intent is now determined solely by the enclosing policy's `effect`:
-- `permit` policy + `column_access` → always an allowlist (adds to `visible_tables` and specifies visible columns)
-- `deny` policy + `column_access` → always a denylist (strips columns from results, does not grant access)
-
-The `ColumnAccessDef` struct no longer has an `action` field. The API validation layer (`dto.rs`) no longer requires or accepts `action` in `column_access` definitions. Existing stored obligations with an `action` field are silently ignored (serde unknown-field tolerance).
+There is no ambiguous per-definition `action` field. `compute_user_visibility()` branches on `policy_type` directly. `validate_targets()` in `dto.rs` enforces that both `column_allow` and `column_deny` require a non-empty `columns` array. The type system makes the wrong combination unrepresentable.
 
 **Test**:
-- Unit: `engine::tests::test_permit_column_access_wildcard_grants_full_visibility_policy_required` — permit policy with `column_access ["*"]` in a `policy_required` aliased datasource → table is visible, `visible_tables` non-empty.
-- Unit: `hooks::policy::tests::test_column_access_deny_no_table_permit` — deny policy with `column_access` in `policy_required` mode → `lit(false)` (deny policy alone does not grant table access).
-- Unit: `admin::policy_handlers::tests::create_policy_column_access_missing_columns_422` — `column_access` definition without `columns` field → `422`.
+- Unit: `engine::tests::test_permit_column_allow_wildcard_grants_full_visibility_policy_required` — `column_allow` with `columns: ["*"]` in a `policy_required` datasource → table is visible, `visible_tables` non-empty.
+- Unit: `hooks::policy::tests::test_column_deny_no_table_permit` — `column_deny` policy in `policy_required` mode → `lit(false)` (deny type alone does not grant table access).
+- Unit: `admin::policy_handlers::tests::create_policy_column_allow_missing_columns_422` — `column_allow` without `columns` in targets → `422`.
 
 
 ---
@@ -291,7 +286,7 @@ The `ColumnAccessDef` struct no longer has an `action` field. The API validation
 
 **Vector**: The audit log's `rewritten_query` field previously just prepended `/* policy-rewritten */` to the original query string. The actual row filters and column masks applied by policies were not visible, defeating the purpose of the audit trail.
 
-**Defense**: DataFusion's `Unparser` with `BetweenRowsPostgresDialect` is used to serialize the final `LogicalPlan` (after all obligation rewrites) back to SQL. If unparsing fails, the fallback is `/* plan-to-sql failed */ {original_query}`.
+**Defense**: DataFusion's `Unparser` with `BetweenRowsPostgresDialect` is used to serialize the final `LogicalPlan` (after all policy rewrites) back to SQL. If unparsing fails, the fallback is `/* plan-to-sql failed */ {original_query}`.
 
 **Test**: `tc_audit_01_success_audit_status` — `rewritten_query` must not contain `/* policy-rewritten */` and must be non-empty when a row filter was applied.
 

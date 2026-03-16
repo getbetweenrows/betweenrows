@@ -45,7 +45,7 @@ Shadow Mode is a "dry-run" state for individual SQL security policies. Instead o
 - **Policy Templates**: Separate transformation logic (e.g., `REGEXP_REPLACE`) from policy definitions. Allows updating logic in one place for many policies.
 - **Metadata Tagging Layer**: Allow admins and auto-scanners to apply tags (e.g., `pii`, `financial`, `deprecated`) to DataSources, Schemas, Tables, and Columns.
 - **Inherited Tagging**: Tags applied to a Database or Table automatically flow down to child Columns unless overridden.
-- **Tag-Based Obligations**: Update `policy_match.rs` to allow targeting obligations via tag patterns (e.g., `"target": "tag:pii"`) instead of just names.
+- **Tag-Based Policies**: Update `policy_match.rs` to allow targeting policies via tag patterns (e.g., `"target": "tag:pii"`) instead of just names.
 - **Context-Aware Masking**: Support multi-column context in masking expressions (e.g., mask `salary` based on `region` column value).
 - **Auto-Classification**: Add pattern-matching scanners (Regex, Luhn, NLP) to the Discovery Job to automatically tag sensitive data.
 
@@ -59,7 +59,7 @@ Shadow Mode is a "dry-run" state for individual SQL security policies. Instead o
 
 ### Programmable Governance (The "Leapfrog" Layer)
 
-- **Programmable Obligations (Rhai/Wasm)**: Allow Policy Templates to be written in a sandboxed scripting language for logic too complex for SQL (e.g., custom decryption, calling external risk APIs).
+- **Programmable Policies (Rhai/Wasm)**: Allow Policy Templates to be written in a sandboxed scripting language for logic too complex for SQL (e.g., custom decryption, calling external risk APIs).
 - **Validated Purpose (PBAC)**: Move beyond roles to "Purposes." Require a validated claim (e.g., a ticket ID from a ticketing system) to unlock specific data lenses.
 - **Clean Room Joins**: Support "Blind Joins" where two tables can be joined on a sensitive key, but the proxy guarantees the key cannot be leaked in results or filters.
 - **User Attribute Sync**: Dynamically pull ABAC attributes (Region, Department, Clearance) from identity claims at connect time.
@@ -81,7 +81,7 @@ This section details the core mechanisms we are implementing to achieve parity w
 1.  **Tag Assignment:** An admin or auto-scanner applies a tag like `pii:true` or `classification:sensitive` to an entity.
 2.  **Inheritance Logic:** Tags follow a tree structure. A tag on a `DataSource` flows to all its `Schemas`. A tag on a `Table` flows to all its `Columns`. 
     *   *Example:* If `table:customers` is tagged `sensitivity:high`, every column within it (email, name, id) inherits that tag unless explicitly overridden.
-3.  **Policy Evaluation:** The `PolicyHook` resolves the tags for every `TableScan` and `Column` in the logical plan. If an obligation targets `tag:pii`, it applies to every column that carries or inherits that tag.
+3.  **Policy Evaluation:** The `PolicyHook` resolves the tags for every `TableScan` and `Column` in the logical plan. If a policy targets `tag:pii`, it applies to every column that carries or inherits that tag.
 4.  **Benefits:** Zero-touch security. Adding a new table to the database requires zero policy updates if it follows a tagged naming convention or inherits from a tagged schema.
 
 ### 2. Logic Decoupling (Policy Templates)
@@ -135,7 +135,7 @@ This section details the core mechanisms we are implementing to achieve parity w
 2.  **External Validation:** The proxy calls a webhook (e.g., to a ticketing system) to verify that `INC-123` is a valid, open ticket assigned to this user.
 3.  **Temporary Lenses:** If validated, the "Audit Lens" is activated for a limited window (e.g., 2 hours). After expiry, the connection automatically reverts to a masked/restricted state without requiring a reconnect.
 
-### 7. Programmable Obligations (Scripted Logic)
+### 7. Programmable Policies (Scripted Logic)
 **Design Pattern: Logic-as-Code**
 
 **Concept:** Moving beyond static SQL for governance logic.
@@ -186,52 +186,54 @@ This section details the core mechanisms we are implementing to achieve parity w
 - **Implementation**: Extend `ColumnMaskDef` with an optional `condition` field. At query time, evaluate the condition (similar to how `{user.*}` variables are substituted) and only apply the mask expression if true.
 - **Alternative**: Could also support "mask else original" semantics where a different mask is applied when condition is false, but the simple conditional masking covers most use cases.
 
-### Conditional Obligations (All Types)
+### Conditional Policies (All Types)
 
-Should every obligation type support conditional application? This would allow policies that activate only under certain conditions:
+Should every policy type support conditional application? This would allow policies that activate only under certain conditions:
 
-| Obligation Type | Conditional Use Case | Complexity |
-|-----------------|---------------------|------------|
+| Policy Type | Conditional Use Case | Complexity |
+|-------------|---------------------|------------|
 | `row_filter` | Filter rows only for non-admin users | Low - filter_expression IS the condition |
 | `column_mask` | Mask sensitive data for non-permissioned users | Medium - proposed above |
-| `column_access deny` | Hide columns from non-admin users | Medium |
-| `object_access deny` | Hide schemas/tables from certain teams | Medium |
+| `column_deny` | Hide columns from non-admin users | Medium |
+| `table_deny` | Hide schemas/tables from certain teams | Medium |
 
-**Option A: Per-obligation condition field (recommended)**
+**Option A: Per-policy condition field (recommended)**
 
-Each obligation type gets an optional `condition` field:
+Each policy type gets an optional `condition` field:
 
 ```json
 // Row filter - condition is redundant, filter_expression IS the condition
 {
-  "obligation_type": "row_filter",
+  "policy_type": "row_filter",
   "condition": "user.role != 'admin'",  // redundant, but consistent
-  "definition": { "schema": "orders", "table": "*", "filter_expression": "tenant_id = {user.tenant}" }
+  "targets": [{ "schemas": ["orders"], "tables": ["*"] }],
+  "definition": { "filter_expression": "tenant_id = {user.tenant}" }
 }
 
 // Column mask - condition adds fine-grained control
 {
-  "obligation_type": "column_mask",
+  "policy_type": "column_mask",
   "condition": "user.role != 'admin'",
-  "definition": { "schema": "hr", "table": "employees", "column": "ssn", "mask_expression": "'***-**-****'" }
+  "targets": [{ "schemas": ["hr"], "tables": ["employees"], "columns": ["ssn"] }],
+  "definition": { "mask_expression": "'***-**-****'" }
 }
 
-// Column access deny - hide columns conditionally (policy effect = "deny")
+// Column deny - hide columns conditionally
 {
-  "obligation_type": "column_access",
+  "policy_type": "column_deny",
   "condition": "user.clearance_level < 5",
-  "definition": { "schema": "secret", "table": "files", "columns": ["content"] }
+  "targets": [{ "schemas": ["secret"], "tables": ["files"], "columns": ["content"] }]
 }
 
-// Object access deny - hide tables conditionally  
+// Table deny - hide tables conditionally
 {
-  "obligation_type": "object_access",
+  "policy_type": "table_deny",
   "condition": "user.team != 'executive'",
-  "definition": { "schema": "analytics", "action": "deny" }
+  "targets": [{ "schemas": ["analytics"], "tables": ["*"] }]
 }
 ```
 
-**Option B: Condition IN the obligation definition**
+**Option B: Condition IN the policy definition**
 
 Embed the condition inside the definition object rather than as a top-level field. More compact but less consistent across types.
 
@@ -239,13 +241,13 @@ Embed the condition inside the definition object rather than as a top-level fiel
 
 Current workaround: Create separate policies for each condition. For example:
 - Policy 1: `row_filter` for regular users
-- Policy 2: No obligations for admins (implicit allow)
+- Policy 2: No policies for admins (implicit allow)
 
 This works but creates policy explosion when combining multiple conditions.
 
-**Recommendation**: Go with **Option A** - add optional `condition` field to all obligation types. This provides:
-- Consistency across all obligation types
-- Clear semantics: obligation only applies when condition is true
+**Recommendation**: Go with **Option A** - add optional `condition` field to all policy types. This provides:
+- Consistency across all policy types
+- Clear semantics: policy only applies when condition is true
 - Future-proof: easy to extend with more complex condition expressions
 - Backward compatible: condition is optional, existing policies work unchanged
 
@@ -256,15 +258,15 @@ This works but creates policy explosion when combining multiple conditions.
 - Examples: `user.role = 'admin'`, `user.team NOT IN ('sales', 'marketing')`, `user.clearance_level >= 3`
 
 **Priority when multiple conditions match**:
-- If multiple policies have conditions that all evaluate to true, apply all obligations (AND semantics, same as now)
-- If a condition evaluates to false, that obligation is skipped
-- Order: evaluate all conditions first, then apply matching obligations
+- If multiple policies have conditions that all evaluate to true, apply all policies (AND semantics, same as now)
+- If a condition evaluates to false, that policy is skipped
+- Order: evaluate all conditions first, then apply matching policies
 
 **Implementation plan**:
-1. Add `condition` field to `Obligation` struct (optional, nullable)
+1. Add `condition` field to policy struct (optional, nullable)
 2. Add condition evaluation helper (reuses existing `{user.*}` substitution logic)
-3. Update `ObligationEffects::collect()` to check condition before including each obligation
-4. Update tests to cover conditional obligations
+3. Update `PolicyEffects::collect()` to check condition before including each policy
+4. Update tests to cover conditional policies
 
 > **See also:** Related to DM-03 (mask vs. hide decision), DM-04 (canary rollout for testing policies on subset of users)
 
@@ -295,7 +297,7 @@ Integrate an MCP server into the SQL proxy to turn it into a secure gateway for 
 
 ### Improve Hints in the UI
 
-- Create user, datasource, policies, obligations, assignment
+- Create user, datasource, policies, assignment
 - Lack guidance and hints explaining what each config does
 - Include risk associated with configs
 - Provide recommended config/value (e.g., priority value)
@@ -436,7 +438,7 @@ Given complexity of new policy system (interaction with DataFusion and PostgreSQ
 - 2026-03-04: DataFusion query error - table 'postgres.pg_catalog.pg_statio_user_tables' not found
 - 2026-03-04: DataFusion query error - table 'postgres.information_schema.table_constraints' not found
 - 2026-03-04: DataFusion query error - Invalid function 'quote_ident'. Did you mean 'date_bin'?
-- 2026-03-09: JOIN with duplicate column names (e.g., `id`) and `SELECT *` causes "Ambiguous reference to unqualified field id" error. — **Partially mitigated 2026-03-11**: column deny/allow now uses `DFSchema` qualifier-aware iteration so deny rules no longer collide across tables. Root ambiguity for `SELECT *` on JOINs with duplicate column names is a DataFusion limitation, not directly related to policy enforcement.
+- 2026-03-09: JOIN with duplicate column names (e.g., `id`) and `SELECT *` causes "Ambiguous reference to unqualified field id" error. — **Partially mitigated 2026-03-11**: column deny/allow now uses `DFSchema` qualifier-aware iteration so deny policies no longer collide across tables. Root ambiguity for `SELECT *` on JOINs with duplicate column names is a DataFusion limitation, not directly related to policy enforcement.
 - Sometimes SQL queries take long time and cause UI to hang - need performance testing, may be missing indexes
 
 ### Git Commit Hook Improvements
@@ -524,10 +526,10 @@ When a policy changes, `rebuild_contexts_for_datasource` spawns background tasks
 - Option 1: Return "column not found" error (default, more secure, prevents metadata leak)
 - Option 2: Return empty column silently (compatibility mode)
 
-### Option 2: Policy/Obligation Config (Alternative)
+### Option 2: Policy Config (Alternative)
 
-- Instead of datasource-level, make this a policy/obligation config for finer-grained control
-- When creating a `column_access deny` obligation, add an option to pick the behavior:
+- Instead of datasource-level, make this a policy config for finer-grained control
+- When creating a `column_deny` policy, add an option to pick the behavior:
   - Option 1: Throw "column not found" error (default, more secure, hides existence of column)
   - Option 2: Return empty/null column silently (compatibility mode, prevents integration failures)
 - Rationale: Allows per-policy control over security vs compatibility tradeoff

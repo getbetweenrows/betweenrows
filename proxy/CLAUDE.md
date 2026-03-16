@@ -12,13 +12,13 @@ pgwire 0.38, DataFusion 52, axum 0.8, SeaORM 1, tokio-postgres 0.7, argon2 0.5, 
 - `src/engine/mod.rs` — `EngineCache`, `VirtualCatalogProvider`, `build_arrow_schema()`, `arrow_type_to_string()`
 - `src/engine/rewrite.rs` — `rewrite_statement()` AST visitor (pg_catalog table qualification, schema-stripped function calls)
 - `src/hooks/read_only.rs` — `ReadOnlyHook` (allowlist: Query, Show*, Explain*)
-- `src/hooks/policy.rs` — `PolicyHook` (row filters, column masks, column access, audit logging)
+- `src/hooks/policy.rs` — `PolicyHook` (five policy types: row_filter, column_mask, column_allow, column_deny, table_deny; audit logging)
 - `src/admin/policy_handlers.rs` — policy CRUD + assignment endpoints
 - `src/admin/audit_handlers.rs` — `GET /audit/queries`
 - `src/admin/policy_yaml.rs` — YAML export/import
 - `src/discovery/` — `DiscoveryProvider` trait + Postgres impl
 - `src/crypto.rs` — AES-256-GCM `encrypt_json` / `decrypt_json`
-- `../migration/src/lib.rs` — `Migrator` (7 migrations)
+- `../migration/src/lib.rs` — `Migrator` (23 migrations)
 
 ## Critical Gotchas
 
@@ -61,15 +61,17 @@ Policy CRUD handlers also call `state.proxy_handler.rebuild_contexts_for_datasou
 
 ## PolicyHook
 
-`PolicyHook` replaces the old hardcoded `RLSHook`. It loads policies from the DB, caches per `(datasource_id, username)` for 60 seconds, and applies three obligation types:
+`PolicyHook` replaces the old hardcoded `RLSHook`. It loads policies from the DB, caches per `(datasource_id, username)` for 60 seconds, and applies five policy types:
 
-- **row_filter** — `Filter(expr)` node injected below the matching `TableScan` via `transform_up`. Template variables (`{user.tenant}`, `{user.username}`, `{user.id}`) are substituted as `Expr::Literal` after parsing — never interpolated as raw SQL.
+- **row_filter** — `Filter(expr)` node injected below the matching `TableScan` via `transform_up`. Template variables (`{user.tenant}`, `{user.username}`, `{user.id}`) are substituted as `Expr::Literal` after parsing — never interpolated as raw SQL. Multiple `row_filter` policies are AND-combined (intersection, not union).
 - **column_mask** — replaces the column `Expr` in the top-level `Projection` with an aliased mask expression. Parsed synchronously via `sql_ast_to_df_expr(..., Some(ctx))` — sqlparser converts the mask template to a DataFusion `Expr` using the session's `FunctionRegistry` for built-in function lookup (RIGHT, LEFT, UPPER, LOWER, CONCAT, COALESCE, etc.). No standalone SQL plan is created.
-- **column_access deny** — strips denied columns from the top-level `Projection`. Wildcards (`schema: "*"`, `table: "*"`) match any schema/table.
+- **column_allow** — specifies which columns a user may see for matching tables. In `policy_required` mode, a `column_allow` policy is the only type that grants table access; without one, the table receives `Filter(lit(false))`.
+- **column_deny** — strips listed columns from the top-level `Projection`. Does NOT short-circuit the query. If all selected columns are stripped, returns SQLSTATE `42501` (insufficient_privilege).
+- **table_deny** — short-circuits on the first matching table/schema; query is rejected with a descriptive error before plan execution.
 
-**Deny policies** short-circuit on the first match — query is rejected with a descriptive error before plan execution.
+**Policy type encodes effect**: `column_deny` and `table_deny` are deny types (`policy_type.is_deny() == true`); the others are permit types. There is no separate `effect` field.
 
-**access_mode**: If the datasource is `"policy_required"`, tables with no matching permit policy get `Filter(lit(false))` injected → empty results, no upstream round-trip.
+**access_mode**: If the datasource is `"policy_required"`, tables with no matching `column_allow` policy get `Filter(lit(false))` injected → empty results, no upstream round-trip.
 
 **Cache invalidation**: call `policy_hook.invalidate_datasource(&name)` after any policy or datasource mutation. Call `policy_hook.invalidate_user(&user_id)` after user tenant/deactivation changes. Also call `proxy_handler.rebuild_contexts_for_datasource(&name)` after policy mutations so active connections immediately see the updated schema (column visibility changes without reconnect).
 
@@ -101,7 +103,7 @@ Run with `cargo test --test policy_enforcement` or `cargo test --test protocol`.
 ### Documentation requirements (non-optional)
 After completing any feature or adding tests, always update:
 - **`docs/permission-security-tests.md`** — add a new vector entry for any new attack surface or bypass that was tested (Vector → Bug/Defense → Test format).
-- **`docs/permission-system.md`** — keep the conceptual model, obligation descriptions, and examples in sync with the current implementation.
+- **`docs/permission-system.md`** — keep the conceptual model, policy type descriptions, and examples in sync with the current implementation.
 
 ## Bug Fix Protocol
 Use TDD: write the failing test(s) first to reproduce the bug, then fix the code until they pass. Never fix first and test after.

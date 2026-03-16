@@ -68,9 +68,10 @@ describe('createPolicy', () => {
     mockClient.post.mockResolvedValue({ data: policy })
     const payload = {
       name: 'my-policy',
-      effect: 'permit' as const,
+      policy_type: 'row_filter' as const,
       is_enabled: true,
-      obligations: [],
+      targets: [{ schemas: ['public'], tables: ['orders'] }],
+      definition: null,
     }
     const result = await createPolicy(payload)
     expect(mockClient.post).toHaveBeenCalledWith('/policies', payload)

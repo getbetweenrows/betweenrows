@@ -46,30 +46,17 @@ async fn row_filter_tenant_isolation() {
         .await;
 
     server
-        .create_and_assign_policy(
+        .create_row_filter(
             "tenant-filter",
-            "permit",
-            vec![
-                json!({
-                    "obligation_type": "row_filter",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "filter_expression": "tenant = {user.tenant}"
-                    }
-                }),
-                json!({
-                    "obligation_type": "column_access",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "columns": ["*"],
-                    }
-                }),
-            ],
+            schema,
+            "orders",
+            "tenant = {user.tenant}",
             ds_id,
             None,
         )
+        .await;
+    server
+        .create_column_allow("allow-all-t1", schema, "orders", &["*"], ds_id, None)
         .await;
 
     let client = server.connect_as("alice", "AlicePass1!", "ds_t1").await;
@@ -118,30 +105,17 @@ async fn template_variable_injection() {
         .await;
 
     server
-        .create_and_assign_policy(
+        .create_row_filter(
             "tenant-filter-t2",
-            "permit",
-            vec![
-                json!({
-                    "obligation_type": "row_filter",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "filter_expression": "tenant = {user.tenant}"
-                    }
-                }),
-                json!({
-                    "obligation_type": "column_access",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "columns": ["*"],
-                    }
-                }),
-            ],
+            schema,
+            "orders",
+            "tenant = {user.tenant}",
             ds_id,
             None,
         )
+        .await;
+    server
+        .create_column_allow("allow-all-t2", schema, "orders", &["*"], ds_id, None)
         .await;
 
     let client = server.connect_as("injector", "Inject1Pass!", "ds_t2").await;
@@ -186,30 +160,17 @@ async fn table_alias_bypass() {
         .await;
 
     server
-        .create_and_assign_policy(
+        .create_row_filter(
             "tenant-filter-t3",
-            "permit",
-            vec![
-                json!({
-                    "obligation_type": "row_filter",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "filter_expression": "tenant = {user.tenant}"
-                    }
-                }),
-                json!({
-                    "obligation_type": "column_access",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "columns": ["*"],
-                    }
-                }),
-            ],
+            schema,
+            "orders",
+            "tenant = {user.tenant}",
             ds_id,
             None,
         )
+        .await;
+    server
+        .create_column_allow("allow-all-t3", schema, "orders", &["*"], ds_id, None)
         .await;
 
     let client = server.connect_as("alice3", "AlicePass1!", "ds_t3").await;
@@ -251,30 +212,17 @@ async fn cte_bypass() {
         .await;
 
     server
-        .create_and_assign_policy(
+        .create_row_filter(
             "tenant-filter-t4",
-            "permit",
-            vec![
-                json!({
-                    "obligation_type": "row_filter",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "filter_expression": "tenant = {user.tenant}"
-                    }
-                }),
-                json!({
-                    "obligation_type": "column_access",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "columns": ["*"],
-                    }
-                }),
-            ],
+            schema,
+            "orders",
+            "tenant = {user.tenant}",
             ds_id,
             None,
         )
+        .await;
+    server
+        .create_column_allow("allow-all-t4", schema, "orders", &["*"], ds_id, None)
         .await;
 
     let client = server.connect_as("alice4", "AlicePass1!", "ds_t4").await;
@@ -318,30 +266,17 @@ async fn subquery_bypass() {
         .await;
 
     server
-        .create_and_assign_policy(
+        .create_row_filter(
             "tenant-filter-t5",
-            "permit",
-            vec![
-                json!({
-                    "obligation_type": "row_filter",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "filter_expression": "tenant = {user.tenant}"
-                    }
-                }),
-                json!({
-                    "obligation_type": "column_access",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "columns": ["*"],
-                    }
-                }),
-            ],
+            schema,
+            "orders",
+            "tenant = {user.tenant}",
             ds_id,
             None,
         )
+        .await;
+    server
+        .create_column_allow("allow-all-t5", schema, "orders", &["*"], ds_id, None)
         .await;
 
     let client = server.connect_as("alice5", "AlicePass1!", "ds_t5").await;
@@ -386,18 +321,11 @@ async fn star_expansion_column_deny() {
 
     // Deny policy that blocks ssn and salary columns
     server
-        .create_and_assign_policy(
+        .create_column_deny(
             "deny-sensitive-t6",
-            "deny",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "employees",
-                    "columns": ["ssn", "salary"],
-                    "action": "deny"
-                }
-            })],
+            schema,
+            "employees",
+            &["ssn", "salary"],
             ds_id,
             None,
         )
@@ -405,20 +333,7 @@ async fn star_expansion_column_deny() {
 
     // Permit policy for remaining columns
     server
-        .create_and_assign_policy(
-            "allow-rest-t6",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "employees",
-                    "columns": ["*"],
-                }
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_allow("allow-rest-t6", schema, "employees", &["*"], ds_id, None)
         .await;
 
     let client = server.connect_as("viewer6", "ViewPass1!", "ds_t6").await;
@@ -471,28 +386,15 @@ async fn column_mask() {
         .await;
 
     server
-        .create_and_assign_policy(
+        .create_column_allow("allow-all-t7", schema, "customers", &["*"], ds_id, None)
+        .await;
+    server
+        .create_column_mask(
             "mask-ssn-t7",
-            "permit",
-            vec![
-                json!({
-                    "obligation_type": "column_access",
-                    "definition": {
-                        "schema": schema,
-                        "table": "customers",
-                        "columns": ["*"],
-                    }
-                }),
-                json!({
-                    "obligation_type": "column_mask",
-                    "definition": {
-                        "schema": schema,
-                        "table": "customers",
-                        "column": "ssn",
-                        "mask_expression": "CONCAT('***-**-', RIGHT(ssn, 4))"
-                    }
-                }),
-            ],
+            schema,
+            "customers",
+            "ssn",
+            "CONCAT('***-**-', RIGHT(ssn, 4))",
             ds_id,
             None,
         )
@@ -537,45 +439,24 @@ async fn join_both_tables_filtered() {
         .create_user("alice8", "AlicePass1!", "acme", ds_id)
         .await;
 
-    // Row filter on both tables
+    // Row filter on both tables — single policy with multi-table targets
     server
         .create_and_assign_policy(
             "tenant-filter-t8",
-            "permit",
-            vec![
-                json!({
-                    "obligation_type": "row_filter",
-                    "definition": {
-                        "schema": schema,
-                        "table": "customers",
-                        "filter_expression": "tenant = {user.tenant}"
-                    }
-                }),
-                json!({
-                    "obligation_type": "column_access",
-                    "definition": {
-                        "schema": schema,
-                        "table": "customers",
-                        "columns": ["*"],
-                    }
-                }),
-                json!({
-                    "obligation_type": "row_filter",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "filter_expression": "tenant = {user.tenant}"
-                    }
-                }),
-                json!({
-                    "obligation_type": "column_access",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "columns": ["*"],
-                    }
-                }),
-            ],
+            "row_filter",
+            vec![json!({"schemas": [schema], "tables": ["customers", "orders"]})],
+            Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+            ds_id,
+            None,
+        )
+        .await;
+    // Allow all columns on both tables
+    server
+        .create_and_assign_policy(
+            "allow-all-t8",
+            "column_allow",
+            vec![json!({"schemas": [schema], "tables": ["customers", "orders"], "columns": ["*"]})],
+            None,
             ds_id,
             None,
         )
@@ -660,39 +541,12 @@ async fn denied_column_error() {
         .await;
 
     server
-        .create_and_assign_policy(
-            "deny-ssn-t10",
-            "deny",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "employees",
-                    "columns": ["ssn"],
-                    "action": "deny"
-                }
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_deny("deny-ssn-t10", schema, "employees", &["ssn"], ds_id, None)
         .await;
 
     // Permit policy for remaining columns
     server
-        .create_and_assign_policy(
-            "allow-all-t10",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "employees",
-                    "columns": ["*"],
-                }
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_allow("allow-all-t10", schema, "employees", &["*"], ds_id, None)
         .await;
 
     let client = server.connect_as("user10", "UserPass1!", "ds_t10").await;
@@ -735,25 +589,9 @@ async fn disabled_policy_not_enforced() {
     server
         .create_and_assign_policy_enabled(
             "disabled-filter-t11",
-            "permit",
-            vec![
-                json!({
-                    "obligation_type": "row_filter",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "filter_expression": "tenant = {user.tenant}"
-                    }
-                }),
-                json!({
-                    "obligation_type": "column_access",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "columns": ["*"],
-                    }
-                }),
-            ],
+            "row_filter",
+            vec![json!({"schemas": [schema], "tables": ["orders"]})],
+            Some(json!({"filter_expression": "tenant = {user.tenant}"})),
             ds_id,
             None,
             false, // is_enabled = false
@@ -762,20 +600,7 @@ async fn disabled_policy_not_enforced() {
 
     // Need an active permit policy so the user can query
     server
-        .create_and_assign_policy(
-            "allow-all-t11",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "orders",
-                    "columns": ["*"],
-                }
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_allow("allow-all-t11", schema, "orders", &["*"], ds_id, None)
         .await;
 
     let client = server.connect_as("user11", "UserPass1!", "ds_t11").await;
@@ -820,39 +645,14 @@ async fn object_access_deny_schema() {
         .create_user("user12", "UserPass1!", "default", ds_id)
         .await;
 
-    // Deny access to analytics schema
+    // Deny access to analytics schema (table_deny with wildcard table)
     server
-        .create_and_assign_policy(
-            "deny-analytics-t12",
-            "deny",
-            vec![json!({
-                "obligation_type": "object_access",
-                "definition": {
-                    "schema": analytics_schema,
-                    "action": "deny"
-                }
-            })],
-            ds_id,
-            None,
-        )
+        .create_table_deny("deny-analytics-t12", analytics_schema, "*", ds_id, None)
         .await;
 
     // Allow public schema
     server
-        .create_and_assign_policy(
-            "allow-public-t12",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": public_schema,
-                    "table": "*",
-                    "columns": ["*"],
-                }
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_allow("allow-public-t12", public_schema, "*", &["*"], ds_id, None)
         .await;
 
     let client = server.connect_as("user12", "UserPass1!", "ds_t12").await;
@@ -901,47 +701,28 @@ async fn two_permits_and_semantics() {
         .create_user("user13", "UserPass1!", "acme", ds_id)
         .await;
 
-    // Policy 1: filter by org = user.tenant
+    // Policy 1: filter by org = user.tenant + column allow
     server
-        .create_and_assign_policy(
+        .create_row_filter(
             "org-filter-t13",
-            "permit",
-            vec![
-                json!({
-                    "obligation_type": "row_filter",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "filter_expression": "org = {user.tenant}"
-                    }
-                }),
-                json!({
-                    "obligation_type": "column_access",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "columns": ["*"],
-                    }
-                }),
-            ],
+            schema,
+            "orders",
+            "org = {user.tenant}",
             ds_id,
             None,
         )
         .await;
+    server
+        .create_column_allow("allow-all-t13", schema, "orders", &["*"], ds_id, None)
+        .await;
 
     // Policy 2: filter by status = 'active' (static value, no template var)
     server
-        .create_and_assign_policy(
+        .create_row_filter(
             "status-filter-t13",
-            "permit",
-            vec![json!({
-                "obligation_type": "row_filter",
-                "definition": {
-                    "schema": schema,
-                    "table": "orders",
-                    "filter_expression": "status = 'active'"
-                }
-            })],
+            schema,
+            "orders",
+            "status = 'active'",
             ds_id,
             None,
         )
@@ -987,23 +768,9 @@ async fn deny_policy_row_filter_rejected() {
         .create_user("user_c1", "UserPass1!", "acme", ds_id)
         .await;
 
-    // Deny policy with row_filter — deny + row_filter short-circuits to an
-    // access-denied error rather than silently filtering rows.
+    // table_deny short-circuits to an access-denied error.
     server
-        .create_and_assign_policy(
-            "deny-rowfilter-c1",
-            "deny",
-            vec![json!({
-                "obligation_type": "row_filter",
-                "definition": {
-                    "schema": schema,
-                    "table": "orders",
-                    "filter_expression": "tenant = {user.tenant}"
-                }
-            })],
-            ds_id,
-            None,
-        )
+        .create_table_deny("deny-rowfilter-c1", schema, "orders", ds_id, None)
         .await;
 
     let client = server.connect_as("user_c1", "UserPass1!", "ds_c1").await;
@@ -1056,17 +823,11 @@ async fn policy_required_column_access_limits_select_star() {
 
     // Only allow id and name — ssn and salary are not in the allow list
     server
-        .create_and_assign_policy(
+        .create_column_allow(
             "allow-limited-c3",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "employees",
-                    "columns": ["id", "name"],
-                }
-            })],
+            schema,
+            "employees",
+            &["id", "name"],
             ds_id,
             None,
         )
@@ -1130,39 +891,12 @@ async fn deny_overrides_allow_columns() {
 
     // Permit policy allows all columns (including ssn via wildcard)
     server
-        .create_and_assign_policy(
-            "allow-all-c4",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "employees",
-                    "columns": ["*"],
-                }
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_allow("allow-all-c4", schema, "employees", &["*"], ds_id, None)
         .await;
 
     // Deny policy explicitly blocks ssn — deny must win over the wildcard allow
     server
-        .create_and_assign_policy(
-            "deny-ssn-c4",
-            "deny",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "employees",
-                    "columns": ["ssn"],
-                    "action": "deny"
-                }
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_deny("deny-ssn-c4", schema, "employees", &["ssn"], ds_id, None)
         .await;
 
     let client = server.connect_as("user_c4", "UserPass1!", "ds_c4").await;
@@ -1221,38 +955,12 @@ async fn object_access_deny_table() {
 
     // Deny access to the payments table specifically
     server
-        .create_and_assign_policy(
-            "deny-payments-i1",
-            "deny",
-            vec![json!({
-                "obligation_type": "object_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "payments",
-                    "action": "deny"
-                }
-            })],
-            ds_id,
-            None,
-        )
+        .create_table_deny("deny-payments-i1", schema, "payments", ds_id, None)
         .await;
 
     // Allow all columns on the orders table
     server
-        .create_and_assign_policy(
-            "allow-orders-i1",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "orders",
-                    "columns": ["*"],
-                }
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_allow("allow-orders-i1", schema, "orders", &["*"], ds_id, None)
         .await;
 
     let client = server.connect_as("user_i1", "UserPass1!", "ds_i1").await;
@@ -1302,48 +1010,21 @@ async fn deny_overrides_mask() {
 
     // Deny policy — ssn column is denied
     server
-        .create_and_assign_policy(
-            "deny-ssn-i2",
-            "deny",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "customers",
-                    "columns": ["ssn"],
-                    "action": "deny"
-                }
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_deny("deny-ssn-i2", schema, "customers", &["ssn"], ds_id, None)
         .await;
 
     // Permit policy — allows all and includes a mask on ssn
     // Deny should take precedence: ssn must not appear at all, not appear masked.
     server
-        .create_and_assign_policy(
-            "allow-mask-ssn-i2",
-            "permit",
-            vec![
-                json!({
-                    "obligation_type": "column_access",
-                    "definition": {
-                        "schema": schema,
-                        "table": "customers",
-                        "columns": ["*"],
-                    }
-                }),
-                json!({
-                    "obligation_type": "column_mask",
-                    "definition": {
-                        "schema": schema,
-                        "table": "customers",
-                        "column": "ssn",
-                        "mask_expression": "CONCAT('***-**-', RIGHT(ssn, 4))"
-                    }
-                }),
-            ],
+        .create_column_allow("allow-all-i2", schema, "customers", &["*"], ds_id, None)
+        .await;
+    server
+        .create_column_mask(
+            "mask-ssn-i2",
+            schema,
+            "customers",
+            "ssn",
+            "CONCAT('***-**-', RIGHT(ssn, 4))",
             ds_id,
             None,
         )
@@ -1402,30 +1083,17 @@ async fn template_variable_username() {
         .await;
 
     server
-        .create_and_assign_policy(
+        .create_row_filter(
             "username-filter-i3a",
-            "permit",
-            vec![
-                json!({
-                    "obligation_type": "row_filter",
-                    "definition": {
-                        "schema": schema,
-                        "table": "docs",
-                        "filter_expression": "owner = {user.username}"
-                    }
-                }),
-                json!({
-                    "obligation_type": "column_access",
-                    "definition": {
-                        "schema": schema,
-                        "table": "docs",
-                        "columns": ["*"],
-                    }
-                }),
-            ],
+            schema,
+            "docs",
+            "owner = {user.username}",
             ds_id,
             None,
         )
+        .await;
+    server
+        .create_column_allow("allow-all-i3a", schema, "docs", &["*"], ds_id, None)
         .await;
 
     let client = server.connect_as("alice_u", "AlicePass1!", "ds_i3a").await;
@@ -1485,30 +1153,17 @@ async fn template_variable_user_id() {
     server.discover(ds_id, &[schema]).await;
 
     server
-        .create_and_assign_policy(
+        .create_row_filter(
             "uid-filter-i3b",
-            "permit",
-            vec![
-                json!({
-                    "obligation_type": "row_filter",
-                    "definition": {
-                        "schema": schema,
-                        "table": "items",
-                        "filter_expression": "user_uuid = {user.id}"
-                    }
-                }),
-                json!({
-                    "obligation_type": "column_access",
-                    "definition": {
-                        "schema": schema,
-                        "table": "items",
-                        "columns": ["*"],
-                    }
-                }),
-            ],
+            schema,
+            "items",
+            "user_uuid = {user.id}",
             ds_id,
             None,
         )
+        .await;
+    server
+        .create_column_allow("allow-all-i3b", schema, "items", &["*"], ds_id, None)
         .await;
 
     let client = server.connect_as("uid_user", "UidPass1!", "ds_i3b").await;
@@ -1555,30 +1210,17 @@ async fn aggregate_with_row_filter() {
         .await;
 
     server
-        .create_and_assign_policy(
+        .create_row_filter(
             "tenant-filter-i4",
-            "permit",
-            vec![
-                json!({
-                    "obligation_type": "row_filter",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "filter_expression": "tenant = {user.tenant}"
-                    }
-                }),
-                json!({
-                    "obligation_type": "column_access",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "columns": ["*"],
-                    }
-                }),
-            ],
+            schema,
+            "orders",
+            "tenant = {user.tenant}",
             ds_id,
             None,
         )
+        .await;
+    server
+        .create_column_allow("allow-all-i4", schema, "orders", &["*"], ds_id, None)
         .await;
 
     let client = server.connect_as("alice_i4", "AlicePass1!", "ds_i4").await;
@@ -1645,7 +1287,7 @@ async fn user_not_assigned_to_datasource() {
 }
 
 // ===========================================================================
-// I7: Single policy with multiple row_filters on same table (within-policy AND)
+// I7: Two row_filter policies on same table (AND across policies)
 // ===========================================================================
 
 #[tokio::test]
@@ -1673,41 +1315,29 @@ async fn single_policy_multiple_row_filters_same_table() {
         .create_user("user_i7", "UserPass1!", "acme", ds_id)
         .await;
 
-    // A single policy with TWO row_filter obligations on the same table.
-    // Both filters must be satisfied simultaneously (AND semantics within a policy).
+    // Two separate row_filter policies — AND-combined across policies.
     server
-        .create_and_assign_policy(
-            "dual-filter-i7",
-            "permit",
-            vec![
-                json!({
-                    "obligation_type": "row_filter",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "filter_expression": "tenant = {user.tenant}"
-                    }
-                }),
-                json!({
-                    "obligation_type": "row_filter",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "filter_expression": "status = 'active'"
-                    }
-                }),
-                json!({
-                    "obligation_type": "column_access",
-                    "definition": {
-                        "schema": schema,
-                        "table": "orders",
-                        "columns": ["*"],
-                    }
-                }),
-            ],
+        .create_row_filter(
+            "tenant-filter-i7",
+            schema,
+            "orders",
+            "tenant = {user.tenant}",
             ds_id,
             None,
         )
+        .await;
+    server
+        .create_row_filter(
+            "status-filter-i7",
+            schema,
+            "orders",
+            "status = 'active'",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("allow-all-i7", schema, "orders", &["*"], ds_id, None)
         .await;
 
     let client = server.connect_as("user_i7", "UserPass1!", "ds_i7").await;
@@ -1720,7 +1350,7 @@ async fn single_policy_multiple_row_filters_same_table() {
     assert_eq!(
         rows.len(),
         1,
-        "Within-policy AND: only row satisfying both tenant=acme AND status=active"
+        "AND-across-policies: only row satisfying both tenant=acme AND status=active"
     );
     assert_eq!(rows[0][0], "1");
 }
@@ -1759,37 +1389,18 @@ async fn user_specific_vs_wildcard_policy() {
 
     // Wildcard policy: allow all columns (applies to all users)
     server
-        .create_and_assign_policy(
-            "allow-all-i8",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "orders",
-                    "columns": ["*"],
-                }
-            })],
-            ds_id,
-            None, // wildcard — applies to all users
-        )
+        .create_column_allow("allow-all-i8", schema, "orders", &["*"], ds_id, None)
         .await;
 
     // User-specific policy for alice only: restrict to org='acme' rows
     server
-        .create_and_assign_policy(
+        .create_row_filter(
             "alice-only-filter-i8",
-            "permit",
-            vec![json!({
-                "obligation_type": "row_filter",
-                "definition": {
-                    "schema": schema,
-                    "table": "orders",
-                    "filter_expression": "org = 'acme'"
-                }
-            })],
+            schema,
+            "orders",
+            "org = 'acme'",
             ds_id,
-            Some(alice_id), // user-specific assignment
+            Some(alice_id),
         )
         .await;
 
@@ -1845,37 +1456,18 @@ async fn column_glob_pattern_deny() {
 
     // Deny all columns matching "secret_*"
     server
-        .create_and_assign_policy(
+        .create_column_deny(
             "deny-secret-glob-n1",
-            "deny",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "vault",
-                    "columns": ["secret_*"]
-                }
-            })],
+            schema,
+            "vault",
+            &["secret_*"],
             ds_id,
             None,
         )
         .await;
 
     server
-        .create_and_assign_policy(
-            "allow-all-n1",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "vault",
-                    "columns": ["*"],
-                }
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_allow("allow-all-n1", schema, "vault", &["*"], ds_id, None)
         .await;
 
     let client = server.connect_as("user_n1", "UserPass1!", "ds_n1").await;
@@ -1935,20 +1527,7 @@ async fn live_policy_update_without_reconnect() {
 
     // Initial policy: allow all columns so queries work
     server
-        .create_and_assign_policy(
-            "allow-all-n4",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "orders",
-                    "columns": ["*"],
-                }
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_allow("allow-all-n4", schema, "orders", &["*"], ds_id, None)
         .await;
 
     // Establish a connection BEFORE adding the deny policy
@@ -1970,21 +1549,7 @@ async fn live_policy_update_without_reconnect() {
     // ProxyHandler::rebuild_contexts_for_datasource will rebuild the SessionContext
     // for active connections in the background.
     server
-        .create_and_assign_policy(
-            "deny-tenant-n4",
-            "deny",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "orders",
-                    "columns": ["tenant"],
-                    "action": "deny"
-                }
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_deny("deny-tenant-n4", schema, "orders", &["tenant"], ds_id, None)
         .await;
 
     // Poll until the background rebuild takes effect (max 5s).
@@ -2034,20 +1599,7 @@ async fn policy_required_with_allow_table_visible() {
 
     // Only grant access to the orders table; secrets has no permit policy
     server
-        .create_and_assign_policy(
-            "allow-orders-n6",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "orders",
-                    "columns": ["*"],
-                }
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_allow("allow-orders-n6", schema, "orders", &["*"], ds_id, None)
         .await;
 
     let client = server.connect_as("user_n6", "UserPass1!", "ds_n6").await;
@@ -2108,25 +1660,14 @@ async fn tc_join_01_join_column_collision() {
 
     // Allow all columns on orders, allow only name (not email) on customers
     server
-        .create_and_assign_policy(
-            "orders-all-join01",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "orders", "columns": ["*"]}
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_allow("orders-all-join01", schema, "orders", &["*"], ds_id, None)
         .await;
     server
-        .create_and_assign_policy(
+        .create_column_allow(
             "customers-name-join01",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "customers", "columns": ["id", "name"]}
-            })],
+            schema,
+            "customers",
+            &["id", "name"],
             ds_id,
             None,
         )
@@ -2134,13 +1675,11 @@ async fn tc_join_01_join_column_collision() {
 
     // Deny email on customers only
     server
-        .create_and_assign_policy(
+        .create_column_deny(
             "deny-customers-email-join01",
-            "deny",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "customers", "columns": ["email"], "action": "deny"}
-            })],
+            schema,
+            "customers",
+            &["email"],
             ds_id,
             None,
         )
@@ -2190,20 +1729,14 @@ async fn tc_zt_01_implicit_blackout() {
         .create_user("user_zt01", "UserPass1!", "acme", ds_id)
         .await;
 
-    // Permit policy with row_filter only — no column_access allow obligation
+    // row_filter only — no column_allow policy
     // In zero-trust mode this activates an empty whitelist → AllColumnsDenied
     server
-        .create_and_assign_policy(
+        .create_row_filter(
             "row-filter-only-zt01",
-            "permit",
-            vec![json!({
-                "obligation_type": "row_filter",
-                "definition": {
-                    "schema": schema,
-                    "table": "users",
-                    "filter_expression": "tenant = {user.tenant}"
-                }
-            })],
+            schema,
+            "users",
+            "tenant = {user.tenant}",
             ds_id,
             None,
         )
@@ -2247,17 +1780,11 @@ async fn tc_zt_02_explicit_whitelist() {
         .await;
 
     server
-        .create_and_assign_policy(
+        .create_column_allow(
             "whitelist-id-name-zt02",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "users",
-                    "columns": ["id", "name"],
-                }
-            })],
+            schema,
+            "users",
+            &["id", "name"],
             ds_id,
             None,
         )
@@ -2310,19 +1837,21 @@ async fn tc_zt_03_wildcard_whitelist() {
         .await;
 
     server
-        .create_and_assign_policy(
+        .create_column_allow(
             "wildcard-whitelist-zt03",
-            "permit",
-            vec![
-                json!({
-                    "obligation_type": "column_access",
-                    "definition": {"schema": schema, "table": "orders", "columns": ["*"]}
-                }),
-                json!({
-                    "obligation_type": "row_filter",
-                    "definition": {"schema": schema, "table": "orders", "filter_expression": "tenant = {user.tenant}"}
-                }),
-            ],
+            schema,
+            "orders",
+            &["*"],
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_row_filter(
+            "row-filter-zt03",
+            schema,
+            "orders",
+            "tenant = {user.tenant}",
             ds_id,
             None,
         )
@@ -2376,15 +1905,13 @@ async fn tc_deny_01_deny_wins() {
         .create_user("user_deny01", "UserPass1!", "default", ds_id)
         .await;
 
-    // Policy A: allow email (and all other columns)
+    // Policy A: allow id, email, name
     server
-        .create_and_assign_policy(
+        .create_column_allow(
             "allow-email-deny01",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "contacts", "columns": ["id", "email", "name"]}
-            })],
+            schema,
+            "contacts",
+            &["id", "email", "name"],
             ds_id,
             None,
         )
@@ -2392,13 +1919,11 @@ async fn tc_deny_01_deny_wins() {
 
     // Policy B: deny email
     server
-        .create_and_assign_policy(
+        .create_column_deny(
             "deny-email-deny01",
-            "deny",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "contacts", "columns": ["email"], "action": "deny"}
-            })],
+            schema,
+            "contacts",
+            &["email"],
             ds_id,
             None,
         )
@@ -2452,30 +1977,12 @@ async fn tc_deny_02_absolute_veto() {
 
     // Policy A: allow id
     server
-        .create_and_assign_policy(
-            "allow-id-deny02",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "records", "columns": ["id"]}
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_allow("allow-id-deny02", schema, "records", &["id"], ds_id, None)
         .await;
 
     // Policy B: deny all columns with wildcard
     server
-        .create_and_assign_policy(
-            "deny-all-deny02",
-            "deny",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "records", "columns": ["*"], "action": "deny"}
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_deny("deny-all-deny02", schema, "records", &["*"], ds_id, None)
         .await;
 
     let client = server
@@ -2519,27 +2026,16 @@ async fn tc_glob_01_suffix_glob() {
 
     // Allow all columns
     server
-        .create_and_assign_policy(
-            "allow-all-glob01",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "events", "columns": ["*"]}
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_allow("allow-all-glob01", schema, "events", &["*"], ds_id, None)
         .await;
 
     // Deny *_at columns (suffix glob)
     server
-        .create_and_assign_policy(
+        .create_column_deny(
             "deny-timestamps-glob01",
-            "deny",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "events", "columns": ["*_at"], "action": "deny"}
-            })],
+            schema,
+            "events",
+            &["*_at"],
             ds_id,
             None,
         )
@@ -2592,28 +2088,17 @@ async fn tc_glob_03_case_sensitivity() {
 
     // Allow all columns
     server
-        .create_and_assign_policy(
-            "allow-all-glob03",
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "contacts", "columns": ["*"]}
-            })],
-            ds_id,
-            None,
-        )
+        .create_column_allow("allow-all-glob03", schema, "contacts", &["*"], ds_id, None)
         .await;
 
     // Deny "Email" (capitalized) — Postgres columns are lowercase "email"
     // Case-sensitive matching means this deny should NOT strip the email column
     server
-        .create_and_assign_policy(
+        .create_column_deny(
             "deny-Email-glob03",
-            "deny",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {"schema": schema, "table": "contacts", "columns": ["Email"]}
-            })],
+            schema,
+            "contacts",
+            &["Email"],
             ds_id,
             None,
         )
@@ -2672,17 +2157,11 @@ async fn tc_rf_01_neq_operator_quoted_column() {
     // row_filter using != and a double-quoted column identifier — mirrors
     // the "state-filter" policy stored in the admin DB.
     server
-        .create_and_assign_policy(
+        .create_row_filter(
             "state-filter-rf01",
-            "permit",
-            vec![json!({
-                "obligation_type": "row_filter",
-                "definition": {
-                    "schema": schema,
-                    "table": "locations",
-                    "filter_expression": "\"state\" != 'WY'"
-                }
-            })],
+            schema,
+            "locations",
+            "\"state\" != 'WY'",
             ds_id,
             None,
         )
@@ -2741,17 +2220,11 @@ async fn tc_audit_01_success_audit_status() {
         .await;
 
     server
-        .create_and_assign_policy(
+        .create_row_filter(
             "audit01-permit",
-            "permit",
-            vec![json!({
-                "obligation_type": "row_filter",
-                "definition": {
-                    "schema": schema,
-                    "table": "sales",
-                    "filter_expression": "tenant = {user.tenant}"
-                }
-            })],
+            schema,
+            "sales",
+            "tenant = {user.tenant}",
             ds_id,
             Some(user_id),
         )
@@ -2834,22 +2307,9 @@ async fn tc_audit_02_denied_audit_status() {
         .create_user("user_audit02", "UserPass1!", "default", ds_id)
         .await;
 
-    // Deny policy that blocks queries on this table
+    // table_deny policy that blocks queries on this table
     server
-        .create_and_assign_policy(
-            "audit02-deny",
-            "deny",
-            vec![json!({
-                "obligation_type": "row_filter",
-                "definition": {
-                    "schema": schema,
-                    "table": "accounts",
-                    "filter_expression": "region = 'eu'"
-                }
-            })],
-            ds_id,
-            Some(user_id),
-        )
+        .create_table_deny("audit02-deny", schema, "accounts", ds_id, Some(user_id))
         .await;
 
     let client = server
@@ -2976,22 +2436,9 @@ async fn tc_audit_04_status_filter() {
         .create_user("user_audit04", "UserPass1!", "default", ds_id)
         .await;
 
-    // Deny policy
+    // table_deny policy
     server
-        .create_and_assign_policy(
-            "audit04-deny",
-            "deny",
-            vec![json!({
-                "obligation_type": "row_filter",
-                "definition": {
-                    "schema": schema,
-                    "table": "data",
-                    "filter_expression": "category = 'a'"
-                }
-            })],
-            ds_id,
-            Some(user_id),
-        )
+        .create_table_deny("audit04-deny", schema, "data", ds_id, Some(user_id))
         .await;
 
     let client = server

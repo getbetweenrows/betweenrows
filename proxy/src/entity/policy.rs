@@ -9,8 +9,12 @@ pub struct Model {
     #[sea_orm(unique)]
     pub name: String,
     pub description: Option<String>,
-    /// "permit" or "deny"
-    pub effect: String,
+    /// "row_filter" | "column_mask" | "column_allow" | "column_deny" | "table_deny"
+    pub policy_type: String,
+    /// JSON array of TargetEntry (schemas, tables, columns?)
+    pub targets: String,
+    /// JSON definition (filter_expression or mask_expression). Null for non-expression types.
+    pub definition: Option<String>,
     pub is_enabled: bool,
     pub version: i32,
     pub created_by: Uuid,
@@ -23,8 +27,6 @@ pub struct Model {
 pub enum Relation {
     #[sea_orm(has_many = "super::policy_version::Entity")]
     PolicyVersion,
-    #[sea_orm(has_many = "super::policy_obligation::Entity")]
-    PolicyObligation,
     #[sea_orm(has_many = "super::policy_assignment::Entity")]
     PolicyAssignment,
 }
@@ -32,12 +34,6 @@ pub enum Relation {
 impl Related<super::policy_version::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::PolicyVersion.def()
-    }
-}
-
-impl Related<super::policy_obligation::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::PolicyObligation.def()
     }
 }
 

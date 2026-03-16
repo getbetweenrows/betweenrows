@@ -15,120 +15,110 @@ function renderForm(props: Partial<Parameters<typeof PolicyForm>[0]> = {}) {
   )
 }
 
-describe('PolicyForm — deny + column_mask validation', () => {
-  it('column_mask option is visible when effect is permit', async () => {
+describe('PolicyForm — policy type selector', () => {
+  it('renders all 5 policy type options', () => {
     renderForm()
-    // Add an obligation — effect defaults to permit
-    await userEvent.click(screen.getByText('+ Add obligation'))
-    const comboboxes = screen.getAllByRole('combobox')
-    // The obligation type select is the last combobox
-    const obligationTypeSelect = comboboxes[comboboxes.length - 1]
-    const options = Array.from(obligationTypeSelect.querySelectorAll('option')).map(o => o.value)
+    const select = screen.getAllByRole('combobox')[0]
+    const options = Array.from(select.querySelectorAll('option')).map((o) => o.value)
+    expect(options).toContain('row_filter')
     expect(options).toContain('column_mask')
+    expect(options).toContain('column_allow')
+    expect(options).toContain('column_deny')
+    expect(options).toContain('table_deny')
   })
 
-  it('column_mask option is hidden when effect is deny', async () => {
+  it('shows deny note when column_deny is selected', async () => {
     renderForm()
-    // Switch effect to deny
-    const effectSelect = screen.getAllByRole('combobox')[0]
-    await userEvent.selectOptions(effectSelect, 'deny')
-    // Add an obligation
-    await userEvent.click(screen.getByText('+ Add obligation'))
-    const typeSelects = screen.getAllByRole('combobox')
-    // The obligation type select is the last combobox
-    const obligationTypeSelect = typeSelects[typeSelects.length - 1]
-    const options = Array.from(obligationTypeSelect.querySelectorAll('option')).map(o => o.value)
-    expect(options).not.toContain('column_mask')
+    const select = screen.getAllByRole('combobox')[0]
+    await userEvent.selectOptions(select, 'column_deny')
+    expect(screen.getByText(/Deny policies short-circuit or strip columns/i)).toBeTruthy()
   })
 
-  it('switching effect to deny removes existing column_mask obligations', async () => {
+  it('shows filter expression field when row_filter is selected', async () => {
     renderForm()
-    // Add a column_mask obligation while effect is permit
-    await userEvent.click(screen.getByText('+ Add obligation'))
-    const typeSelects = screen.getAllByRole('combobox')
-    const obligationTypeSelect = typeSelects[typeSelects.length - 1]
-    await userEvent.selectOptions(obligationTypeSelect, 'column_mask')
-    // Verify the column_mask obligation is shown
-    expect(screen.getByText('Obligation 1')).toBeTruthy()
-    // Switch effect to deny
-    const effectSelect = screen.getAllByRole('combobox')[0]
-    await userEvent.selectOptions(effectSelect, 'deny')
-    // The column_mask obligation should have been removed
-    expect(screen.queryByText('Obligation 1')).toBeNull()
+    const select = screen.getAllByRole('combobox')[0]
+    await userEvent.selectOptions(select, 'row_filter')
+    expect(screen.getByText(/Filter Expression/i)).toBeTruthy()
+    expect(screen.queryByText(/Mask Expression/i)).toBeNull()
   })
 
-  it('shows a note about column masking when effect is deny', async () => {
+  it('shows mask expression field when column_mask is selected', async () => {
     renderForm()
-    const effectSelect = screen.getAllByRole('combobox')[0]
-    await userEvent.selectOptions(effectSelect, 'deny')
-    expect(screen.getByText(/Column masking is not available on deny policies/i)).toBeTruthy()
+    const select = screen.getAllByRole('combobox')[0]
+    await userEvent.selectOptions(select, 'column_mask')
+    expect(screen.getByText(/Mask Expression/i)).toBeTruthy()
+    expect(screen.queryByText(/Filter Expression/i)).toBeNull()
+  })
+
+  it('hides definition fields when table_deny is selected', async () => {
+    renderForm()
+    const select = screen.getAllByRole('combobox')[0]
+    await userEvent.selectOptions(select, 'table_deny')
+    expect(screen.queryByText(/Filter Expression/i)).toBeNull()
+    expect(screen.queryByText(/Mask Expression/i)).toBeNull()
   })
 })
 
-describe('PolicyForm — object_access obligation type', () => {
-  it('object_access option is available in the type selector', async () => {
+describe('PolicyForm — targets', () => {
+  it('starts with one target entry', () => {
     renderForm()
-    await userEvent.click(screen.getByText('+ Add obligation'))
-    const typeSelects = screen.getAllByRole('combobox')
-    const obligationTypeSelect = typeSelects[typeSelects.length - 1]
-    const options = Array.from(obligationTypeSelect.querySelectorAll('option')).map(o => o.value)
-    expect(options).toContain('object_access')
+    expect(screen.getByText('Target 1')).toBeTruthy()
   })
 
-  it('object_access is available on deny policies', async () => {
+  it('adds a target when "+ Add target" is clicked', async () => {
     renderForm()
-    const effectSelect = screen.getAllByRole('combobox')[0]
-    await userEvent.selectOptions(effectSelect, 'deny')
-    await userEvent.click(screen.getByText('+ Add obligation'))
-    const typeSelects = screen.getAllByRole('combobox')
-    const obligationTypeSelect = typeSelects[typeSelects.length - 1]
-    const options = Array.from(obligationTypeSelect.querySelectorAll('option')).map(o => o.value)
-    expect(options).toContain('object_access')
+    await userEvent.click(screen.getByText('+ Add target'))
+    expect(screen.getByText('Target 2')).toBeTruthy()
   })
 
-  it('object_access shows schema field and optional table field', async () => {
+  it('removes a target when Remove is clicked', async () => {
     renderForm()
-    await userEvent.click(screen.getByText('+ Add obligation'))
-    const typeSelects = screen.getAllByRole('combobox')
-    const obligationTypeSelect = typeSelects[typeSelects.length - 1]
-    await userEvent.selectOptions(obligationTypeSelect, 'object_access')
-    // Should show the hint text for object_access
-    expect(screen.getByText(/Hides the entire schema/i)).toBeTruthy()
-    // Table field should have "leave blank" placeholder hint
-    expect(document.body.textContent).toMatch(/optional/i)
+    await userEvent.click(screen.getByText('+ Add target'))
+    expect(screen.getByText('Target 2')).toBeTruthy()
+    const removeButtons = screen.getAllByText('Remove')
+    await userEvent.click(removeButtons[0])
+    expect(screen.queryByText('Target 2')).toBeNull()
+  })
+
+  it('shows columns field for column_allow', async () => {
+    renderForm()
+    const select = screen.getAllByRole('combobox')[0]
+    await userEvent.selectOptions(select, 'column_allow')
+    expect(screen.getByText('Columns')).toBeTruthy()
+  })
+
+  it('hides columns field for row_filter', async () => {
+    renderForm()
+    const select = screen.getAllByRole('combobox')[0]
+    await userEvent.selectOptions(select, 'row_filter')
+    expect(screen.queryByText('Columns')).toBeNull()
+  })
+
+  it('hides columns field for table_deny', async () => {
+    renderForm()
+    const select = screen.getAllByRole('combobox')[0]
+    await userEvent.selectOptions(select, 'table_deny')
+    expect(screen.queryByText('Columns')).toBeNull()
   })
 })
 
-describe('PolicyForm — submits object_access obligation correctly', () => {
-  it('omits table field when blank for schema-level deny', async () => {
+describe('PolicyForm — submission', () => {
+  it('calls onSubmit with policy_type and targets', async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined)
     renderForm({ onSubmit })
 
-    // Add object_access obligation
-    await userEvent.click(screen.getByText('+ Add obligation'))
-    const typeSelects = screen.getAllByRole('combobox')
-    await userEvent.selectOptions(typeSelects[typeSelects.length - 1], 'object_access')
+    // Name is required — fill it in
+    const nameInput = screen.getAllByRole('textbox')[0]
+    await userEvent.clear(nameInput)
+    await userEvent.type(nameInput, 'my-policy')
 
-    // Set schema
-    const textboxes = screen.getAllByRole('textbox')
-    // Find the schema input (has placeholder 'analytics')
-    const schemaInput = textboxes.find(i => (i as HTMLInputElement).placeholder === 'analytics')
-    if (schemaInput) {
-      await userEvent.clear(schemaInput)
-      await userEvent.type(schemaInput, 'analytics')
-    }
-
-    // Submit
     fireEvent.submit(document.querySelector('form')!)
-    // Wait for onSubmit to be called
-    await new Promise(r => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
 
     if (onSubmit.mock.calls.length > 0) {
       const values = onSubmit.mock.calls[0][0]
-      const obl = values.obligations[0]
-      expect(obl.obligation_type).toBe('object_access')
-      expect(obl.definition.action).toBe('deny')
-      expect(obl.definition.table).toBeUndefined()
+      expect(values.policy_type).toBe('row_filter')
+      expect(Array.isArray(values.targets)).toBe(true)
     }
   })
 })

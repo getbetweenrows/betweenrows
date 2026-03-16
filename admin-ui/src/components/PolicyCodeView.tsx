@@ -10,15 +10,12 @@ function buildCodeObject(policy: PolicyResponse, assignments: PolicyAssignmentRe
   return {
     id: policy.id,
     name: policy.name,
-    effect: policy.effect,
+    policy_type: policy.policy_type,
     description: policy.description ?? null,
     is_enabled: policy.is_enabled,
     version: policy.version,
-    obligations: (policy.obligations ?? []).map((o) => ({
-      id: o.id,
-      type: o.obligation_type,
-      ...o.definition,
-    })),
+    targets: policy.targets,
+    definition: policy.definition ?? null,
     assignments: assignments.map((a) => ({
       id: a.id,
       datasource_id: a.data_source_id,

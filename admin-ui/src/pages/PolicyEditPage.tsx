@@ -29,10 +29,16 @@ export function PolicyEditPage() {
       await updatePolicy(policyId, {
         name: values.name,
         description: values.description || undefined,
-        effect: values.effect,
+        policy_type: values.policy_type,
         is_enabled: values.is_enabled,
+        targets: values.targets,
+        definition:
+          values.policy_type === 'row_filter'
+            ? { filter_expression: values.filter_expression }
+            : values.policy_type === 'column_mask'
+              ? { mask_expression: values.mask_expression }
+              : null,
         version: policy.version,
-        obligations: values.obligations,
       })
       queryClient.invalidateQueries({ queryKey: ['policies'] })
       queryClient.invalidateQueries({ queryKey: ['policy', policyId] })

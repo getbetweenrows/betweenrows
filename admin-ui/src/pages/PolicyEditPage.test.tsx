@@ -43,7 +43,7 @@ describe('PolicyEditPage', () => {
   })
 
   it('renders form pre-populated with policy data', async () => {
-    const policy = makePolicy({ id: 'p-1', name: 'row-filter', effect: 'permit', version: 2 })
+    const policy = makePolicy({ id: 'p-1', name: 'row-filter', policy_type: 'row_filter', version: 2 })
     mockGetPolicy.mockResolvedValue(policy)
     renderEditPage()
     await waitFor(() => expect(screen.getByDisplayValue('row-filter')).toBeInTheDocument())
@@ -66,7 +66,7 @@ describe('PolicyEditPage', () => {
   })
 
   it('calls updatePolicy with correct version on submit', async () => {
-    const policy = makePolicy({ id: 'p-1', name: 'my-policy', effect: 'permit', version: 3 })
+    const policy = makePolicy({ id: 'p-1', name: 'my-policy', policy_type: 'row_filter', version: 3 })
     mockGetPolicy.mockResolvedValue(policy)
     mockUpdatePolicy.mockResolvedValue({ ...policy, version: 4 })
 
@@ -78,6 +78,7 @@ describe('PolicyEditPage', () => {
     await waitFor(() => expect(mockUpdatePolicy).toHaveBeenCalled())
     expect(mockUpdatePolicy.mock.calls[0][0]).toBe('p-1')
     expect(mockUpdatePolicy.mock.calls[0][1].version).toBe(3)
+    expect(mockUpdatePolicy.mock.calls[0][1].policy_type).toBe('row_filter')
   })
 
   it('shows conflict message on 409 response', async () => {

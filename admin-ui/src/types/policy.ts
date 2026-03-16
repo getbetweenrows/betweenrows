@@ -1,14 +1,9 @@
-export interface ObligationRequest {
-  obligation_type: string
-  definition: Record<string, unknown>
-}
+export type PolicyType = 'row_filter' | 'column_mask' | 'column_allow' | 'column_deny' | 'table_deny'
 
-export interface ObligationResponse {
-  id: string
-  obligation_type: string
-  definition: Record<string, unknown>
-  created_at: string
-  updated_at: string
+export interface TargetEntry {
+  schemas: string[]
+  tables: string[]
+  columns?: string[]
 }
 
 export interface PolicyAssignmentResponse {
@@ -27,32 +22,36 @@ export interface PolicyResponse {
   id: string
   name: string
   description: string | null
-  effect: 'permit' | 'deny'
+  policy_type: string
+  targets: TargetEntry[]
+  definition: Record<string, string> | null
   is_enabled: boolean
   version: number
-  obligation_count: number
   assignment_count: number
-  obligations?: ObligationResponse[]
-  assignments?: PolicyAssignmentResponse[]
+  created_by: string
+  updated_by: string
   created_at: string
   updated_at: string
+  assignments?: PolicyAssignmentResponse[]
 }
 
 export interface CreatePolicyPayload {
   name: string
   description?: string
-  effect: 'permit' | 'deny'
+  policy_type: PolicyType
   is_enabled: boolean
-  obligations: ObligationRequest[]
+  targets: TargetEntry[]
+  definition?: Record<string, string> | null
 }
 
 export interface UpdatePolicyPayload {
   name?: string
   description?: string
-  effect?: 'permit' | 'deny'
+  policy_type?: PolicyType
   is_enabled?: boolean
+  targets?: TargetEntry[]
+  definition?: Record<string, string> | null
   version: number
-  obligations?: ObligationRequest[]
 }
 
 export interface AssignPolicyPayload {

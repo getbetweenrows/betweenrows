@@ -39,19 +39,13 @@ async fn setup_open_datasource(
         .create_user("testuser", TEST_PASS, "default", ds_id)
         .await;
 
-    // In open mode, add a basic column_access allow-all policy so queries work
+    // In open mode, add a basic column_allow policy so queries work
     server
         .create_and_assign_policy(
             &format!("allow-all-{schema}"),
-            "permit",
-            vec![json!({
-                "obligation_type": "column_access",
-                "definition": {
-                    "schema": schema,
-                    "table": "*",
-                    "columns": ["*"],
-                }
-            })],
+            "column_allow",
+            vec![json!({"schemas": [schema], "tables": ["*"], "columns": ["*"]})],
+            None,
             ds_id,
             None,
         )

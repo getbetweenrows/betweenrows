@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { screen, fireEvent } from '@testing-library/react'
 import { renderWithProviders } from '../test/test-utils'
-import { makePolicy, makePolicyAssignment, makeObligation } from '../test/factories'
+import { makePolicy, makePolicyAssignment } from '../test/factories'
 import { PolicyCodeView } from './PolicyCodeView'
 
 beforeEach(() => {
@@ -36,18 +36,18 @@ describe('PolicyCodeView', () => {
     fireEvent.click(screen.getByText('View as code'))
     const pre = document.querySelector('pre')!
     expect(pre.textContent).toContain('name:')
-    expect(pre.textContent).toContain('effect:')
+    expect(pre.textContent).toContain('policy_type:')
   })
 
   it('shows valid JSON when JSON toggle is clicked', () => {
-    renderCodeView({ name: 'test-policy', effect: 'permit' })
+    renderCodeView({ name: 'test-policy', policy_type: 'row_filter' })
     fireEvent.click(screen.getByText('View as code'))
     fireEvent.click(screen.getByText('JSON'))
     const pre = document.querySelector('pre')!
     expect(() => JSON.parse(pre.textContent!)).not.toThrow()
     const parsed = JSON.parse(pre.textContent!)
     expect(parsed.name).toBe('test-policy')
-    expect(parsed.effect).toBe('permit')
+    expect(parsed.policy_type).toBe('row_filter')
   })
 
   it('copy button calls navigator.clipboard.writeText', () => {
@@ -57,30 +57,28 @@ describe('PolicyCodeView', () => {
     expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1)
   })
 
-  it('code includes policy name, effect, and version', () => {
-    renderCodeView({ name: 'my-policy', effect: 'deny', version: 3 })
+  it('code includes policy name, policy_type, and version', () => {
+    renderCodeView({ name: 'my-policy', policy_type: 'column_deny', version: 3 })
     fireEvent.click(screen.getByText('View as code'))
     fireEvent.click(screen.getByText('JSON'))
     const parsed = JSON.parse(document.querySelector('pre')!.textContent!)
     expect(parsed.name).toBe('my-policy')
-    expect(parsed.effect).toBe('deny')
+    expect(parsed.policy_type).toBe('column_deny')
     expect(parsed.version).toBe(3)
   })
 
-  it('obligations show flattened definition fields', () => {
-    const obl = makeObligation({
-      id: 'obl-1',
-      obligation_type: 'row_filter',
-      definition: { filter: 'tenant_id = 1' },
+  it('code includes targets and definition', () => {
+    const policy = makePolicy({
+      policy_type: 'row_filter',
+      targets: [{ schemas: ['public'], tables: ['orders'] }],
+      definition: { filter_expression: 'tenant = 1' },
     })
-    const policy = makePolicy({ obligations: [obl] })
     renderWithProviders(<PolicyCodeView policy={policy} assignments={[]} />)
     fireEvent.click(screen.getByText('View as code'))
     fireEvent.click(screen.getByText('JSON'))
     const parsed = JSON.parse(document.querySelector('pre')!.textContent!)
-    expect(parsed.obligations).toHaveLength(1)
-    expect(parsed.obligations[0].type).toBe('row_filter')
-    expect(parsed.obligations[0].filter).toBe('tenant_id = 1')
+    expect(parsed.targets).toHaveLength(1)
+    expect(parsed.definition.filter_expression).toBe('tenant = 1')
   })
 
   it('assignments show datasource and user names', () => {

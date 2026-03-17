@@ -141,7 +141,7 @@ async fn run_discovery_job(
             let mut store = state.job_store.lock().await;
             store.complete(&job_id, data);
         }
-        Err(e) if cancel.is_cancelled() => {
+        Err(_e) if cancel.is_cancelled() => {
             send(DiscoveryEvent::Cancelled);
             let mut store = state.job_store.lock().await;
             store.fail(&job_id, "cancelled".to_string());

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-03-16
+
+### Added
+- **Flat policy type model** — replaced the obligation model with a flat `policy_type` field
+  - 5 types: `row_filter`, `column_mask`, `column_allow`, `column_deny`, `table_deny`
+  - Removed `column_access` action field; type alone determines behavior
+  - 5 new migrations (019–023) to migrate existing schema
+- **Zero-trust column model** — qualified projection for JOINs; per-user column visibility enforcement
+- **Cast support** — SQL type cast expressions now handled in query processing
+- **Catalog hints** — contextual hints surfaced in the catalog discovery UI
+- **Policy-centric assignment panel** — rule assignment UI redesigned around policies rather than datasources
+- **Datasource assignment on create** — assign a datasource when creating a new rule
+- **Audit status tracking** — queries now record a status field in the audit log
+- **Audit write rejections** — rejected write queries are now captured in the audit log
+- **Container-based integration tests** — replaced manual test scripts with a Docker-based test suite
+
+### Fixed
+- **Column mask and row filter bugs** — fixed incorrect mask application and cross-policy row filter interactions
+- **Audit duration and rewritten query** — fixed these fields not being recorded correctly
+- **SPA routing** — production build now serves `index.html` for client-side routes
+
+### Infrastructure
+- **LICENSE** — added license file
+
 ## [0.4.0] - 2026-03-08
 
 ### Added

@@ -67,7 +67,7 @@ Policy CRUD handlers also call `state.proxy_handler.rebuild_contexts_for_datasou
 - **column_mask** — replaces the column `Expr` in the top-level `Projection` with an aliased mask expression. Parsed synchronously via `sql_ast_to_df_expr(..., Some(ctx))` — sqlparser converts the mask template to a DataFusion `Expr` using the session's `FunctionRegistry` for built-in function lookup (RIGHT, LEFT, UPPER, LOWER, CONCAT, COALESCE, etc.). No standalone SQL plan is created.
 - **column_allow** — specifies which columns a user may see for matching tables. In `policy_required` mode, a `column_allow` policy is the only type that grants table access; without one, the table receives `Filter(lit(false))`.
 - **column_deny** — strips listed columns from the top-level `Projection`. Does NOT short-circuit the query. If all selected columns are stripped, returns SQLSTATE `42501` (insufficient_privilege).
-- **table_deny** — short-circuits on the first matching table/schema; query is rejected with a descriptive error before plan execution.
+- **table_deny** — denied tables are removed from the catalog at connection time (404-not-403 principle). Queries fail with "table not found" rather than "access denied" to avoid leaking metadata about the existence of denied tables. Audit status is "error", not "denied".
 
 **Policy type encodes effect**: `column_deny` and `table_deny` are deny types (`policy_type.is_deny() == true`); the others are permit types. There is no separate `effect` field.
 

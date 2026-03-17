@@ -21,9 +21,6 @@ vi.mock('../api/users', () => ({
 
 vi.mock('../api/policies', () => ({
   listDatasourcePolicies: vi.fn(),
-  assignPolicy: vi.fn(),
-  removeAssignment: vi.fn(),
-  listPolicies: vi.fn(),
 }))
 
 import {
@@ -33,7 +30,7 @@ import {
   getDataSourceUsers,
 } from '../api/datasources'
 import { listUsers } from '../api/users'
-import { listDatasourcePolicies, listPolicies } from '../api/policies'
+import { listDatasourcePolicies } from '../api/policies'
 
 const mockGetDataSource = getDataSource as ReturnType<typeof vi.fn>
 const mockUpdateDataSource = updateDataSource as ReturnType<typeof vi.fn>
@@ -41,7 +38,6 @@ const mockGetTypes = getDataSourceTypes as ReturnType<typeof vi.fn>
 const mockGetDsUsers = getDataSourceUsers as ReturnType<typeof vi.fn>
 const mockListUsers = listUsers as ReturnType<typeof vi.fn>
 const mockListDsPolicies = listDatasourcePolicies as ReturnType<typeof vi.fn>
-const mockListPolicies = listPolicies as ReturnType<typeof vi.fn>
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -49,7 +45,6 @@ beforeEach(() => {
   mockGetDsUsers.mockResolvedValue([])
   mockListUsers.mockResolvedValue({ data: [], total: 0, page: 1, page_size: 100 })
   mockListDsPolicies.mockResolvedValue([])
-  mockListPolicies.mockResolvedValue({ data: [], total: 0, page: 1, page_size: 100 })
 })
 
 // Wrap DataSourceEditPage in a Route so useParams works correctly
@@ -104,6 +99,17 @@ describe('DataSourceEditPage', () => {
     renderEditPage()
 
     await waitFor(() => screen.getByRole('button', { name: /manage catalog/i }))
+  })
+
+  it('renders read-only Policy Assignments section', async () => {
+    const ds = makeDataSource({ id: 'ds-1', name: 'prod-db', ds_type: 'postgres' })
+    mockGetDataSource.mockResolvedValue(ds)
+
+    renderEditPage()
+
+    await waitFor(() => expect(screen.getByText('Policy Assignments')).toBeInTheDocument())
+    expect(screen.getByText(/manage assignments from the policy edit page/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /assign policy/i })).toBeNull()
   })
 
   it('submits update on save', async () => {

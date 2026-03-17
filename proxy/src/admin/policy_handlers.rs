@@ -584,6 +584,23 @@ pub async fn assign_policy(
         .map_err(ApiErr::internal)?
         .ok_or_else(|| ApiErr::not_found("Policy not found"))?;
 
+    // SQLite treats NULL != NULL in unique indexes, so a duplicate (policy, ds, NULL user)
+    // would not be caught by the DB constraint. Check explicitly before inserting.
+    if body.user_id.is_none() {
+        let existing = policy_assignment::Entity::find()
+            .filter(policy_assignment::Column::PolicyId.eq(body.policy_id))
+            .filter(policy_assignment::Column::DataSourceId.eq(ds_id))
+            .filter(policy_assignment::Column::UserId.is_null())
+            .one(&state.db)
+            .await
+            .map_err(ApiErr::internal)?;
+        if existing.is_some() {
+            return Err(ApiErr::conflict(
+                "This policy is already assigned to this datasource for all users",
+            ));
+        }
+    }
+
     let now = Utc::now().naive_utc();
     let txn = state.db.begin().await.map_err(ApiErr::internal)?;
 

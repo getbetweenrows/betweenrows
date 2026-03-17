@@ -102,6 +102,71 @@ describe('PolicyForm — targets', () => {
   })
 })
 
+describe('PolicyForm — comma input', () => {
+  it('preserves trailing comma while typing (does not eat it)', async () => {
+    renderForm()
+    const inputs = screen.getAllByRole('textbox')
+    // schemas input is the first input inside the target card
+    const schemasInput = inputs.find((el) => (el as HTMLInputElement).placeholder === 'public, analytics')!
+    await userEvent.clear(schemasInput)
+    await userEvent.type(schemasInput, 'public,')
+    expect((schemasInput as HTMLInputElement).value).toBe('public,')
+  })
+
+  it('chip click appends value and updates input', async () => {
+    const hints = {
+      schemas: ['analytics'],
+      tables: new Map<string, string[]>(),
+      columns: new Map<string, string[]>(),
+    }
+    renderForm({ catalogHints: hints })
+    const chip = screen.getByRole('button', { name: 'analytics' })
+    await userEvent.click(chip)
+    const schemasInput = screen.getAllByRole('textbox').find(
+      (el) => (el as HTMLInputElement).placeholder === 'public, analytics',
+    )!
+    expect((schemasInput as HTMLInputElement).value).toBe('analytics')
+  })
+})
+
+describe('PolicyForm — hint filter input', () => {
+  it('shows filter input when hint count exceeds threshold', () => {
+    const manySchemas = Array.from({ length: 16 }, (_, i) => `schema_${i}`)
+    const hints = {
+      schemas: manySchemas,
+      tables: new Map<string, string[]>(),
+      columns: new Map<string, string[]>(),
+    }
+    renderForm({ catalogHints: hints })
+    expect(screen.getByPlaceholderText('Filter schemas…')).toBeInTheDocument()
+  })
+
+  it('does not show filter input when hint count is at or below threshold', () => {
+    const fewSchemas = Array.from({ length: 15 }, (_, i) => `schema_${i}`)
+    const hints = {
+      schemas: fewSchemas,
+      tables: new Map<string, string[]>(),
+      columns: new Map<string, string[]>(),
+    }
+    renderForm({ catalogHints: hints })
+    expect(screen.queryByPlaceholderText('Filter schemas…')).toBeNull()
+  })
+
+  it('filters chips by search term', async () => {
+    const manySchemas = ['public', 'analytics', 'reporting', ...Array.from({ length: 13 }, (_, i) => `extra_${i}`)]
+    const hints = {
+      schemas: manySchemas,
+      tables: new Map<string, string[]>(),
+      columns: new Map<string, string[]>(),
+    }
+    renderForm({ catalogHints: hints })
+    const filterInput = screen.getByPlaceholderText('Filter schemas…')
+    await userEvent.type(filterInput, 'publ')
+    expect(screen.getByRole('button', { name: 'public' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'analytics' })).toBeNull()
+  })
+})
+
 describe('PolicyForm — submission', () => {
   it('calls onSubmit with policy_type and targets', async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined)

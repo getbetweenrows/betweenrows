@@ -1,32 +1,42 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, fireEvent } from '@testing-library/react'
 import { renderWithProviders } from '../test/test-utils'
-import { makePolicy, makePolicyAssignment } from '../test/factories'
+import { makePolicyAssignment, makeDataSource } from '../test/factories'
 import { makeUser } from '../test/factories'
 
 vi.mock('../api/policies', () => ({
   listDatasourcePolicies: vi.fn(),
-  listPolicies: vi.fn(),
   assignPolicy: vi.fn(),
   removeAssignment: vi.fn(),
+}))
+
+vi.mock('../api/datasources', () => ({
+  listDataSources: vi.fn(),
 }))
 
 vi.mock('../api/users', () => ({
   listUsers: vi.fn(),
 }))
 
-import { listDatasourcePolicies, listPolicies } from '../api/policies'
+import { listDatasourcePolicies, assignPolicy } from '../api/policies'
+import { listDataSources } from '../api/datasources'
 import { listUsers } from '../api/users'
-import { PolicyAssignmentsReadonly, PolicyAssignmentPanel } from './PolicyAssignmentPanel'
+import {
+  PolicyAssignmentsReadonly,
+  PolicyAssignmentEditPanel,
+  DatasourceAssignmentsReadonly,
+} from './PolicyAssignmentPanel'
 
 const mockListDsPolicies = listDatasourcePolicies as ReturnType<typeof vi.fn>
-const mockListPolicies = listPolicies as ReturnType<typeof vi.fn>
+const mockAssignPolicy = assignPolicy as ReturnType<typeof vi.fn>
+const mockListDataSources = listDataSources as ReturnType<typeof vi.fn>
 const mockListUsers = listUsers as ReturnType<typeof vi.fn>
 
 beforeEach(() => {
   vi.clearAllMocks()
   mockListDsPolicies.mockResolvedValue([])
-  mockListPolicies.mockResolvedValue({ data: [], total: 0, page: 1, page_size: 100 })
+  mockAssignPolicy.mockResolvedValue({})
+  mockListDataSources.mockResolvedValue({ data: [], total: 0, page: 1, page_size: 200 })
   mockListUsers.mockResolvedValue({ data: [], total: 0, page: 1, page_size: 100 })
 })
 
@@ -68,12 +78,141 @@ describe('PolicyAssignmentsReadonly', () => {
   })
 })
 
-// ===== PolicyAssignmentPanel =====
+// ===== PolicyAssignmentEditPanel =====
 
-describe('PolicyAssignmentPanel', () => {
+describe('PolicyAssignmentEditPanel', () => {
+  it('shows "No assignments yet" when assignments prop is empty', () => {
+    renderWithProviders(
+      <PolicyAssignmentEditPanel
+        policyId="p-1"
+        assignments={[]}
+        onAssignmentChange={vi.fn()}
+      />,
+      { authenticated: true },
+    )
+    expect(screen.getByText('No assignments yet.')).toBeInTheDocument()
+  })
+
+  it('renders assignments table with datasource link and Remove button', () => {
+    const a = makePolicyAssignment({
+      id: 'a-1',
+      data_source_id: 'ds-99',
+      datasource_name: 'staging-db',
+      username: 'alice',
+      priority: 50,
+    })
+    renderWithProviders(
+      <PolicyAssignmentEditPanel
+        policyId="p-1"
+        assignments={[a]}
+        onAssignmentChange={vi.fn()}
+      />,
+      { authenticated: true },
+    )
+    const link = screen.getByRole('link', { name: 'staging-db' })
+    expect(link).toHaveAttribute('href', '/datasources/ds-99/edit')
+    expect(screen.getByRole('button', { name: /remove/i })).toBeInTheDocument()
+  })
+
+  it('shows the Add Assignment form with datasource, user, and priority fields', () => {
+    renderWithProviders(
+      <PolicyAssignmentEditPanel
+        policyId="p-1"
+        assignments={[]}
+        onAssignmentChange={vi.fn()}
+      />,
+      { authenticated: true },
+    )
+    expect(screen.getByRole('button', { name: /assign policy/i })).toBeInTheDocument()
+    expect(screen.getByRole('spinbutton')).toBeInTheDocument() // priority number input
+  })
+
+  it('populates datasource dropdown from listDataSources', async () => {
+    const ds = makeDataSource({ id: 'ds-1', name: 'my-db', is_active: true })
+    mockListDataSources.mockResolvedValue({ data: [ds], total: 1, page: 1, page_size: 200 })
+    renderWithProviders(
+      <PolicyAssignmentEditPanel
+        policyId="p-1"
+        assignments={[]}
+        onAssignmentChange={vi.fn()}
+      />,
+      { authenticated: true },
+    )
+    await waitFor(() => expect(screen.getByText('my-db')).toBeInTheDocument())
+  })
+
+  it('populates user dropdown from listUsers', async () => {
+    const user = makeUser({ id: 'u-1', username: 'bob' })
+    mockListUsers.mockResolvedValue({ data: [user], total: 1, page: 1, page_size: 100 })
+    renderWithProviders(
+      <PolicyAssignmentEditPanel
+        policyId="p-1"
+        assignments={[]}
+        onAssignmentChange={vi.fn()}
+      />,
+      { authenticated: true },
+    )
+    await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument())
+  })
+
+  it('renders a Remove button for each assignment', () => {
+    const assignments = [
+      makePolicyAssignment({ id: 'a-1', datasource_name: 'db1' }),
+      makePolicyAssignment({ id: 'a-2', datasource_name: 'db2' }),
+    ]
+    renderWithProviders(
+      <PolicyAssignmentEditPanel
+        policyId="p-1"
+        assignments={assignments}
+        onAssignmentChange={vi.fn()}
+      />,
+      { authenticated: true },
+    )
+    expect(screen.getAllByRole('button', { name: /remove/i })).toHaveLength(2)
+  })
+
+  it('shows error message when duplicate assignment returns 409', async () => {
+    const ds = makeDataSource({ id: 'ds-1', name: 'prod-db', is_active: true })
+    mockListDataSources.mockResolvedValue({ data: [ds], total: 1, page: 1, page_size: 200 })
+    mockAssignPolicy.mockRejectedValue({
+      response: { data: { error: 'This policy is already assigned to this datasource for all users' } },
+    })
+
+    const { container } = renderWithProviders(
+      <PolicyAssignmentEditPanel
+        policyId="p-1"
+        assignments={[]}
+        onAssignmentChange={vi.fn()}
+      />,
+      { authenticated: true },
+    )
+
+    await waitFor(() => expect(screen.getByText('prod-db')).toBeInTheDocument())
+
+    const dsSelect = container.querySelectorAll('select')[0]
+    fireEvent.change(dsSelect, { target: { value: 'ds-1' } })
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /assign policy/i })).not.toBeDisabled(),
+    )
+    screen.getByRole('button', { name: /assign policy/i }).click()
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/already assigned to this datasource for all users/i),
+      ).toBeInTheDocument(),
+    )
+  })
+})
+
+// ===== DatasourceAssignmentsReadonly =====
+
+describe('DatasourceAssignmentsReadonly', () => {
   it('shows "No policies assigned yet" when empty', async () => {
     mockListDsPolicies.mockResolvedValue([])
-    renderWithProviders(<PolicyAssignmentPanel datasourceId="ds-1" />, { authenticated: true })
+    renderWithProviders(<DatasourceAssignmentsReadonly datasourceId="ds-1" />, {
+      authenticated: true,
+    })
     await waitFor(() =>
       expect(screen.getByText('No policies assigned yet.')).toBeInTheDocument(),
     )
@@ -86,41 +225,32 @@ describe('PolicyAssignmentPanel', () => {
       priority: 100,
     })
     mockListDsPolicies.mockResolvedValue([a])
-    renderWithProviders(<PolicyAssignmentPanel datasourceId="ds-1" />, { authenticated: true })
+    renderWithProviders(<DatasourceAssignmentsReadonly datasourceId="ds-1" />, {
+      authenticated: true,
+    })
     await waitFor(() => expect(screen.getByText('row-filter')).toBeInTheDocument())
     const link = screen.getByRole('link', { name: 'row-filter' })
     expect(link).toHaveAttribute('href', '/policies/p-99/edit')
   })
 
-  it('shows the add assignment form with policy, user, and priority fields', async () => {
-    renderWithProviders(<PolicyAssignmentPanel datasourceId="ds-1" />, { authenticated: true })
+  it('shows the "Manage assignments from the policy edit page" note', async () => {
+    renderWithProviders(<DatasourceAssignmentsReadonly datasourceId="ds-1" />, {
+      authenticated: true,
+    })
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: /assign policy/i })).toBeInTheDocument(),
+      expect(
+        screen.getByText(/manage assignments from the policy edit page/i),
+      ).toBeInTheDocument(),
     )
-    expect(screen.getByRole('spinbutton')).toBeInTheDocument() // priority number input
   })
 
-  it('populates policy dropdown from listPolicies', async () => {
-    const policy = makePolicy({ id: 'p-1', name: 'deny-cols', policy_type: 'column_deny' })
-    mockListPolicies.mockResolvedValue({ data: [policy], total: 1, page: 1, page_size: 100 })
-    renderWithProviders(<PolicyAssignmentPanel datasourceId="ds-1" />, { authenticated: true })
-    await waitFor(() => expect(screen.getByText(/deny-cols.*column_deny/)).toBeInTheDocument())
-  })
-
-  it('populates user dropdown from listUsers', async () => {
-    const user = makeUser({ id: 'u-1', username: 'bob' })
-    mockListUsers.mockResolvedValue({ data: [user], total: 1, page: 1, page_size: 100 })
-    renderWithProviders(<PolicyAssignmentPanel datasourceId="ds-1" />, { authenticated: true })
-    await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument())
-  })
-
-  it('renders a Remove button for each assignment', async () => {
-    const assignments = [
-      makePolicyAssignment({ id: 'a-1', policy_name: 'p1' }),
-      makePolicyAssignment({ id: 'a-2', policy_name: 'p2' }),
-    ]
-    mockListDsPolicies.mockResolvedValue(assignments)
-    renderWithProviders(<PolicyAssignmentPanel datasourceId="ds-1" />, { authenticated: true })
-    await waitFor(() => expect(screen.getAllByRole('button', { name: /remove/i })).toHaveLength(2))
+  it('does not render a Remove button', async () => {
+    const a = makePolicyAssignment({ policy_name: 'deny-cols' })
+    mockListDsPolicies.mockResolvedValue([a])
+    renderWithProviders(<DatasourceAssignmentsReadonly datasourceId="ds-1" />, {
+      authenticated: true,
+    })
+    await waitFor(() => expect(screen.getByText('deny-cols')).toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: /remove/i })).toBeNull()
   })
 })

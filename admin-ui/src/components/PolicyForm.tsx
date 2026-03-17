@@ -11,9 +11,21 @@ const POLICY_TYPES: { value: PolicyType; label: string }[] = [
 ]
 
 const DENY_TYPES: PolicyType[] = ['column_deny', 'table_deny']
+const CHIP_DISPLAY_LIMIT = 20
+const FILTER_THRESHOLD = 15
 
 function emptyTarget(): TargetEntry {
   return { schemas: ['*'], tables: ['*'], columns: ['*'] }
+}
+
+function emptyTargetString(): { schemas: string; tables: string; columns: string } {
+  return { schemas: '*', tables: '*', columns: '*' }
+}
+
+export interface CatalogHints {
+  schemas: string[]
+  tables: Map<string, string[]>
+  columns: Map<string, string[]>
 }
 
 export interface PolicyFormValues {
@@ -32,6 +44,7 @@ interface PolicyFormProps {
   submitLabel: string
   isSubmitting: boolean
   error?: string | null
+  catalogHints?: CatalogHints
 }
 
 function targetsFromPolicy(policy: PolicyResponse): TargetEntry[] {
@@ -50,7 +63,171 @@ function stringToArray(s: string): string[] {
     .filter(Boolean)
 }
 
-export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error }: PolicyFormProps) {
+// --- TargetCard sub-component ---
+
+interface TargetCardProps {
+  idx: number
+  rawSchemas: string
+  rawTables: string
+  rawColumns: string
+  hints: { schemas: string[]; tables: string[]; columns: string[] }
+  needsColumns: boolean
+  onRemove: () => void
+  onRawChange: (field: 'schemas' | 'tables' | 'columns', value: string) => void
+  onBlur: (field: 'schemas' | 'tables' | 'columns') => void
+  onChipClick: (field: 'schemas' | 'tables' | 'columns', value: string) => void
+}
+
+function TargetCard({
+  idx,
+  rawSchemas,
+  rawTables,
+  rawColumns,
+  hints,
+  needsColumns,
+  onRemove,
+  onRawChange,
+  onBlur,
+  onChipClick,
+}: TargetCardProps) {
+  const [schemaFilter, setSchemaFilter] = useState('')
+  const [tableFilter, setTableFilter] = useState('')
+  const [columnFilter, setColumnFilter] = useState('')
+
+  function renderChips(
+    hintList: string[],
+    filter: string,
+    setFilter: (v: string) => void,
+    onChip: (v: string) => void,
+    filterLabel: string,
+    isMono = false,
+  ) {
+    if (hintList.length === 0) return null
+    const filtered = filter
+      ? hintList.filter((h) => h.toLowerCase().includes(filter.toLowerCase()))
+      : hintList
+    const visible = filtered.slice(0, CHIP_DISPLAY_LIMIT)
+    const overflow = filtered.length - visible.length
+    return (
+      <div className="mt-1.5">
+        {hintList.length > FILTER_THRESHOLD && (
+          <input
+            type="text"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder={filterLabel}
+            className="w-full border border-gray-200 rounded px-2 py-0.5 text-xs mb-1.5 focus:outline-none focus:ring-1 focus:ring-blue-400"
+          />
+        )}
+        <div className="flex flex-wrap gap-1">
+          {visible.map((v) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => onChip(v)}
+              className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-600 hover:bg-blue-100 hover:text-blue-700 transition-colors${isMono ? ' font-mono' : ''}`}
+            >
+              {v}
+            </button>
+          ))}
+          {overflow > 0 && (
+            <span className="text-xs text-gray-400 self-center">+{overflow} more</span>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="border border-gray-200 rounded-lg p-4 bg-gray-50">
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+          Target {idx + 1}
+        </span>
+        <button
+          type="button"
+          onClick={onRemove}
+          className="text-xs text-red-500 hover:text-red-700"
+        >
+          Remove
+        </button>
+      </div>
+
+      <div className={`grid gap-3 mb-3 ${needsColumns ? 'grid-cols-3' : 'grid-cols-2'}`}>
+        <div>
+          <label className="block text-xs font-medium text-gray-600 mb-1">Schemas</label>
+          <input
+            type="text"
+            value={rawSchemas}
+            onChange={(e) => onRawChange('schemas', e.target.value)}
+            onBlur={() => onBlur('schemas')}
+            placeholder="public, analytics"
+            className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+          />
+          <p className="text-xs text-gray-400 mt-1">
+            Comma-separated. Use <code className="bg-gray-100 px-1 rounded">*</code> for all.
+          </p>
+          {renderChips(
+            hints.schemas,
+            schemaFilter,
+            setSchemaFilter,
+            (v) => onChipClick('schemas', v),
+            'Filter schemas…',
+          )}
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-gray-600 mb-1">Tables</label>
+          <input
+            type="text"
+            value={rawTables}
+            onChange={(e) => onRawChange('tables', e.target.value)}
+            onBlur={() => onBlur('tables')}
+            placeholder="orders, customers"
+            className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+          />
+          <p className="text-xs text-gray-400 mt-1">
+            Comma-separated. Use <code className="bg-gray-100 px-1 rounded">*</code> for all.
+          </p>
+          {renderChips(
+            hints.tables,
+            tableFilter,
+            setTableFilter,
+            (v) => onChipClick('tables', v),
+            'Filter tables…',
+          )}
+        </div>
+        {needsColumns && (
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Columns</label>
+            <input
+              type="text"
+              value={rawColumns}
+              onChange={(e) => onRawChange('columns', e.target.value)}
+              onBlur={() => onBlur('columns')}
+              placeholder="ssn, salary"
+              className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              Comma-separated. Use <code className="bg-gray-100 px-1 rounded">*</code> for all.
+            </p>
+            {renderChips(
+              hints.columns,
+              columnFilter,
+              setColumnFilter,
+              (v) => onChipClick('columns', v),
+              'Filter columns…',
+              true,
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// --- Main PolicyForm component ---
+
+export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error, catalogHints }: PolicyFormProps) {
   const [name, setName] = useState(initial?.name ?? '')
   const [nameError, setNameError] = useState<string | null>(null)
   const [description, setDescription] = useState(initial?.description ?? '')
@@ -58,9 +235,17 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
     (initial?.policy_type as PolicyType) ?? 'row_filter',
   )
   const [isEnabled, setIsEnabled] = useState(initial?.is_enabled ?? true)
-  const [targets, setTargets] = useState<TargetEntry[]>(
-    initial ? targetsFromPolicy(initial) : [emptyTarget()],
+
+  const initialTargets = initial ? targetsFromPolicy(initial) : [emptyTarget()]
+  const [targets, setTargets] = useState<TargetEntry[]>(initialTargets)
+  const [targetStrings, setTargetStrings] = useState(
+    initialTargets.map((t) => ({
+      schemas: targetToString(t.schemas),
+      tables: targetToString(t.tables),
+      columns: targetToString(t.columns ?? []),
+    })),
   )
+
   const [filterExpression, setFilterExpression] = useState(
     initial?.definition?.filter_expression ?? '',
   )
@@ -75,37 +260,123 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
 
   function addTarget() {
     setTargets((prev) => [...prev, emptyTarget()])
+    setTargetStrings((prev) => [...prev, emptyTargetString()])
   }
 
   function removeTarget(idx: number) {
     setTargets((prev) => prev.filter((_, i) => i !== idx))
+    setTargetStrings((prev) => prev.filter((_, i) => i !== idx))
   }
 
-  function updateTargetSchemas(idx: number, value: string) {
-    setTargets((prev) =>
-      prev.map((t, i) => (i === idx ? { ...t, schemas: stringToArray(value) } : t)),
+  function updateRaw(idx: number, field: 'schemas' | 'tables' | 'columns', value: string) {
+    setTargetStrings((prev) =>
+      prev.map((ts, i) => (i === idx ? { ...ts, [field]: value } : ts)),
     )
   }
 
-  function updateTargetTables(idx: number, value: string) {
+  function syncFromRaw(idx: number, field: 'schemas' | 'tables' | 'columns') {
+    const raw = targetStrings[idx]?.[field] ?? ''
+    const parsed = stringToArray(raw)
+    const value = parsed.length > 0 ? parsed : ['*']
     setTargets((prev) =>
-      prev.map((t, i) => (i === idx ? { ...t, tables: stringToArray(value) } : t)),
+      prev.map((t, i) => (i === idx ? { ...t, [field]: value } : t)),
     )
   }
 
-  function updateTargetColumns(idx: number, value: string) {
+  function appendToTarget(idx: number, field: 'schemas' | 'tables' | 'columns', value: string) {
     setTargets((prev) =>
-      prev.map((t, i) => (i === idx ? { ...t, columns: stringToArray(value) } : t)),
+      prev.map((t, i) => {
+        if (i !== idx) return t
+        const current = field === 'columns' ? (t.columns ?? []) : t[field]
+        const updated =
+          current.length === 1 && current[0] === '*'
+            ? [value]
+            : current.includes(value)
+              ? current
+              : [...current, value]
+        return { ...t, [field]: updated }
+      }),
     )
+    setTargetStrings((prev) =>
+      prev.map((ts, i) => {
+        if (i !== idx) return ts
+        const current = stringToArray(ts[field])
+        const updated =
+          current.length === 1 && current[0] === '*'
+            ? [value]
+            : current.includes(value)
+              ? current
+              : [...current, value]
+        return { ...ts, [field]: updated.join(', ') }
+      }),
+    )
+  }
+
+  function getFilteredHints(targetIdx: number): {
+    schemas: string[]
+    tables: string[]
+    columns: string[]
+  } {
+    if (!catalogHints) return { schemas: [], tables: [], columns: [] }
+    const target = targets[targetIdx]
+    const currentSchemas = target.schemas.filter((s) => s !== '*')
+    const currentTables = target.tables.filter((t) => t !== '*')
+    const currentColumns = (target.columns ?? []).filter((c) => c !== '*')
+
+    const schemaHints = catalogHints.schemas.filter((s) => !target.schemas.includes(s))
+
+    let tableHints: string[]
+    if (target.schemas.includes('*') || currentSchemas.length === 0) {
+      const all = new Set<string>()
+      catalogHints.tables.forEach((ts) => ts.forEach((t) => all.add(t)))
+      tableHints = Array.from(all).filter((t) => !target.tables.includes(t))
+    } else {
+      const relevant = new Set<string>()
+      currentSchemas.forEach((s) =>
+        (catalogHints.tables.get(s) ?? []).forEach((t) => relevant.add(t)),
+      )
+      tableHints = Array.from(relevant).filter((t) => !target.tables.includes(t))
+    }
+
+    let columnHints: string[]
+    const allSchemas = target.schemas.includes('*') || currentSchemas.length === 0
+    const allTables = (target.tables ?? []).includes('*') || currentTables.length === 0
+    if (allSchemas && allTables) {
+      const all = new Set<string>()
+      catalogHints.columns.forEach((cs) => cs.forEach((c) => all.add(c)))
+      columnHints = Array.from(all).filter((c) => !currentColumns.includes(c))
+    } else {
+      const schemasForCols = allSchemas
+        ? Array.from(catalogHints.tables.keys())
+        : currentSchemas
+      const tablesForCols = allTables
+        ? Array.from(new Set(schemasForCols.flatMap((s) => catalogHints.tables.get(s) ?? [])))
+        : currentTables
+      const relevant = new Set<string>()
+      schemasForCols.forEach((s) =>
+        tablesForCols.forEach((t) =>
+          (catalogHints.columns.get(`${s}.${t}`) ?? []).forEach((c) => relevant.add(c)),
+        ),
+      )
+      columnHints = Array.from(relevant).filter((c) => !currentColumns.includes(c))
+    }
+
+    return { schemas: schemaHints, tables: tableHints, columns: columnHints }
   }
 
   function buildTargets(): TargetEntry[] {
-    return targets.map((t) => {
-      if (!needsColumns) {
-        const { columns: _cols, ...rest } = t
-        return rest
+    return targetStrings.map((ts) => {
+      const schemas = stringToArray(ts.schemas)
+      const tables = stringToArray(ts.tables)
+      const cols = stringToArray(ts.columns)
+      const entry: TargetEntry = {
+        schemas: schemas.length > 0 ? schemas : ['*'],
+        tables: tables.length > 0 ? tables : ['*'],
       }
-      return t
+      if (needsColumns) {
+        entry.columns = cols.length > 0 ? cols : ['*']
+      }
+      return entry
     })
   }
 
@@ -213,60 +484,25 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
           <p className="text-sm text-gray-400 italic">No targets yet. Add one to define where this policy applies.</p>
         ) : (
           <div className="space-y-4">
-            {targets.map((target, idx) => (
-              <div key={idx} className="border border-gray-200 rounded-lg p-4 bg-gray-50">
-                <div className="flex items-center justify-between mb-3">
-                  <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">
-                    Target {idx + 1}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => removeTarget(idx)}
-                    className="text-xs text-red-500 hover:text-red-700"
-                  >
-                    Remove
-                  </button>
-                </div>
-
-                <div className={`grid gap-3 mb-3 ${needsColumns ? 'grid-cols-3' : 'grid-cols-2'}`}>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Schemas</label>
-                    <input
-                      type="text"
-                      value={targetToString(target.schemas)}
-                      onChange={(e) => updateTargetSchemas(idx, e.target.value)}
-                      placeholder="public, analytics"
-                      className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                    />
-                    <p className="text-xs text-gray-400 mt-1">Comma-separated. Use <code className="bg-gray-100 px-1 rounded">*</code> for all.</p>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Tables</label>
-                    <input
-                      type="text"
-                      value={targetToString(target.tables)}
-                      onChange={(e) => updateTargetTables(idx, e.target.value)}
-                      placeholder="orders, customers"
-                      className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                    />
-                    <p className="text-xs text-gray-400 mt-1">Comma-separated. Use <code className="bg-gray-100 px-1 rounded">*</code> for all.</p>
-                  </div>
-                  {needsColumns && (
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Columns</label>
-                      <input
-                        type="text"
-                        value={targetToString(target.columns ?? [])}
-                        onChange={(e) => updateTargetColumns(idx, e.target.value)}
-                        placeholder="ssn, salary"
-                        className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
-                      />
-                      <p className="text-xs text-gray-400 mt-1">Comma-separated. Use <code className="bg-gray-100 px-1 rounded">*</code> for all.</p>
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))}
+            {targets.map((_target, idx) => {
+              const hints = getFilteredHints(idx)
+              const ts = targetStrings[idx] ?? emptyTargetString()
+              return (
+                <TargetCard
+                  key={idx}
+                  idx={idx}
+                  rawSchemas={ts.schemas}
+                  rawTables={ts.tables}
+                  rawColumns={ts.columns}
+                  hints={hints}
+                  needsColumns={needsColumns}
+                  onRemove={() => removeTarget(idx)}
+                  onRawChange={(field, value) => updateRaw(idx, field, value)}
+                  onBlur={(field) => syncFromRaw(idx, field)}
+                  onChipClick={(field, value) => appendToTarget(idx, field, value)}
+                />
+              )
+            })}
           </div>
         )}
       </div>

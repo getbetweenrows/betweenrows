@@ -778,16 +778,17 @@ async fn deny_policy_row_filter_rejected() {
         .simple_query(&format!("SELECT * FROM {schema}.orders"))
         .await;
 
+    // table_deny removes the table from the catalog at connect time (404-not-403 design).
+    // The query fails with "table not found" rather than "access denied" to avoid leaking
+    // metadata about the existence of denied tables. Audit status is "error", not "denied".
     assert!(
         result.is_err(),
         "Deny policy with row_filter should reject the query outright, not filter rows"
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("Access denied")
-            || err_msg.contains("access denied")
-            || err_msg.contains("42501"),
-        "Error should indicate access denial, got: {err_msg}"
+        !err_msg.contains("deny-rowfilter-c1"),
+        "Error must not leak the policy name (no metadata leakage), got: {err_msg}"
     );
 }
 
@@ -2282,8 +2283,9 @@ async fn tc_audit_01_success_audit_status() {
 }
 
 // ===========================================================================
-// TC-AUDIT-02: Denied query (deny policy) → audit entry has status "denied"
-//              with error_message containing the policy name
+// TC-AUDIT-02: table_deny query → audit entry has status "error"
+//              (404-not-403: table removed from catalog, so query fails with
+//               "table not found" rather than "access denied"; no metadata leakage)
 // ===========================================================================
 
 #[tokio::test]
@@ -2338,13 +2340,17 @@ async fn tc_audit_02_denied_audit_status() {
 
     assert_eq!(
         entry["status"].as_str(),
-        Some("denied"),
-        "TC-AUDIT-02: status must be 'denied'"
+        Some("error"),
+        "TC-AUDIT-02: status must be 'error' (table_deny uses 404-not-403: table not found)"
     );
     let err_msg = entry["error_message"].as_str().unwrap_or("");
     assert!(
-        err_msg.contains("audit02-deny"),
-        "TC-AUDIT-02: error_message must contain the policy name, got: {err_msg}"
+        !err_msg.is_empty(),
+        "TC-AUDIT-02: error_message must be populated for failed queries"
+    );
+    assert!(
+        !err_msg.contains("audit02-deny"),
+        "TC-AUDIT-02: error_message must not leak the policy name, got: {err_msg}"
     );
 }
 
@@ -2411,8 +2417,8 @@ async fn tc_audit_03_error_audit_status() {
 }
 
 // ===========================================================================
-// TC-AUDIT-04: Status filter — GET /audit/queries?status=denied returns only
-//              denied entries
+// TC-AUDIT-04: Status filter — GET /audit/queries?status=error returns only
+//              error entries (table_deny produces "error" not "denied" status)
 // ===========================================================================
 
 #[tokio::test]
@@ -2451,26 +2457,26 @@ async fn tc_audit_04_status_filter() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-    // Filter by status=denied
+    // Filter by status=error (table_deny produces "error" not "denied")
     let resp = server
         .admin
-        .get("/api/v1/audit/queries?status=denied")
+        .get("/api/v1/audit/queries?status=error")
         .authorization_bearer(&server.admin_token)
         .await;
     resp.assert_status_ok();
     let body = resp.json::<serde_json::Value>();
     let entries = body["data"].as_array().unwrap();
 
-    // All returned entries must have status "denied"
+    // All returned entries must have status "error"
     for e in entries {
         assert_eq!(
             e["status"].as_str(),
-            Some("denied"),
-            "TC-AUDIT-04: status filter returned non-denied entry: {e}"
+            Some("error"),
+            "TC-AUDIT-04: status filter returned non-error entry: {e}"
         );
     }
 
-    // Filter by status=success should return no entries for this user (only denied queries ran)
+    // Filter by status=success should return no entries for this user (only error queries ran)
     let resp2 = server
         .admin
         .get(&format!(
@@ -2487,7 +2493,7 @@ async fn tc_audit_04_status_filter() {
         .collect();
     assert!(
         user_entries.is_empty(),
-        "TC-AUDIT-04: success filter should return no entries for user_audit04 (only denied queries ran)"
+        "TC-AUDIT-04: success filter should return no entries for user_audit04 (only error queries ran)"
     );
 }
 

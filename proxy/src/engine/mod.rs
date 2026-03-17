@@ -1094,7 +1094,11 @@ impl EngineCache {
                         .tables
                         .iter()
                         .filter_map(|(table_name, table)| {
-                            // Table-level object_access deny
+                            // Table-level object_access deny (404-not-403 principle).
+                            // table_deny tables are intentionally removed from the catalog so
+                            // queries fail with "table not found" rather than "access denied",
+                            // avoiding metadata leakage about the existence of denied tables.
+                            // Audit status is "error", not "denied".
                             if filter
                                 .denied_tables
                                 .contains(&(df_alias.clone(), table_name.clone()))

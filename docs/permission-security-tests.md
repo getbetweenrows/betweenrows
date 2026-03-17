@@ -301,3 +301,26 @@ There is no ambiguous per-definition `action` field. `compute_user_visibility()`
 **Defense**: Hook order is now `[PolicyHook, ReadOnlyHook]`. `PolicyHook` runs first: for non-`Query` statements that are not on the read-only passthrough list, it calls `audit_write_rejected()` (writes a `"denied"` audit entry with `error_message: "Only read-only queries are allowed"`) then returns `None`. `ReadOnlyHook` then runs and enforces the rejection. A shared `is_allowed_statement()` function in `read_only.rs` is the single source of truth for the allowlist — `PolicyHook` uses it to decide which statements to audit without duplicating the logic.
 
 **Test**: `tc_audit_05_write_rejected_audit_status` — `INSERT` against the proxy → audit entry has `status: "denied"`, `error_message` contains `"read-only"`.
+
+---
+
+### 25. Row filter on aggregate with zero-column projection (DataFusion 52+ optimisation)
+
+**Vector**: DataFusion 52+ optimises `SELECT COUNT(*) FROM t` to `TableScan(projection=Some([]))` — projecting zero columns. Our post-planning filter injection (`apply_row_filters`) adds a `Filter(tenant = 'acme')` node above this scan, but the scan's output schema has no columns, so the filter cannot resolve `tenant` → schema mismatch at execution time.
+
+**Bug**: `apply_row_filters` injected the filter unconditionally without checking whether filter-referenced columns were present in the scan's projected schema.
+
+**Defense**: Before wrapping the `TableScan` with a `Filter` node, extract column references from the filter expression (`Expr::column_refs()`). If `projection = Some(indices)`, merge any missing column indices into the projection and rebuild the `TableScan` via `TableScan::try_new(...)` with the expanded list. `lit(false)` and other zero-column-ref filters are a no-op (no expansion). Filter referencing a column absent from the full table schema returns a plan error.
+
+**Test**: `aggregate_with_row_filter` — `SELECT COUNT(*)` and `SELECT SUM(amount)` with a tenant row filter → returns correct tenant-scoped counts. Unit tests: `test_row_filter_expands_narrow_projection`, `test_row_filter_no_expand_when_all_columns_present`, `test_row_filter_lit_false_no_expand`.
+
+---
+
+### 26. table_deny metadata leakage prevention (404-not-403 principle)
+
+**Vector**: A `table_deny` policy that rejects a query with "access denied" reveals that the table exists. An attacker can probe for hidden tables by observing the difference between "table not found" and "access denied" responses.
+
+**Defense**: `table_deny` tables are removed from the per-user catalog at connection time (`build_user_context` / `compute_user_visibility`). Queries against a denied table fail with "table not found" — indistinguishable from querying a non-existent table. The audit status is `"error"` (not `"denied"`), which matches any other query planning failure, providing no additional signal to the attacker.
+
+**Test**: `deny_policy_row_filter_rejected` — error message must not contain the policy name. `tc_audit_02_denied_audit_status` — audit status is `"error"`, `error_message` does not contain the policy name. `tc_audit_04_status_filter` — `status=error` filter matches these entries.
+

@@ -1,12 +1,12 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation } from '@tanstack/react-query'
 import { listDatasourcePolicies, assignPolicy, removeAssignment } from '../api/policies'
-import { listPolicies } from '../api/policies'
+import { listDataSources } from '../api/datasources'
 import { listUsers } from '../api/users'
 import type { PolicyAssignmentResponse } from '../types/policy'
 
-// ---------- Read-only assignments summary (used on policy edit page) ----------
+// ---------- Read-only assignments summary (used on PolicyCodeView) ----------
 
 interface PolicyAssignmentsReadonlyProps {
   assignments: PolicyAssignmentResponse[]
@@ -53,27 +53,27 @@ export function PolicyAssignmentsReadonly({ assignments }: PolicyAssignmentsRead
   )
 }
 
-// ---------- Editable assignment panel (used on datasource edit page) ----------
+// ---------- Editable assignment panel scoped to a policy (used on policy edit page) ----------
 
-interface PolicyAssignmentPanelProps {
-  datasourceId: string
+interface PolicyAssignmentEditPanelProps {
+  policyId: string
+  assignments: PolicyAssignmentResponse[]
+  onAssignmentChange: () => void
 }
 
-export function PolicyAssignmentPanel({ datasourceId }: PolicyAssignmentPanelProps) {
-  const queryClient = useQueryClient()
+export function PolicyAssignmentEditPanel({
+  policyId,
+  assignments,
+  onAssignmentChange,
+}: PolicyAssignmentEditPanelProps) {
   const [addError, setAddError] = useState<string | null>(null)
-  const [selectedPolicyId, setSelectedPolicyId] = useState('')
+  const [selectedDatasourceId, setSelectedDatasourceId] = useState('')
   const [selectedUserId, setSelectedUserId] = useState('')
   const [priority, setPriority] = useState('100')
 
-  const { data: assignments = [], isLoading: assignmentsLoading } = useQuery({
-    queryKey: ['datasource-policies', datasourceId],
-    queryFn: () => listDatasourcePolicies(datasourceId),
-  })
-
-  const { data: policiesData } = useQuery({
-    queryKey: ['policies', 1, ''],
-    queryFn: () => listPolicies({ page: 1, page_size: 100 }),
+  const { data: datasourcesData } = useQuery({
+    queryKey: ['datasources', 'all'],
+    queryFn: () => listDataSources({ page_size: 200 }),
   })
 
   const { data: usersData } = useQuery({
@@ -83,17 +83,17 @@ export function PolicyAssignmentPanel({ datasourceId }: PolicyAssignmentPanelPro
 
   const addMutation = useMutation({
     mutationFn: () =>
-      assignPolicy(datasourceId, {
-        policy_id: selectedPolicyId,
+      assignPolicy(selectedDatasourceId, {
+        policy_id: policyId,
         user_id: selectedUserId || null,
         priority: parseInt(priority, 10) || 100,
       }),
     onSuccess: () => {
       setAddError(null)
-      setSelectedPolicyId('')
+      setSelectedDatasourceId('')
       setSelectedUserId('')
       setPriority('100')
-      queryClient.invalidateQueries({ queryKey: ['datasource-policies', datasourceId] })
+      onAssignmentChange()
     },
     onError: (err: unknown) => {
       const msg =
@@ -104,32 +104,27 @@ export function PolicyAssignmentPanel({ datasourceId }: PolicyAssignmentPanelPro
   })
 
   const removeMutation = useMutation({
-    mutationFn: (assignmentId: string) => removeAssignment(datasourceId, assignmentId),
+    mutationFn: (a: PolicyAssignmentResponse) => removeAssignment(a.data_source_id, a.id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['datasource-policies', datasourceId] })
+      onAssignmentChange()
     },
   })
 
-  const allPolicies = policiesData?.data ?? []
+  const activeDatasources = (datasourcesData?.data ?? []).filter((ds) => ds.is_active)
   const allUsers = usersData ?? []
 
   return (
     <div>
-      <h2 className="text-base font-semibold text-gray-900 mb-3">Policy Assignments</h2>
-      <p className="text-sm text-gray-500 mb-4">
-        Assign policies to this data source. Optionally scope to a specific user; leave blank to apply to all users.
-      </p>
+      <h2 className="text-base font-semibold text-gray-900 mb-3">Assignments</h2>
 
-      {assignmentsLoading ? (
-        <div className="text-sm text-gray-400 mb-4">Loading…</div>
-      ) : assignments.length === 0 ? (
-        <div className="text-sm text-gray-400 mb-4">No policies assigned yet.</div>
+      {assignments.length === 0 ? (
+        <div className="text-sm text-gray-400 mb-4">No assignments yet.</div>
       ) : (
         <div className="border border-gray-200 rounded-lg overflow-hidden mb-4">
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
-                <th className="text-left px-3 py-2 font-medium text-gray-600 text-xs">Policy</th>
+                <th className="text-left px-3 py-2 font-medium text-gray-600 text-xs">Datasource</th>
                 <th className="text-left px-3 py-2 font-medium text-gray-600 text-xs">User</th>
                 <th className="text-left px-3 py-2 font-medium text-gray-600 text-xs">Priority</th>
                 <th className="px-3 py-2" />
@@ -140,17 +135,19 @@ export function PolicyAssignmentPanel({ datasourceId }: PolicyAssignmentPanelPro
                 <tr key={a.id} className="hover:bg-gray-50">
                   <td className="px-3 py-2">
                     <Link
-                      to={`/policies/${a.policy_id}/edit`}
+                      to={`/datasources/${a.data_source_id}/edit`}
                       className="font-medium text-blue-600 hover:text-blue-800"
                     >
-                      {a.policy_name}
+                      {a.datasource_name}
                     </Link>
                   </td>
-                  <td className="px-3 py-2 text-gray-600">{a.username ?? <span className="text-gray-400 italic">all users</span>}</td>
+                  <td className="px-3 py-2 text-gray-600">
+                    {a.username ?? <span className="text-gray-400 italic">all users</span>}
+                  </td>
                   <td className="px-3 py-2 text-gray-600">{a.priority}</td>
                   <td className="px-3 py-2 text-right">
                     <button
-                      onClick={() => removeMutation.mutate(a.id)}
+                      onClick={() => removeMutation.mutate(a)}
                       disabled={removeMutation.isPending}
                       className="text-xs text-red-500 hover:text-red-700 disabled:opacity-50"
                     >
@@ -169,16 +166,16 @@ export function PolicyAssignmentPanel({ datasourceId }: PolicyAssignmentPanelPro
         <h3 className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-3">Add Assignment</h3>
         <div className="grid grid-cols-3 gap-3">
           <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Policy</label>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Datasource</label>
             <select
-              value={selectedPolicyId}
-              onChange={(e) => setSelectedPolicyId(e.target.value)}
+              value={selectedDatasourceId}
+              onChange={(e) => setSelectedDatasourceId(e.target.value)}
               className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
             >
-              <option value="">Select a policy…</option>
-              {allPolicies.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} ({p.policy_type})
+              <option value="">Select a datasource…</option>
+              {activeDatasources.map((ds) => (
+                <option key={ds.id} value={ds.id}>
+                  {ds.name}
                 </option>
               ))}
             </select>
@@ -219,12 +216,72 @@ export function PolicyAssignmentPanel({ datasourceId }: PolicyAssignmentPanelPro
         <button
           type="button"
           onClick={() => addMutation.mutate()}
-          disabled={!selectedPolicyId || addMutation.isPending}
+          disabled={!selectedDatasourceId || addMutation.isPending}
           className="mt-3 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded px-3 py-1.5 transition-colors disabled:opacity-50"
         >
           {addMutation.isPending ? 'Assigning…' : 'Assign policy'}
         </button>
       </div>
+    </div>
+  )
+}
+
+// ---------- Read-only assignment list for datasource edit page ----------
+
+interface DatasourceAssignmentsReadonlyProps {
+  datasourceId: string
+}
+
+export function DatasourceAssignmentsReadonly({ datasourceId }: DatasourceAssignmentsReadonlyProps) {
+  const { data: assignments = [], isLoading } = useQuery({
+    queryKey: ['datasource-policies', datasourceId],
+    queryFn: () => listDatasourcePolicies(datasourceId),
+  })
+
+  return (
+    <div>
+      <div className="flex items-start justify-between mb-3">
+        <div>
+          <h2 className="text-base font-semibold text-gray-900">Policy Assignments</h2>
+          <p className="text-xs text-gray-400 mt-0.5">Manage assignments from the policy edit page.</p>
+        </div>
+      </div>
+
+      {isLoading ? (
+        <div className="text-sm text-gray-400">Loading…</div>
+      ) : assignments.length === 0 ? (
+        <div className="text-sm text-gray-400">No policies assigned yet.</div>
+      ) : (
+        <div className="border border-gray-200 rounded-lg overflow-hidden">
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 border-b border-gray-200">
+              <tr>
+                <th className="text-left px-3 py-2 font-medium text-gray-600 text-xs">Policy</th>
+                <th className="text-left px-3 py-2 font-medium text-gray-600 text-xs">User</th>
+                <th className="text-left px-3 py-2 font-medium text-gray-600 text-xs">Priority</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {assignments.map((a) => (
+                <tr key={a.id} className="hover:bg-gray-50">
+                  <td className="px-3 py-2">
+                    <Link
+                      to={`/policies/${a.policy_id}/edit`}
+                      className="font-medium text-blue-600 hover:text-blue-800"
+                    >
+                      {a.policy_name}
+                    </Link>
+                  </td>
+                  <td className="px-3 py-2 text-gray-600">
+                    {a.username ?? <span className="text-gray-400 italic">all users</span>}
+                  </td>
+                  <td className="px-3 py-2 text-gray-600">{a.priority}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }

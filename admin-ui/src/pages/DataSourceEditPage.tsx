@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getDataSource, updateDataSource } from '../api/datasources'
 import { DataSourceForm } from '../components/DataSourceForm'
 import { UserAssignmentPanel } from '../components/UserAssignmentPanel'
-import { PolicyAssignmentPanel } from '../components/PolicyAssignmentPanel'
+import { DatasourceAssignmentsReadonly } from '../components/PolicyAssignmentPanel'
 
 export function DataSourceEditPage() {
   const { id } = useParams<{ id: string }>()
@@ -93,7 +93,7 @@ export function DataSourceEditPage() {
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 p-6 mb-6">
-        <PolicyAssignmentPanel datasourceId={dsId} />
+        <DatasourceAssignmentsReadonly datasourceId={dsId} />
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 p-6">

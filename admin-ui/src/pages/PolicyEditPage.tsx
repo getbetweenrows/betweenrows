@@ -4,8 +4,9 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getPolicy, updatePolicy } from '../api/policies'
 import { PolicyForm } from '../components/PolicyForm'
 import type { PolicyFormValues } from '../components/PolicyForm'
-import { PolicyAssignmentsReadonly } from '../components/PolicyAssignmentPanel'
+import { PolicyAssignmentEditPanel } from '../components/PolicyAssignmentPanel'
 import { PolicyCodeView } from '../components/PolicyCodeView'
+import { useCatalogHints } from '../hooks/useCatalogHints'
 
 export function PolicyEditPage() {
   const { id } = useParams<{ id: string }>()
@@ -20,6 +21,9 @@ export function PolicyEditPage() {
     queryFn: () => getPolicy(policyId),
     enabled: !!policyId,
   })
+
+  const hintDatasourceId = policy?.assignments?.[0]?.data_source_id ?? ''
+  const catalogHints = useCatalogHints(hintDatasourceId)
 
   async function handleSubmit(values: PolicyFormValues) {
     if (!policy) return
@@ -94,11 +98,18 @@ export function PolicyEditPage() {
           submitLabel="Save changes"
           isSubmitting={isSubmitting}
           error={error}
+          catalogHints={catalogHints}
         />
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 p-6 mt-4">
-        <PolicyAssignmentsReadonly assignments={policy.assignments ?? []} />
+        <PolicyAssignmentEditPanel
+          policyId={policyId}
+          assignments={policy.assignments ?? []}
+          onAssignmentChange={() =>
+            queryClient.invalidateQueries({ queryKey: ['policy', policyId] })
+          }
+        />
       </div>
 
       <PolicyCodeView policy={policy} assignments={policy.assignments ?? []} />

@@ -214,10 +214,15 @@ async fn insert_blocked_by_read_only_hook() {
         ))
         .await;
     assert!(result.is_err(), "INSERT should be blocked by ReadOnlyHook");
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("25006") || err_msg.contains("read") || err_msg.contains("read-only"),
-        "Error should indicate read-only violation (SQLSTATE 25006), got: {err_msg}"
+    let err = result.unwrap_err();
+    let db_err = err
+        .as_db_error()
+        .expect("Expected a DB error with ErrorInfo");
+    assert_eq!(
+        db_err.code().code(),
+        "25006",
+        "Error should be SQLSTATE 25006 (read_only_sql_transaction), got: {}",
+        db_err.code().code()
     );
 }
 
@@ -239,10 +244,15 @@ async fn update_blocked_by_read_only_hook() {
         ))
         .await;
     assert!(result.is_err(), "UPDATE should be blocked by ReadOnlyHook");
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("25006") || err_msg.contains("read") || err_msg.contains("read-only"),
-        "Error should indicate read-only violation (SQLSTATE 25006), got: {err_msg}"
+    let err = result.unwrap_err();
+    let db_err = err
+        .as_db_error()
+        .expect("Expected a DB error with ErrorInfo");
+    assert_eq!(
+        db_err.code().code(),
+        "25006",
+        "Error should be SQLSTATE 25006 (read_only_sql_transaction), got: {}",
+        db_err.code().code()
     );
 }
 
@@ -262,9 +272,14 @@ async fn delete_blocked_by_read_only_hook() {
         .simple_query(&format!("DELETE FROM {schema}.orders WHERE id = 1"))
         .await;
     assert!(result.is_err(), "DELETE should be blocked by ReadOnlyHook");
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("25006") || err_msg.contains("read") || err_msg.contains("read-only"),
-        "Error should indicate read-only violation (SQLSTATE 25006), got: {err_msg}"
+    let err = result.unwrap_err();
+    let db_err = err
+        .as_db_error()
+        .expect("Expected a DB error with ErrorInfo");
+    assert_eq!(
+        db_err.code().code(),
+        "25006",
+        "Error should be SQLSTATE 25006 (read_only_sql_transaction), got: {}",
+        db_err.code().code()
     );
 }

@@ -587,6 +587,123 @@ fn select_default_schema(catalog_schemas: &HashMap<String, VirtualCatalogSchema>
         .unwrap_or_else(|| "public".to_string())
 }
 
+// ---------- optimizer rule: fix scan projections for pushed-down filters ----------
+
+/// **DataFusion 52 workaround — revisit on upgrade.**
+///
+/// When PolicyHook injects a `Filter(tenant = 'acme')` above a `TableScan`,
+/// DataFusion's `PushDownFilter` optimizer pushes it into `TableScan.filters`
+/// (because `SqlTable` reports `Exact` pushdown support) and removes the
+/// `Filter` node.  Then `optimize_projections` narrows the scan projection to
+/// `[]` for `COUNT(*)` — but doesn't account for columns needed by the
+/// pushed-down filters in `TableScan.filters`.  The physical planner later
+/// expands the scan projection to include filter columns, creating a schema
+/// mismatch with the logical plan.
+///
+/// This rule runs after all built-in optimizer rules and ensures that any
+/// `TableScan` whose `projection` is `Some(...)` includes all columns
+/// referenced by its pushed-down `filters`.  When extra columns are added, a
+/// wrapping `Projection` strips them so the node's output schema stays
+/// unchanged — preventing mismatches in parent nodes (e.g. `Join`).
+///
+/// **To check on DataFusion upgrade:** run `cargo test --test policy_enforcement
+/// aggregate_with_row_filter` without this rule.  If the test passes, the
+/// workaround can be removed.
+#[derive(Debug)]
+struct ScanFilterProjectionFixRule;
+
+impl datafusion::optimizer::OptimizerRule for ScanFilterProjectionFixRule {
+    fn name(&self) -> &str {
+        "scan_filter_projection_fix"
+    }
+
+    fn apply_order(&self) -> Option<datafusion::optimizer::ApplyOrder> {
+        Some(datafusion::optimizer::ApplyOrder::BottomUp)
+    }
+
+    fn rewrite(
+        &self,
+        plan: datafusion::logical_expr::LogicalPlan,
+        _config: &dyn datafusion::optimizer::OptimizerConfig,
+    ) -> datafusion::error::Result<
+        datafusion::common::tree_node::Transformed<datafusion::logical_expr::LogicalPlan>,
+    > {
+        use datafusion::common::tree_node::Transformed;
+        use datafusion::logical_expr::{Expr, LogicalPlan};
+
+        let LogicalPlan::TableScan(ref scan) = plan else {
+            return Ok(Transformed::no(plan));
+        };
+        // Nothing to fix if no pushed-down filters or projection is already None (all cols).
+        if scan.filters.is_empty() {
+            return Ok(Transformed::no(plan));
+        }
+        let Some(projection) = &scan.projection else {
+            return Ok(Transformed::no(plan));
+        };
+
+        // Collect columns referenced by pushed-down filters that are missing
+        // from the current projection.
+        let source_schema = scan.source.schema();
+        let mut extras: Vec<usize> = Vec::new();
+        for filter_expr in &scan.filters {
+            for col_ref in filter_expr.column_refs() {
+                if let Ok(idx) = source_schema.index_of(&col_ref.name)
+                    && !projection.contains(&idx)
+                    && !extras.contains(&idx)
+                {
+                    extras.push(idx);
+                }
+            }
+        }
+        if extras.is_empty() {
+            return Ok(Transformed::no(plan));
+        }
+
+        // Build expanded scan with filter columns included.
+        let original_proj = projection.clone();
+        let mut new_proj = projection.clone();
+        new_proj.extend(extras);
+        new_proj.sort_unstable();
+
+        let new_scan = datafusion::logical_expr::TableScan::try_new(
+            scan.table_name.clone(),
+            scan.source.clone(),
+            Some(new_proj.clone()),
+            scan.filters.clone(),
+            scan.fetch,
+        )?;
+
+        // Wrap in a Projection that only exposes the original columns so the
+        // output schema is unchanged — parent nodes (Join, Aggregate, etc.)
+        // won't see the extra filter-only columns.
+        let expanded_plan = LogicalPlan::TableScan(new_scan);
+        let expanded_schema = expanded_plan.schema();
+        // Map each original source-column index to its position in the
+        // expanded (sorted) projection so we pull the right DFSchema field.
+        let proj_exprs: Vec<Expr> = original_proj
+            .iter()
+            .map(|&src_idx| {
+                let pos = new_proj
+                    .iter()
+                    .position(|&p| p == src_idx)
+                    .expect("original column must be in expanded projection");
+                let (qualifier, field) = expanded_schema.qualified_field(pos);
+                Expr::Column(datafusion::common::Column::new(
+                    qualifier.cloned(),
+                    field.name(),
+                ))
+            })
+            .collect();
+
+        let projection_plan = LogicalPlan::Projection(
+            datafusion::logical_expr::Projection::try_new(proj_exprs, Arc::new(expanded_plan))?,
+        );
+
+        Ok(Transformed::yes(projection_plan))
+    }
+}
+
 /// Build a SessionContext from local catalog metadata using a shared LazyPool.
 ///
 /// Pool creation is deferred until the first user-table query, so pg_catalog /
@@ -628,8 +745,8 @@ async fn create_session_context_from_catalog(
     let config = SessionConfig::new()
         .with_information_schema(true)
         .with_default_catalog_and_schema("postgres", default_schema);
-
     let mut ctx = SessionContext::new_with_config(config);
+    ctx.add_optimizer_rule(Arc::new(ScanFilterProjectionFixRule));
     ctx.register_catalog("postgres", Arc::new(catalog));
 
     setup_pg_catalog(&ctx, "postgres", ProxyCatalogContext)

@@ -7,6 +7,9 @@ cargo fmt --check
 echo "→ cargo clippy -p proxy"
 cargo clippy -p proxy -- -D warnings
 
+echo "→ cargo test -p proxy"
+cargo test -p proxy
+
 echo "→ admin-ui typecheck"
 (cd admin-ui && npm run typecheck)
 

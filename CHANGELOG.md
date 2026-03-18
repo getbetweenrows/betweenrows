@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-03-17
+
+### Changed
+- **Dependency upgrades** — Rust 1.94, DataFusion 52.3, Vite 7, TypeScript 5.9
+
+### Fixed
+- **Read-only hook test assertions** — use `as_db_error()` instead of `to_string()` for reliable error matching
+- **Row filter projection expansion** — fix CI test failures related to projection expansion and `table_deny` audit status
+- **Unused variable warning** — fix compiler warning in `catalog_handlers`
+
+### Infrastructure
+- **CI actions upgraded to v5** — `actions/checkout` and `actions/setup-node` updated from v4 to v5 for Node.js 24 support
+
 ## [0.5.0] - 2026-03-16
 
 ### Added

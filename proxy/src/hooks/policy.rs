@@ -2,7 +2,6 @@ use arrow_pg::datatypes::df::encode_dataframe;
 use async_trait::async_trait;
 use chrono::Utc;
 use datafusion::common::ScalarValue;
-use datafusion::logical_expr::logical_plan::TableScan;
 use datafusion::logical_expr::registry::FunctionRegistry;
 use datafusion::logical_expr::{LogicalPlan, LogicalPlanBuilder, col, lit};
 use datafusion::prelude::SessionContext;
@@ -994,67 +993,6 @@ impl PolicyEffects {
             };
 
             tracing::debug!(table = %scan.table_name, "PolicyHook: applying row filter");
-
-            // Expand the TableScan projection to include any columns referenced by the
-            // filter expression. When projection=Some([]) (e.g. COUNT(*) optimisation),
-            // the filter's columns would be missing from the scan's output schema without
-            // this expansion, causing a schema mismatch at execution time.
-            let expanded_projection: Option<Vec<usize>> =
-                if let Some(projection) = &scan.projection {
-                    let col_refs = filter_expr.column_refs();
-                    if col_refs.is_empty() {
-                        // lit(false) and similar zero-column-ref filters: no expansion needed.
-                        None
-                    } else {
-                        let full_schema = scan.source.schema();
-                        let table_name_str = scan.table_name.to_string();
-                        let mut extras: Vec<usize> = Vec::new();
-                        for col_ref in &col_refs {
-                            match full_schema.index_of(&col_ref.name) {
-                                Ok(idx) if !projection.contains(&idx) => extras.push(idx),
-                                Ok(_) => {} // already projected
-                                Err(_) => {
-                                    return Err(datafusion::error::DataFusionError::Plan(
-                                        format!(
-                                            "Row filter references column '{}' not found in table '{table_name_str}'",
-                                            col_ref.name
-                                        ),
-                                    ));
-                                }
-                            }
-                        }
-                        if extras.is_empty() {
-                            None
-                        } else {
-                            let mut new_proj = projection.clone();
-                            new_proj.extend(extras);
-                            new_proj.sort_unstable();
-                            Some(new_proj)
-                        }
-                    }
-                } else {
-                    // projection=None means all columns are already available.
-                    None
-                };
-
-            // Rebuild the TableScan with the expanded projection if needed.
-            // (scan borrow ends above; NLL allows moving node here)
-            let node = if let Some(new_projection) = expanded_projection {
-                let LogicalPlan::TableScan(scan_owned) = node else {
-                    unreachable!()
-                };
-                let new_scan = TableScan::try_new(
-                    scan_owned.table_name,
-                    scan_owned.source,
-                    Some(new_projection),
-                    scan_owned.filters,
-                    scan_owned.fetch,
-                )
-                .map_err(|e| datafusion::error::DataFusionError::Plan(e.to_string()))?;
-                LogicalPlan::TableScan(new_scan)
-            } else {
-                node
-            };
 
             let plan_with_filter = LogicalPlanBuilder::from(node)
                 .filter(filter_expr.clone())
@@ -3021,123 +2959,6 @@ mod tests {
         assert!(
             col_names.contains(&"total"),
             "orders.total remains: {col_names:?}"
-        );
-    }
-
-    // ---------- apply_row_filters projection expansion ----------
-
-    /// Build a scan plan with an explicit column projection (indices into `columns`).
-    fn build_scan_plan_with_projection(
-        schema_table: &str,
-        columns: Vec<(&str, DataType)>,
-        projection: Option<Vec<usize>>,
-    ) -> LogicalPlan {
-        let fields: Vec<Field> = columns
-            .into_iter()
-            .map(|(name, dt)| Field::new(name, dt, true))
-            .collect();
-        let schema = Arc::new(Schema::new(fields));
-        let table = Arc::new(EmptyTable::new(schema));
-        let source = Arc::new(DefaultTableSource::new(table));
-        LogicalPlanBuilder::scan(schema_table, source, projection)
-            .unwrap()
-            .build()
-            .unwrap()
-    }
-
-    fn make_effects_with_row_filter(
-        key: (&str, &str),
-        filter: datafusion::logical_expr::Expr,
-    ) -> PolicyEffects {
-        let mut effects = PolicyEffects {
-            row_filters: HashMap::new(),
-            column_allow_patterns: HashMap::new(),
-            column_deny_patterns: HashMap::new(),
-            column_masks: HashMap::new(),
-            tables_with_permit: HashSet::new(),
-            denied_by_policy: None,
-        };
-        effects
-            .row_filters
-            .insert((key.0.to_string(), key.1.to_string()), filter);
-        effects
-    }
-
-    #[test]
-    fn test_row_filter_expands_narrow_projection() {
-        // TableScan projecting only col index 0 ("id"), filter references col index 1 ("tenant").
-        // After expansion the projection must contain both 0 and 1.
-        let effects = make_effects_with_row_filter(("s1", "orders"), col("tenant").eq(lit("acme")));
-
-        let plan = build_scan_plan_with_projection(
-            "s1.orders",
-            vec![
-                ("id", DataType::Int32),
-                ("tenant", DataType::Utf8),
-                ("amount", DataType::Int32),
-            ],
-            Some(vec![0]), // only "id" projected
-        );
-
-        let result = effects.apply_row_filters(plan).unwrap();
-
-        // The resulting plan must contain a Filter node above the TableScan.
-        let display = format!("{}", result.display_indent());
-        assert!(
-            display.contains("Filter"),
-            "Expected Filter node in plan: {display}"
-        );
-        // And the projected schema must include "tenant".
-        let schema = result.schema();
-        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(
-            field_names.contains(&"tenant"),
-            "Expanded projection must include 'tenant': {field_names:?}"
-        );
-    }
-
-    #[test]
-    fn test_row_filter_no_expand_when_all_columns_present() {
-        // projection=None means all columns — no expansion should be attempted.
-        let effects = make_effects_with_row_filter(("s1", "orders"), col("tenant").eq(lit("acme")));
-
-        // Build a scan with projection=None (all columns)
-        let plan = build_scan_plan(
-            "s1.orders",
-            vec![("id", DataType::Int32), ("tenant", DataType::Utf8)],
-        );
-
-        let result = effects.apply_row_filters(plan).unwrap();
-        let display = format!("{}", result.display_indent());
-        assert!(
-            display.contains("Filter"),
-            "Expected Filter node in plan: {display}"
-        );
-    }
-
-    #[test]
-    fn test_row_filter_lit_false_no_expand() {
-        // lit(false) has zero column refs — narrow projection should NOT be expanded.
-        let effects = make_effects_with_row_filter(("s1", "orders"), lit(false));
-
-        let plan = build_scan_plan_with_projection(
-            "s1.orders",
-            vec![("id", DataType::Int32), ("tenant", DataType::Utf8)],
-            Some(vec![0]), // only "id" projected — must NOT expand for lit(false)
-        );
-
-        let result = effects.apply_row_filters(plan).unwrap();
-        let display = format!("{}", result.display_indent());
-        assert!(
-            display.contains("Filter"),
-            "Expected Filter node in plan: {display}"
-        );
-        // "tenant" must NOT appear in the projected schema (no expansion for lit(false))
-        let schema = result.schema();
-        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(
-            !field_names.contains(&"tenant"),
-            "lit(false) filter must not expand projection: {field_names:?}"
         );
     }
 }

@@ -4,13 +4,7 @@
 
 ### Remaining Integration Test Cases
 
-The following TC-* scenarios are defined but not yet covered by integration tests (`proxy/tests/policy_enforcement.rs`). Implemented cases have already been removed from this list.
-
-- **TC-JOIN-02 (Multi-Table JOIN)**: JOIN 3 tables (`a`, `b`, `c`) all with `id`. **Allow** `id` on `b` only. Verify the result set contains exactly one `id` column (from `b`).
-- **TC-JOIN-03 (Aliasing)**: `SELECT c.email FROM customers AS c`. **Deny** `email` on `customers`. Verify `c.email` is stripped correctly (rewriter resolves alias `c` to `customers`).
-- **TC-ZT-04 (Sidebar Sync)**: Engine `compute_user_visibility` with `row_filter` only. Verify table exists in sidebar but has 0 columns (requires engine-level test or catalog API assertion).
-- **TC-PLAN-01 (CTE Leak)**: `WITH t AS (SELECT * FROM users) SELECT ssn FROM t`. **Deny** `ssn`. Verify `ssn` is stripped inside the CTE definition (at the scan level).
-- **TC-PLAN-02 (Subquery in FROM)**: `SELECT sub.ssn FROM (SELECT * FROM users) AS sub`. **Deny** `ssn`. Verify inner `SELECT *` is rewritten to exclude `ssn`.
+All TC-* scenarios are now covered by integration tests in `proxy/tests/policy_enforcement.rs`. The list below is empty — new scenarios should be added here before implementation.
 
 ### Configurable Policies
 

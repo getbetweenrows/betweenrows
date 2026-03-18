@@ -87,6 +87,8 @@ Replaces a column's value with a masked expression. The `definition` field must 
 
 When multiple `column_mask` policies target the same column, the one with the **lowest priority number** (highest precedence) wins.
 
+When a `row_filter` and `column_mask` target the same column, the row filter always evaluates against the **raw** (unmasked) value. Masking is applied after filtering, so filter predicates are never affected by mask expressions.
+
 ### column_allow
 
 Acts as a **column allowlist**: only the listed columns are visible in schema metadata and query results. All other columns are hidden. This is the only policy type that makes a table accessible in `policy_required` mode.

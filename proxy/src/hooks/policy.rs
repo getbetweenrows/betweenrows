@@ -1006,6 +1006,110 @@ impl PolicyEffects {
             .map_err(PolicyError::PlanTransformation)
     }
 
+    /// Apply column masks at the `TableScan` level via `transform_up`.
+    ///
+    /// For each `TableScan` that has masked columns, injects a `Projection` above the
+    /// scan that replaces the masked column with the mask expression (aliased to the
+    /// original column name). This ensures masks are applied at the source before
+    /// `SubqueryAlias` or CTE nodes can change the DFSchema qualifier, which would
+    /// cause the top-level `apply_projection_qualified` to miss the match.
+    ///
+    /// **Architectural invariant:** All column-level policies (deny, mask, and any future
+    /// types) MUST be enforced at the `TableScan` level via `transform_up` to prevent
+    /// CTE/subquery alias bypass. Top-level projection is defense-in-depth only.
+    fn apply_column_mask_at_scan(&self, plan: LogicalPlan) -> Result<LogicalPlan, PolicyError> {
+        if self.column_masks.is_empty() {
+            return Ok(plan);
+        }
+
+        use datafusion::common::tree_node::{Transformed, TreeNode};
+        use datafusion::logical_expr::Expr;
+
+        let masks = &self.column_masks;
+        let deny_patterns = &self.column_deny_patterns;
+
+        let result = plan.transform_up(|node| {
+            let LogicalPlan::TableScan(ref scan) = node else {
+                return Ok(Transformed::no(node));
+            };
+            let df_schema = scan.table_name.schema().unwrap_or("").to_string();
+            let table = scan.table_name.table().to_string();
+
+            // Check if any column in this table has a mask
+            let has_masks = masks.keys().any(|(s, t, _)| s == &df_schema && t == &table);
+            if !has_masks {
+                return Ok(Transformed::no(node));
+            }
+
+            tracing::debug!(
+                table = %scan.table_name,
+                "PolicyHook: applying column mask at scan level"
+            );
+
+            // Build projection: pass through all columns, replacing masked ones.
+            // Use alias_qualified to preserve the table qualifier on masked columns,
+            // so downstream nodes (CTEs, subqueries) can still resolve them.
+            // Skip mask if the column is also denied (deny beats mask).
+            let schema = node.schema();
+            let key = (df_schema.clone(), table.clone());
+            let all_cols: Vec<&str> = schema.iter().map(|(_, f)| f.name().as_str()).collect();
+            let denied_cols: HashSet<String> = deny_patterns
+                .get(&key)
+                .map_or_else(HashSet::new, |pats| expand_column_patterns(pats, &all_cols));
+
+            // Pre-collect masks for this table to avoid per-column String allocations.
+            let table_masks: HashMap<&str, &Expr> = masks
+                .iter()
+                .filter(|((s, t, _), _)| s == &df_schema && t == &table)
+                .map(|((_, _, c), e)| (c.as_str(), e))
+                .collect();
+
+            let mut exprs: Vec<Expr> = Vec::new();
+            let mut any_masked = false;
+            for (qualifier, field) in schema.iter() {
+                let col_name = field.name().as_str();
+                let is_denied = denied_cols.contains(col_name);
+                if !is_denied && let Some(mask_expr) = table_masks.get(col_name) {
+                    exprs.push(
+                        (*mask_expr)
+                            .clone()
+                            .alias_qualified(qualifier.cloned(), col_name),
+                    );
+                    any_masked = true;
+                    continue;
+                }
+                let col_expr = match qualifier {
+                    Some(tref) => Expr::Column(datafusion::common::Column::new(
+                        Some(tref.clone()),
+                        col_name,
+                    )),
+                    None => col(col_name),
+                };
+                exprs.push(col_expr);
+            }
+
+            // If no columns were actually masked (all overridden by deny), skip
+            // the Projection entirely to keep the plan clean.
+            if !any_masked {
+                tracing::debug!(
+                    table = %scan.table_name,
+                    "PolicyHook: all masked columns overridden by deny — skipping mask Projection"
+                );
+                return Ok(Transformed::no(node));
+            }
+
+            let plan_with_mask = LogicalPlanBuilder::from(node)
+                .project(exprs)
+                .and_then(|b| b.build())
+                .map_err(|e| datafusion::error::DataFusionError::Plan(e.to_string()))?;
+            Ok(Transformed::yes(plan_with_mask))
+        });
+
+        result
+            .map(|t| t.data)
+            .map_err(PolicyError::PlanTransformation)
+    }
+
     /// Apply column allow/deny/mask policies as a single top-level `Projection`.
     ///
     /// Uses the DFSchema's qualifier information (which table each field originated from)
@@ -1019,10 +1123,9 @@ impl PolicyEffects {
     fn apply_projection_qualified(&self, plan: LogicalPlan) -> Result<LogicalPlan, PolicyError> {
         use datafusion::logical_expr::Expr;
 
-        if self.column_allow_patterns.is_empty()
-            && self.column_deny_patterns.is_empty()
-            && self.column_masks.is_empty()
-        {
+        // Note: column_masks are applied at scan level (apply_column_mask_at_scan)
+        // and cleared before this function runs. Only allow/deny need checking here.
+        if self.column_allow_patterns.is_empty() && self.column_deny_patterns.is_empty() {
             return Ok(plan);
         }
 
@@ -1116,6 +1219,17 @@ impl PolicyEffects {
 ///
 /// This function is the testable core extracted from `PolicyHook::handle_query`.
 /// Tests construct a `SessionDataClone` and a `LogicalPlan` directly and call this.
+///
+/// **Enforcement order:**
+/// 1. `apply_column_mask_at_scan` — mask `Projection` injected above each `TableScan` (scan level)
+/// 2. `apply_row_filters` — `Filter` nodes injected below each `TableScan` (scan level)
+/// 3. `apply_projection_qualified` — top-level `Projection` for allow/deny (defense-in-depth for deny)
+///
+/// Masks run before filters so that `transform_up` places `Filter` between `TableScan` and
+/// the mask `Projection`. This ensures row filters evaluate against raw (unmasked) data.
+///
+/// Scan-level enforcement is required because `SubqueryAlias` and CTE nodes can change
+/// the DFSchema qualifier, causing top-level-only matching to miss.
 async fn apply_policies(
     session: &SessionDataClone,
     session_context: &SessionContext,
@@ -1130,7 +1244,17 @@ async fn apply_policies(
     effects.apply_access_mode(&session.access_mode, &user_tables);
 
     let had_effects = effects.has_effects();
-    let plan = effects.apply_row_filters(logical_plan)?;
+    // Masks must be applied before row filters so that row filters evaluate
+    // against raw (unmasked) data. With transform_up, mask runs first and
+    // inserts Projection above TableScan; then row filter inserts Filter
+    // directly above the same TableScan (below the mask Projection).
+    // Result: TableScan → Filter(raw) → Projection(mask) — correct.
+    let plan = effects.apply_column_mask_at_scan(logical_plan)?;
+    let plan = effects.apply_row_filters(plan)?;
+    // Clear masks after scan-level application to prevent double-masking in
+    // apply_projection_qualified (the scan-level mask is the primary enforcement;
+    // the top-level projection is defense-in-depth for allow/deny only).
+    effects.column_masks.clear();
     let plan = effects.apply_projection_qualified(plan)?;
 
     Ok((plan, had_effects))

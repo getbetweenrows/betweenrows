@@ -2557,3 +2557,754 @@ async fn tc_audit_05_write_rejected_audit_status() {
         "TC-AUDIT-05: error_message must mention read-only, got: {err_msg}"
     );
 }
+
+// ===========================================================================
+// TC-JOIN-02: Multi-Table JOIN — 3 tables with shared column name
+//   column_deny scopes correctly per-table in multi-way JOINs
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_join_02_multi_table_join_shared_name() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_join02";
+
+    // All three tables have `id` (join key) and `name` (shared column name).
+    // Deny `name` on tables `a` and `c` only — b.name should remain visible.
+    // Column deny removes columns from the user's schema at connect time
+    // (visibility-level enforcement), so denied columns are invisible to the planner.
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.a;
+             DROP TABLE IF EXISTS {schema}.b;
+             DROP TABLE IF EXISTS {schema}.c;
+             CREATE TABLE {schema}.a (id INT, name TEXT, a_val TEXT);
+             CREATE TABLE {schema}.b (id INT, name TEXT, b_val TEXT);
+             CREATE TABLE {schema}.c (id INT, name TEXT, c_val TEXT);
+             INSERT INTO {schema}.a VALUES (1, 'alpha_name', 'alpha');
+             INSERT INTO {schema}.b VALUES (1, 'beta_name', 'beta');
+             INSERT INTO {schema}.c VALUES (1, 'gamma_name', 'gamma');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_join02", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_join02", "UserPass1!", "default", ds_id)
+        .await;
+
+    // Deny `name` on tables a and c — only b.name should survive in projection
+    server
+        .create_column_deny("deny-a-name-join02", schema, "a", &["name"], ds_id, None)
+        .await;
+    server
+        .create_column_deny("deny-c-name-join02", schema, "c", &["name"], ds_id, None)
+        .await;
+
+    // Allow all columns on all three tables
+    server
+        .create_column_allow("allow-all-join02", schema, "*", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("user_join02", "UserPass1!", "ds_join02")
+        .await;
+
+    // Extended protocol to get column metadata
+    // JOIN on `id` (visible on all tables — not denied)
+    let rows = client
+        .query(
+            &format!(
+                "SELECT * FROM {schema}.a \
+                 JOIN {schema}.b ON a.id = b.id \
+                 JOIN {schema}.c ON b.id = c.id"
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    let col_names: Vec<&str> = rows[0].columns().iter().map(|c| c.name()).collect();
+
+    // a.name and c.name should be denied; b.name should survive.
+    // Remaining columns: a.id, a_val, b.id, b.name, b_val, c.id, c_val = 7
+    let name_count = col_names.iter().filter(|&&n| n == "name").count();
+    assert_eq!(
+        name_count, 1,
+        "TC-JOIN-02: exactly one `name` column should remain (from b), got columns: {col_names:?}"
+    );
+    assert!(col_names.contains(&"a_val"), "a_val must be present");
+    assert!(col_names.contains(&"b_val"), "b_val must be present");
+    assert!(col_names.contains(&"c_val"), "c_val must be present");
+    assert_eq!(
+        col_names.len(),
+        7,
+        "TC-JOIN-02: expected 7 columns total (3x id, 1x name, a_val, b_val, c_val), got {col_names:?}"
+    );
+}
+
+// ===========================================================================
+// TC-JOIN-03: Alias resolution — column_deny + column_mask with table alias
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_join_03a_alias_column_deny() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_join03a";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.customers;
+             CREATE TABLE {schema}.customers (id INT, email TEXT, name TEXT);
+             INSERT INTO {schema}.customers VALUES (1, 'alice@example.com', 'Alice');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_join03a", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_join03a", "UserPass1!", "default", ds_id)
+        .await;
+
+    // Deny email on customers
+    server
+        .create_column_deny(
+            "deny-email-join03a",
+            schema,
+            "customers",
+            &["email"],
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow(
+            "allow-all-join03a",
+            schema,
+            "customers",
+            &["*"],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_join03a", "UserPass1!", "ds_join03a")
+        .await;
+
+    // SELECT * with alias — email should be stripped from star expansion
+    // (column deny is enforced at visibility level — email is invisible to planner)
+    let rows = client
+        .query(&format!("SELECT * FROM {schema}.customers AS c"), &[])
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let col_names: Vec<&str> = rows[0].columns().iter().map(|c| c.name()).collect();
+    assert!(
+        !col_names.contains(&"email"),
+        "TC-JOIN-03a: email must be stripped from SELECT * despite alias, got: {col_names:?}"
+    );
+    assert!(col_names.contains(&"id"), "id must be present");
+    assert!(col_names.contains(&"name"), "name must be present");
+
+    // Explicitly selecting the denied column via alias must error (column not found)
+    let result = client
+        .simple_query(&format!("SELECT c.email FROM {schema}.customers AS c"))
+        .await;
+    assert!(
+        result.is_err(),
+        "TC-JOIN-03a: selecting denied column via alias must error"
+    );
+}
+
+#[tokio::test]
+async fn tc_join_03b_alias_column_mask() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_join03b";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.customers;
+             CREATE TABLE {schema}.customers (id INT, email TEXT, name TEXT);
+             INSERT INTO {schema}.customers VALUES (1, 'alice@example.com', 'Alice');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_join03b", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_join03b", "UserPass1!", "default", ds_id)
+        .await;
+
+    // Mask email on customers
+    server
+        .create_column_allow(
+            "allow-all-join03b",
+            schema,
+            "customers",
+            &["*"],
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_mask(
+            "mask-email-join03b",
+            schema,
+            "customers",
+            "email",
+            "CONCAT('***@', SPLIT_PART(email, '@', 2))",
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_join03b", "UserPass1!", "ds_join03b")
+        .await;
+
+    // SELECT via alias — mask should still apply
+    let msgs = client
+        .simple_query(&format!("SELECT c.email FROM {schema}.customers AS c"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0][0], "***@example.com",
+        "TC-JOIN-03b: mask must apply despite table alias"
+    );
+}
+
+// ===========================================================================
+// TC-ZT-04: Sidebar sync — row_filter only in policy_required mode
+//           (no column_allow → table not visible)
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_zt_04_sidebar_sync_row_filter_only() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_zt04";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.users;
+             CREATE TABLE {schema}.users (id INT, tenant TEXT, name TEXT);
+             INSERT INTO {schema}.users VALUES (1, 'acme', 'Alice');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_zt04", "policy_required").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_zt04", "UserPass1!", "acme", ds_id)
+        .await;
+
+    // row_filter only — NO column_allow. In policy_required mode, this should
+    // NOT grant table visibility. row_filter alone does not grant access.
+    server
+        .create_row_filter(
+            "tenant-filter-zt04",
+            schema,
+            "users",
+            "tenant = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_zt04", "UserPass1!", "ds_zt04")
+        .await;
+
+    // 1. information_schema query — table should not be visible
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = '{schema}'"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(
+        rows.len(),
+        0,
+        "TC-ZT-04: table must not appear in information_schema (row_filter alone \
+         does not grant visibility in policy_required mode)"
+    );
+
+    // 2. Direct query should fail (table not found)
+    let result = client
+        .simple_query(&format!("SELECT * FROM {schema}.users"))
+        .await;
+    assert!(
+        result.is_err(),
+        "TC-ZT-04: querying table with only row_filter (no column_allow) \
+         in policy_required mode must error"
+    );
+
+    // 3. Catalog API — the admin view should still show the table
+    //    (catalog API returns the full discovered catalog, not per-user visibility)
+    let resp = server
+        .admin
+        .get(&format!("/api/v1/datasources/{ds_id}/catalog"))
+        .authorization_bearer(&server.admin_token)
+        .await;
+    resp.assert_status_ok();
+    let body = resp.json::<serde_json::Value>();
+    let empty = vec![];
+    let schemas = body["schemas"].as_array().unwrap_or(&empty);
+    let has_table = schemas.iter().any(|s| {
+        s["schema_name"].as_str() == Some(schema)
+            && s["tables"].as_array().map_or(false, |ts| {
+                ts.iter().any(|t| t["table_name"].as_str() == Some("users"))
+            })
+    });
+    assert!(
+        has_table,
+        "TC-ZT-04: catalog API (admin view) should still show the table, body: {body}"
+    );
+}
+
+// ===========================================================================
+// TC-PLAN-01: CTE leak — column_deny + column_mask + column_allow
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_plan_01a_cte_column_deny() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_plan01a";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.users;
+             CREATE TABLE {schema}.users (id INT, name TEXT, ssn TEXT);
+             INSERT INTO {schema}.users VALUES (1, 'Alice', '123-45-6789');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_plan01a", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_plan01a", "UserPass1!", "default", ds_id)
+        .await;
+
+    // Deny ssn
+    server
+        .create_column_deny("deny-ssn-plan01a", schema, "users", &["ssn"], ds_id, None)
+        .await;
+    server
+        .create_column_allow("allow-all-plan01a", schema, "users", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("user_plan01a", "UserPass1!", "ds_plan01a")
+        .await;
+
+    // CTE with SELECT * — ssn should be absent (deny strips at visibility level,
+    // so the inner SELECT * doesn't include ssn in the CTE output)
+    let rows = client
+        .query(
+            &format!(
+                "WITH t AS (SELECT * FROM {schema}.users) \
+                 SELECT * FROM t"
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    let col_names: Vec<&str> = rows[0].columns().iter().map(|c| c.name()).collect();
+    assert!(
+        !col_names.contains(&"ssn"),
+        "TC-PLAN-01a: ssn must be denied even through CTE, got columns: {col_names:?}"
+    );
+    assert!(col_names.contains(&"id"), "id must be present");
+    assert!(col_names.contains(&"name"), "name must be present");
+
+    // Explicitly selecting the denied column through CTE must error
+    // (column is invisible at planning time, not in CTE output schema)
+    let result = client
+        .simple_query(&format!(
+            "WITH t AS (SELECT * FROM {schema}.users) SELECT ssn FROM t"
+        ))
+        .await;
+    assert!(
+        result.is_err(),
+        "TC-PLAN-01a: selecting denied column through CTE must error"
+    );
+}
+
+#[tokio::test]
+async fn tc_plan_01b_cte_column_mask() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_plan01b";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.users;
+             CREATE TABLE {schema}.users (id INT, name TEXT, ssn TEXT);
+             INSERT INTO {schema}.users VALUES (1, 'Alice', '123-45-6789');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_plan01b", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_plan01b", "UserPass1!", "default", ds_id)
+        .await;
+
+    // Mask ssn
+    server
+        .create_column_allow("allow-all-plan01b", schema, "users", &["*"], ds_id, None)
+        .await;
+    server
+        .create_column_mask(
+            "mask-ssn-plan01b",
+            schema,
+            "users",
+            "ssn",
+            "CONCAT('***-**-', RIGHT(ssn, 4))",
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_plan01b", "UserPass1!", "ds_plan01b")
+        .await;
+
+    // CTE wrapping should not bypass column mask
+    let msgs = client
+        .simple_query(&format!(
+            "WITH t AS (SELECT * FROM {schema}.users) SELECT ssn FROM t"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0][0], "***-**-6789",
+        "TC-PLAN-01b: mask must apply through CTE, not raw value"
+    );
+}
+
+#[tokio::test]
+async fn tc_plan_01c_cte_column_allow() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_plan01c";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.users;
+             CREATE TABLE {schema}.users (id INT, name TEXT, ssn TEXT);
+             INSERT INTO {schema}.users VALUES (1, 'Alice', '123-45-6789');"
+        ))
+        .await;
+
+    let ds_id = server
+        .create_datasource("ds_plan01c", "policy_required")
+        .await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_plan01c", "UserPass1!", "default", ds_id)
+        .await;
+
+    // Allow only id and name (NOT ssn)
+    server
+        .create_column_allow(
+            "allow-limited-plan01c",
+            schema,
+            "users",
+            &["id", "name"],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_plan01c", "UserPass1!", "ds_plan01c")
+        .await;
+
+    // CTE wrapping should not bypass column allow
+    let result = client
+        .simple_query(&format!(
+            "WITH t AS (SELECT * FROM {schema}.users) SELECT ssn FROM t"
+        ))
+        .await;
+    assert!(
+        result.is_err(),
+        "TC-PLAN-01c: ssn not in allow list, CTE must not bypass column_allow"
+    );
+}
+
+// ===========================================================================
+// TC-PLAN-02: Subquery-in-FROM leak — column_deny + column_mask + column_allow
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_plan_02a_subquery_column_deny() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_plan02a";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.users;
+             CREATE TABLE {schema}.users (id INT, name TEXT, ssn TEXT);
+             INSERT INTO {schema}.users VALUES (1, 'Alice', '123-45-6789');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_plan02a", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_plan02a", "UserPass1!", "default", ds_id)
+        .await;
+
+    // Deny ssn
+    server
+        .create_column_deny("deny-ssn-plan02a", schema, "users", &["ssn"], ds_id, None)
+        .await;
+    server
+        .create_column_allow("allow-all-plan02a", schema, "users", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("user_plan02a", "UserPass1!", "ds_plan02a")
+        .await;
+
+    // Subquery with SELECT * — ssn should be absent (deny strips at visibility
+    // level, so the inner SELECT * doesn't include ssn in subquery output)
+    let rows = client
+        .query(
+            &format!("SELECT * FROM (SELECT * FROM {schema}.users) AS sub"),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    let col_names: Vec<&str> = rows[0].columns().iter().map(|c| c.name()).collect();
+    assert!(
+        !col_names.contains(&"ssn"),
+        "TC-PLAN-02a: ssn must be denied even through subquery, got columns: {col_names:?}"
+    );
+    assert!(col_names.contains(&"id"), "id must be present");
+    assert!(col_names.contains(&"name"), "name must be present");
+
+    // Explicitly selecting the denied column through subquery must error
+    // (column is invisible at planning time, not in subquery output schema)
+    let result = client
+        .simple_query(&format!(
+            "SELECT sub.ssn FROM (SELECT * FROM {schema}.users) AS sub"
+        ))
+        .await;
+    assert!(
+        result.is_err(),
+        "TC-PLAN-02a: selecting denied column through subquery must error"
+    );
+}
+
+#[tokio::test]
+async fn tc_plan_02b_subquery_column_mask() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_plan02b";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.users;
+             CREATE TABLE {schema}.users (id INT, name TEXT, ssn TEXT);
+             INSERT INTO {schema}.users VALUES (1, 'Alice', '123-45-6789');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_plan02b", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_plan02b", "UserPass1!", "default", ds_id)
+        .await;
+
+    // Mask ssn
+    server
+        .create_column_allow("allow-all-plan02b", schema, "users", &["*"], ds_id, None)
+        .await;
+    server
+        .create_column_mask(
+            "mask-ssn-plan02b",
+            schema,
+            "users",
+            "ssn",
+            "CONCAT('***-**-', RIGHT(ssn, 4))",
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_plan02b", "UserPass1!", "ds_plan02b")
+        .await;
+
+    // Subquery wrapping should not bypass column mask
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT sub.ssn FROM (SELECT * FROM {schema}.users) AS sub"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0][0], "***-**-6789",
+        "TC-PLAN-02b: mask must apply through subquery, not raw value"
+    );
+}
+
+#[tokio::test]
+async fn tc_plan_02c_subquery_column_allow() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_plan02c";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.users;
+             CREATE TABLE {schema}.users (id INT, name TEXT, ssn TEXT);
+             INSERT INTO {schema}.users VALUES (1, 'Alice', '123-45-6789');"
+        ))
+        .await;
+
+    let ds_id = server
+        .create_datasource("ds_plan02c", "policy_required")
+        .await;
+    server.discover(ds_id, &[schema]).await;
+    let _user = server
+        .create_user("user_plan02c", "UserPass1!", "default", ds_id)
+        .await;
+
+    // Allow only id and name (NOT ssn)
+    server
+        .create_column_allow(
+            "allow-limited-plan02c",
+            schema,
+            "users",
+            &["id", "name"],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("user_plan02c", "UserPass1!", "ds_plan02c")
+        .await;
+
+    // Subquery wrapping should not bypass column allow
+    let result = client
+        .simple_query(&format!(
+            "SELECT sub.ssn FROM (SELECT * FROM {schema}.users) AS sub"
+        ))
+        .await;
+    assert!(
+        result.is_err(),
+        "TC-PLAN-02c: ssn not in allow list, subquery must not bypass column_allow"
+    );
+}
+
+// ===========================================================================
+// TC-FILT-MASK-01: Row filter + column mask on same column
+// ===========================================================================
+
+#[tokio::test]
+async fn row_filter_and_column_mask_same_column() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_fm01";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.people;
+             CREATE TABLE {schema}.people (id INT, ssn TEXT, tenant TEXT);
+             INSERT INTO {schema}.people VALUES
+               (1, '123-45-6789', 'acme'),
+               (2, '000-00-0000', 'acme'),
+               (3, '987-65-4321', 'acme');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_fm01", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("user_fm01", "UserPass1!", "acme", ds_id)
+        .await;
+
+    // Row filter: exclude the row where ssn = '000-00-0000'
+    server
+        .create_row_filter(
+            "rf-ssn-fm01",
+            schema,
+            "people",
+            "ssn != '000-00-0000'",
+            ds_id,
+            None,
+        )
+        .await;
+
+    // Column mask: mask ssn to '***-**-XXXX'
+    server
+        .create_column_mask(
+            "mask-ssn-fm01",
+            schema,
+            "people",
+            "ssn",
+            "CONCAT('***-**-', RIGHT(ssn, 4))",
+            ds_id,
+            None,
+        )
+        .await;
+
+    server
+        .create_column_allow("allow-all-fm01", schema, "people", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("user_fm01", "UserPass1!", "ds_fm01")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT id, ssn FROM {schema}.people ORDER BY id"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    // Row filter must evaluate against raw data, so row 2 (ssn='000-00-0000')
+    // is excluded. If the filter ran on masked data, '***-**-0000' != '000-00-0000'
+    // would pass and we'd get 3 rows — that's the bug.
+    assert_eq!(
+        rows.len(),
+        2,
+        "TC-FILT-MASK-01: row filter should exclude ssn='000-00-0000' before masking"
+    );
+    assert_eq!(rows[0][0], "1");
+    assert_eq!(rows[0][1], "***-**-6789", "ssn should be masked");
+    assert_eq!(rows[1][0], "3");
+    assert_eq!(rows[1][1], "***-**-4321", "ssn should be masked");
+}

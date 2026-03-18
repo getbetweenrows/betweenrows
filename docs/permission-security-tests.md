@@ -66,9 +66,9 @@ WITH data AS (SELECT * FROM orders) SELECT * FROM data
 
 **Vector**: User writes `SELECT ssn || '' FROM customers` to bypass masking of `ssn`.
 
-**Defense**: Column masking works by replacing `col("ssn")` in the `Projection` node. If `ssn || ''` is used, the `ssn` reference still passes through the `Projection` as a sub-expression. The proxy replaces the `ssn` column reference inside the expression with the masked value.
+**Defense**: Column masking is enforced at the `TableScan` level — `apply_column_mask_at_scan` injects a `Projection` above each scan that replaces the masked column with the mask expression. For direct `SELECT ssn`, the mask is applied before any downstream node sees the raw value. However, if the user writes `SELECT ssn || '' FROM customers`, the `ssn` column reference in the compound expression resolves to the already-masked value from the scan-level Projection, so the concatenation operates on masked data.
 
-**Note**: This is a known limitation for P0 — column masking replaces direct `col(name)` references in the projection. Compound expressions that reference the column are not masked. This is a P1 enhancement.
+**Note**: This is a known limitation for P0 — scan-level masking replaces the column at the source, but compound expressions that reference the column in the user's `SELECT` list operate on the masked value, not the original. The result is masked (not raw), but the transformation may produce unexpected output (e.g., `***-**-6789` concatenated with empty string). This is a P1 enhancement.
 
 **Test**: Document the limitation. Verify `SELECT ssn FROM customers` returns masked value. Verify `SELECT ssn || '' FROM customers` is treated as a limitation/known gap.
 
@@ -323,4 +323,80 @@ There is no ambiguous per-definition `action` field. `compute_user_visibility()`
 **Defense**: `table_deny` tables are removed from the per-user catalog at connection time (`build_user_context` / `compute_user_visibility`). Queries against a denied table fail with "table not found" — indistinguishable from querying a non-existent table. The audit status is `"error"` (not `"denied"`), which matches any other query planning failure, providing no additional signal to the attacker.
 
 **Test**: `deny_policy_row_filter_rejected` — error message must not contain the policy name. `tc_audit_02_denied_audit_status` — audit status is `"error"`, `error_message` does not contain the policy name. `tc_audit_04_status_filter` — `status=error` filter matches these entries.
+
+---
+
+### 27. Column deny scoping in multi-table JOINs
+
+**Vector**: Three tables (`a`, `b`, `c`) share a column name (`name`). Denying `name` on `a` and `c` might accidentally also strip `b.name` if the deny logic uses unqualified matching.
+
+**Defense**: Column deny is enforced at two levels: (1) visibility-level via `compute_user_visibility` / `build_user_context` — denied columns are removed from the per-user `SessionContext` schema at connect time, scoped per-table; (2) defense-in-depth via `apply_projection_qualified` — the top-level Projection uses DFSchema qualifiers to scope deny patterns to their source table.
+
+**Test**: `tc_join_02_multi_table_join_shared_name` — JOIN 3 tables all with `name`. Deny `name` on `a` and `c`. `SELECT *` returns exactly one `name` column (from `b`), plus `id` from all three tables and `a_val`, `b_val`, `c_val`.
+
+---
+
+### 28. Table alias does not bypass column deny or column mask
+
+**Vector**: User aliases a table (`SELECT * FROM customers AS c`) hoping the alias bypasses column-level policies. If the policy rewriter only checks the real table name, and the planner resolves columns under the alias qualifier, denied or masked columns might leak.
+
+**Defense**: Column deny is enforced at visibility level — denied columns are removed from the schema before query planning, so they never appear in `SELECT *` regardless of alias. Column mask is enforced at the `TableScan` level via `apply_column_mask_at_scan` (injected `Projection` above each scan), which operates on the real `TableScan` table name before any alias is applied.
+
+**Test**:
+- `tc_join_03a_alias_column_deny` — deny `email` on `customers`. `SELECT * FROM customers AS c` returns only `id, name`. `SELECT c.email FROM customers AS c` errors (column not found).
+- `tc_join_03b_alias_column_mask` — mask `email` on `customers`. `SELECT c.email FROM customers AS c` returns the masked value `***@example.com`, not the raw email.
+
+---
+
+### 29. row_filter alone does not grant visibility in policy_required mode
+
+**Vector**: In `policy_required` mode, a `row_filter` policy is assigned to a table but no `column_allow` policy. If `row_filter` silently grants table visibility, the user can see the table in `information_schema` and query it, bypassing the zero-trust model.
+
+**Defense**: `compute_user_visibility` only adds tables to `visible_tables` when a `column_allow` policy exists. `row_filter` and `column_mask` do not grant table access. Without a `column_allow` policy, the table is excluded from the per-user `SessionContext`, making it invisible in both `information_schema` queries and direct table references.
+
+**Test**: `tc_zt_04_sidebar_sync_row_filter_only` — `policy_required` datasource with only a `row_filter` on `users`. `SELECT ... FROM information_schema.tables` returns 0 rows for the schema. Direct `SELECT * FROM users` errors (table not found). Catalog admin API still shows the table (admin view is unfiltered).
+
+---
+
+### 30. CTE wrapping does not bypass column deny, column mask, or column allow
+
+**Vector**: User wraps a table in a CTE (`WITH t AS (SELECT * FROM users) SELECT ssn FROM t`) hoping that the CTE alias changes the column qualifier, causing deny/mask/allow patterns to miss.
+
+**Defense**: Column deny is enforced at visibility level — denied columns are excluded from the `SELECT *` inside the CTE, so they never appear in the CTE output schema. Column mask is enforced at `TableScan` level via `apply_column_mask_at_scan`, which injects a mask `Projection` above the scan before the CTE node is constructed. Column allow (in `policy_required` mode) restricts the schema to allowed columns only, so non-allowed columns are absent from the CTE output.
+
+**Bug found**: Column mask was previously only applied at the top-level `Projection` via `apply_projection_qualified`. CTE nodes (`SubqueryAlias`) change the DFSchema qualifier from the real table name to the CTE alias, causing the top-level mask matching to miss. Raw values leaked through CTEs.
+
+**Fix**: Added `apply_column_mask_at_scan` method in `PolicyEffects` — applies column masks at the `TableScan` level via `transform_up`, before CTE/subquery nodes can change the qualifier. Uses `alias_qualified` to preserve the table qualifier on the masked column. Masks cleared from `column_masks` after scan-level application to prevent double-masking.
+
+**Test**:
+- `tc_plan_01a_cte_column_deny` — deny `ssn`. CTE `SELECT *` excludes `ssn`. Explicit `SELECT ssn FROM t` errors.
+- `tc_plan_01b_cte_column_mask` — mask `ssn`. CTE `SELECT ssn FROM t` returns masked value `***-**-6789`.
+- `tc_plan_01c_cte_column_allow` — allow only `id, name`. CTE `SELECT ssn FROM t` errors (not in allow list).
+
+---
+
+### 31. Subquery-in-FROM wrapping does not bypass column deny, column mask, or column allow
+
+**Vector**: User wraps a table in a subquery (`SELECT sub.ssn FROM (SELECT * FROM users) AS sub`) hoping that the `SubqueryAlias` changes the qualifier from `users` to `sub`, causing deny/mask/allow patterns to miss at the top-level Projection.
+
+**Defense**: Same as CTE (vector 30). Column deny works at visibility level. Column mask works at `TableScan` level via `apply_column_mask_at_scan`. Column allow restricts the schema before the subquery is constructed.
+
+**Bug found**: Same as CTE — column mask was bypassed by subquery aliasing. Fixed by scan-level mask enforcement.
+
+**Test**:
+- `tc_plan_02a_subquery_column_deny` — deny `ssn`. Subquery `SELECT *` excludes `ssn`. Explicit `SELECT sub.ssn` errors.
+- `tc_plan_02b_subquery_column_mask` — mask `ssn`. Subquery `SELECT sub.ssn` returns masked value `***-**-6789`.
+- `tc_plan_02c_subquery_column_allow` — allow only `id, name`. Subquery `SELECT sub.ssn` errors (not in allow list).
+
+---
+
+### 32. Row filter + column mask on the same column
+
+**Vector**: A row filter and column mask target the same column (e.g. `ssn`). If masks are applied before filters in the plan tree, row filters evaluate against masked values instead of raw data, causing incorrect filtering. Example: filter `ssn != '000-00-0000'` passes on masked value `'***-**-0000'`, leaking a row that should be excluded.
+
+**Bug found**: `apply_row_filters` ran before `apply_column_mask_at_scan`. Both use `transform_up` on `TableScan`, producing `Filter(row_filter) → Projection(mask) → TableScan`. Data flows bottom-up: scan → mask → filter, so the filter saw masked values.
+
+**Defense**: Swap the call order so masks are applied first. With `apply_column_mask_at_scan` running before `apply_row_filters`, `transform_up` places the `Filter` between `TableScan` and the mask `Projection`: `Projection(mask) → Filter(row_filter) → TableScan`. Data flows: scan → filter (raw data) → mask. Row filters always evaluate against unmasked values.
+
+**Test**: `row_filter_and_column_mask_same_column` — filter excludes `ssn = '000-00-0000'`, mask replaces ssn with `'***-**-XXXX'`. Verifies 2 rows returned (not 3) and values are masked.
 

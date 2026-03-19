@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-03-18
+
+### Added
+- **Scan-level column masking** — Column masks now apply at the `TableScan` level via `transform_up` instead of only at the top-level Projection, preventing CTE and subquery nodes from bypassing masks by changing the DFSchema qualifier.
+  - Masks run before row filters so filters evaluate against raw (unmasked) data
+  - Integration tests for multi-table JOINs with scoped column deny, CTE mask bypass prevention, subquery mask enforcement, and combined mask+deny+filter scenarios
+
 ## [0.5.1] - 2026-03-17
 
 ### Changed

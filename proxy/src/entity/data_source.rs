@@ -24,13 +24,13 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(has_many = "super::user_data_source::Entity")]
-    UserDataSource,
+    #[sea_orm(has_many = "super::data_source_access::Entity")]
+    DataSourceAccess,
 }
 
-impl Related<super::user_data_source::Entity> for Entity {
+impl Related<super::data_source_access::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::UserDataSource.def()
+        Relation::DataSourceAccess.def()
     }
 }
 

@@ -149,8 +149,52 @@ impl ProxyHandler {
                         tracing::warn!(
                             error = %e,
                             conn_id,
-                            "Failed to rebuild SessionContext after policy change"
+                            "Failed to rebuild SessionContext — removing stale connection"
                         );
+                        conn_store.connection_contexts.remove(&conn_id);
+                    }
+                }
+            });
+        }
+    }
+
+    /// Rebuild the per-user `SessionContext` for all active connections of a specific user.
+    ///
+    /// Called after role membership/inheritance changes so that the affected user immediately
+    /// sees the updated schema without needing to reconnect.
+    pub fn rebuild_contexts_for_user(&self, user_id: uuid::Uuid) {
+        let entries: Vec<(u64, uuid::Uuid, String)> = self
+            .conn_store
+            .connection_contexts
+            .iter()
+            .filter(|e| e.value().user_id == user_id)
+            .map(|e| {
+                (
+                    *e.key(),
+                    e.value().user_id,
+                    e.value().datasource_name.clone(),
+                )
+            })
+            .collect();
+
+        for (conn_id, uid, ds_name) in entries {
+            let engine_cache = self.engine_cache.clone();
+            let conn_store = self.conn_store.clone();
+            tokio::spawn(async move {
+                match engine_cache.build_user_context(uid, &ds_name).await {
+                    Ok(new_ctx) => {
+                        if let Some(mut entry) = conn_store.connection_contexts.get_mut(&conn_id) {
+                            entry.ctx = new_ctx;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            conn_id,
+                            user_id = %uid,
+                            "Failed to rebuild SessionContext — removing stale connection"
+                        );
+                        conn_store.connection_contexts.remove(&conn_id);
                     }
                 }
             });

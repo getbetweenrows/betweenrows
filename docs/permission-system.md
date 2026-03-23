@@ -4,7 +4,7 @@ BetweenRows has a policy-based permission system that controls what data users c
 
 ## Mental model
 
-Permissions are defined as **policies**. A policy is a named, reusable unit with a single **policy type** that determines what it does to a query. Policies are **assigned** to a datasource (optionally scoped to a specific user).
+Permissions are defined as **policies**. A policy is a named, reusable unit with a single **policy type** that determines what it does to a query. Policies are **assigned** to a datasource, scoped to all users, a specific user, or a role.
 
 When a user runs a query:
 1. The proxy loads all **enabled** policies assigned to the datasource for that user.
@@ -333,6 +333,136 @@ When a policy is mutated (create, update, delete, enable/disable) via the admin 
 - All active connections on the affected datasource have their SessionContexts rebuilt in the background (schema visibility)
 - Both layers update together — no reconnect required, no stale window
 - Rebuilds happen concurrently per-connection; failures log a warning but do not disconnect users
+
+## Roles (RBAC)
+
+Roles provide a named grouping layer for managing policy assignments and datasource access at scale. Instead of assigning policies to individual users, assign them to a role and add users to the role.
+
+### Role basics
+
+- **Global scope** — roles are not scoped to datasources. Scoping happens at the assignment level.
+- **Soft delete** — roles have an `is_active` flag. Deactivated roles are excluded from policy/access resolution but remain visible in the admin API for reactivation.
+- **Name validation** — 3-50 characters, starts with a letter, only `[a-zA-Z0-9_.-]`.
+
+### Role hierarchy (DAG)
+
+Roles support a directed acyclic graph (DAG) hierarchy via parent-child relationships:
+
+- A child role inherits all policy assignments from its parent roles.
+- Multiple parents are allowed (diamond inheritance).
+- Maximum depth: 10 levels.
+- Cycle detection, depth check, and insertion are wrapped in a single transaction — the API rejects any inheritance edge that would create a cycle or exceed the depth limit.
+- SQLite's single-writer serialization provides additional protection against concurrent race-condition cycles.
+
+Example:
+```
+finance-analyst ─── inherits from ─── finance
+                └── inherits from ─── analyst
+```
+Users in `finance-analyst` get policies from both `finance` and `analyst`.
+
+### Assignment scopes
+
+Policy assignments now have an `assignment_scope` field:
+
+| Scope | Target field | Meaning |
+|-------|-------------|---------|
+| `user` | `user_id` | Applies to a specific user |
+| `role` | `role_id` | Applies to all members of a role (including inherited members) |
+| `all` | neither | Applies to all users on the datasource |
+
+The old convention of NULL `user_id` meaning "all users" is preserved via backfill migration.
+
+### Datasource access
+
+The `data_source_access` table (replacing `user_data_source`) supports the same three scopes:
+- **User-scoped**: direct user access to a datasource (managed via User Access panel on datasource edit page)
+- **Role-scoped**: all members of a role can connect to the datasource (managed via Role Access panel on datasource edit page). Only active roles can be granted access — inactive roles are rejected.
+- **All-scoped**: everyone can connect
+
+The role edit page shows a "Data Sources" tab listing all datasource access (both direct and inherited from parent roles).
+
+### Connection-time access check
+
+When a user connects to a datasource via the PostgreSQL wire protocol, the proxy runs `check_access(user_id, datasource_name)` during the startup handshake. This calls `resolve_datasource_access()` in `role_resolver.rs`, which checks the `data_source_access` table for any matching entry across all three scopes:
+
+1. `scope = 'all'` AND `data_source_id` matches → access granted
+2. `scope = 'user'` AND `user_id` matches → access granted
+3. `scope = 'role'` AND `role_id` is in the user's resolved roles (via `resolve_user_roles()` BFS) → access granted
+
+If no matching entry is found, the connection is rejected with a "not assigned to this data source" error. This check runs before `build_user_context()` — a user cannot connect at all without at least one matching `data_source_access` entry.
+
+### Priority and deduplication
+
+- **Unified priority**: the assignment's stated priority is used regardless of whether it comes from a direct assignment, role assignment, or inherited role.
+- **Deduplication**: if the same policy is assigned via multiple paths (e.g., directly and via a role), only the lowest priority (highest precedence) assignment is used.
+
+### Deny always wins
+
+`column_deny` and `table_deny` policies cannot be overridden by `column_allow` from another role. If any path (direct or inherited) applies a deny policy, it takes effect regardless of allow policies from other sources.
+
+### Template variables resolve from the user
+
+Template variables (`{user.tenant}`, `{user.username}`, `{user.id}`) always resolve from the connecting user's attributes, not the role. A `row_filter` policy with `{user.tenant}` assigned to a role will filter by each member's individual tenant.
+
+### Immediate effect
+
+Role changes take effect immediately for active connections:
+- **Member add/remove**: the affected user's session context is rebuilt in the background.
+- **Inheritance add/remove**: all users in the child subtree have their contexts rebuilt.
+- **Role deactivate/reactivate**: all direct and inherited members are affected.
+- **Role delete**: all members lose role-granted policies immediately (cascade delete on FK).
+
+### Effective members
+
+The role detail endpoint and the Members tab show **effective members** — users who are direct members of the role plus users who are members of child roles (inherited via the role hierarchy). Each member is annotated with a source:
+- `"direct"` — the user is a direct member of this role
+- `"via role '<name>'"` — the user is a member of the named child role
+
+Only direct members can be removed from the Members tab. Inherited members must be removed from their source role.
+
+`GET /roles/{id}/effective-members` returns the full effective member list with source annotations.
+
+### Effective policy preview
+
+`GET /users/{id}/effective-policies?datasource_id=X` returns all policies that apply to a user on a given datasource, annotated with the source (direct, role name, or inherited role name).
+
+### Admin audit log
+
+All admin mutations (roles, users, policies, datasources) are recorded in the `admin_audit_log` table. This is an append-only table — no UPDATE or DELETE endpoints are exposed. Each entry records the resource type, resource ID, action, actor, and a JSON `changes` field with before/after snapshots.
+
+**Atomicity:** All admin mutation handlers use `AuditedTxn` (from `admin_audit.rs`), a wrapper around `DatabaseTransaction` that queues audit entries and writes them atomically on `commit()`. This makes it structurally impossible to commit a mutation without its audit entry, or to write an audit entry outside the transaction boundary. `AuditedTxn::commit()` errors if no audit entries were queued, preventing accidentally unaudited transactions.
+
+The admin UI provides two views into the audit log:
+- **Centralized Admin Audit page** (`/admin-audit`) — filterable by resource type, actor ID, and date range. Shows all admin mutations across the system.
+- **Per-entity Activity tabs/sections** — embedded on role, user, policy, and datasource edit pages using the `AuditTimeline` component. Shows audit entries scoped to that specific entity.
+
+### Example: role-based access
+
+```yaml
+# Create roles
+POST /roles { "name": "finance-analyst" }
+POST /roles { "name": "finance" }
+
+# Set up inheritance
+POST /roles/{finance-analyst-id}/parents { "parent_role_id": "{finance-id}" }
+
+# Grant datasource access to role
+PUT /datasources/{ds-id}/access/roles { "role_ids": ["{finance-id}"] }
+
+# Assign policy to role
+POST /datasources/{ds-id}/policies {
+  "policy_id": "{tenant-filter-id}",
+  "role_id": "{finance-id}",
+  "scope": "role",
+  "priority": 100
+}
+
+# Add user to role
+POST /roles/{finance-analyst-id}/members { "user_ids": ["{alice-id}"] }
+```
+
+Alice now has datasource access (via `finance` inheritance) and the tenant-filter policy.
 
 ## Management vs. data permissions
 

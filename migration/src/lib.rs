@@ -23,6 +23,24 @@ mod m20260316_000020_drop_policy_tables;
 mod m20260316_000021_create_policy_v2;
 mod m20260316_000022_create_policy_version_v2;
 mod m20260316_000023_create_policy_assignment_v2;
+mod m20260320_000024_create_role;
+mod m20260320_000025_create_role_member;
+mod m20260320_000026_idx_role_member_unique;
+mod m20260320_000027_create_role_inheritance;
+mod m20260320_000028_idx_role_inheritance_unique;
+mod m20260320_000029_create_admin_audit_log;
+mod m20260320_000030_idx_admin_audit_resource;
+mod m20260320_000031_idx_admin_audit_created_at;
+mod m20260320_000032_add_scope_to_policy_assignment;
+mod m20260320_000033_backfill_policy_assignment_scope;
+mod m20260320_000034_add_role_id_to_policy_assignment;
+mod m20260320_000035_create_data_source_access;
+mod m20260320_000036_migrate_user_data_source;
+mod m20260320_000037_drop_user_data_source;
+mod m20260320_000038_idx_data_source_access_unique;
+mod m20260320_000039_fk_data_source_access_user;
+mod m20260320_000040_fk_data_source_access_role;
+mod m20260320_000041_fk_role_inheritance_child;
 
 pub struct Migrator;
 
@@ -53,6 +71,24 @@ impl MigratorTrait for Migrator {
             Box::new(m20260316_000021_create_policy_v2::Migration),
             Box::new(m20260316_000022_create_policy_version_v2::Migration),
             Box::new(m20260316_000023_create_policy_assignment_v2::Migration),
+            Box::new(m20260320_000024_create_role::Migration),
+            Box::new(m20260320_000025_create_role_member::Migration),
+            Box::new(m20260320_000026_idx_role_member_unique::Migration),
+            Box::new(m20260320_000027_create_role_inheritance::Migration),
+            Box::new(m20260320_000028_idx_role_inheritance_unique::Migration),
+            Box::new(m20260320_000029_create_admin_audit_log::Migration),
+            Box::new(m20260320_000030_idx_admin_audit_resource::Migration),
+            Box::new(m20260320_000031_idx_admin_audit_created_at::Migration),
+            Box::new(m20260320_000032_add_scope_to_policy_assignment::Migration),
+            Box::new(m20260320_000033_backfill_policy_assignment_scope::Migration),
+            Box::new(m20260320_000034_add_role_id_to_policy_assignment::Migration),
+            Box::new(m20260320_000035_create_data_source_access::Migration),
+            Box::new(m20260320_000036_migrate_user_data_source::Migration),
+            Box::new(m20260320_000037_drop_user_data_source::Migration),
+            Box::new(m20260320_000038_idx_data_source_access_unique::Migration),
+            Box::new(m20260320_000039_fk_data_source_access_user::Migration),
+            Box::new(m20260320_000040_fk_data_source_access_role::Migration),
+            Box::new(m20260320_000041_fk_role_inheritance_child::Migration),
         ]
     }
 }

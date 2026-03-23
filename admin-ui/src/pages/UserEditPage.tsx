@@ -6,6 +6,7 @@ import { UserForm } from '../components/UserForm'
 import { PasswordInput } from '../components/PasswordInput'
 import { PasswordStrengthIndicator } from '../components/PasswordStrengthIndicator'
 import { validatePassword } from '../utils/passwordValidation'
+import { AuditTimeline } from '../components/AuditTimeline'
 import type { UpdateUserPayload } from '../types/user'
 
 export function UserEditPage() {
@@ -127,6 +128,12 @@ export function UserEditPage() {
           {pwError && <p className="text-sm text-red-600">{pwError}</p>}
         </form>
         {pwSuccess && <p className="text-sm text-green-600 mt-2">Password updated.</p>}
+      </section>
+
+      {/* Activity */}
+      <section className="border-t border-gray-200 pt-8">
+        <h2 className="text-base font-semibold text-gray-900 mb-3">Activity</h2>
+        <AuditTimeline resourceType="user" resourceId={userId} />
       </section>
     </div>
   )

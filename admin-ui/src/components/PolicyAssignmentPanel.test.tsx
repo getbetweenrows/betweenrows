@@ -18,9 +18,14 @@ vi.mock('../api/users', () => ({
   listUsers: vi.fn(),
 }))
 
+vi.mock('../api/roles', () => ({
+  listRoles: vi.fn(),
+}))
+
 import { listDatasourcePolicies, assignPolicy } from '../api/policies'
 import { listDataSources } from '../api/datasources'
 import { listUsers } from '../api/users'
+import { listRoles } from '../api/roles'
 import {
   PolicyAssignmentsReadonly,
   PolicyAssignmentEditPanel,
@@ -31,6 +36,7 @@ const mockListDsPolicies = listDatasourcePolicies as ReturnType<typeof vi.fn>
 const mockAssignPolicy = assignPolicy as ReturnType<typeof vi.fn>
 const mockListDataSources = listDataSources as ReturnType<typeof vi.fn>
 const mockListUsers = listUsers as ReturnType<typeof vi.fn>
+const mockListRoles = listRoles as ReturnType<typeof vi.fn>
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -38,6 +44,7 @@ beforeEach(() => {
   mockAssignPolicy.mockResolvedValue({})
   mockListDataSources.mockResolvedValue({ data: [], total: 0, page: 1, page_size: 200 })
   mockListUsers.mockResolvedValue({ data: [], total: 0, page: 1, page_size: 100 })
+  mockListRoles.mockResolvedValue({ data: [], total: 0, page: 1, page_size: 200 })
 })
 
 // ===== PolicyAssignmentsReadonly =====
@@ -53,6 +60,7 @@ describe('PolicyAssignmentsReadonly', () => {
       data_source_id: 'ds-1',
       datasource_name: 'prod-db',
       username: 'alice',
+      assignment_scope: 'user',
       priority: 50,
     })
     renderWithProviders(<PolicyAssignmentsReadonly assignments={[a]} />)
@@ -61,10 +69,10 @@ describe('PolicyAssignmentsReadonly', () => {
     expect(screen.getByText('50')).toBeInTheDocument()
   })
 
-  it('renders "all users" italic text when username is null', () => {
-    const a = makePolicyAssignment({ username: null, user_id: null })
+  it('renders "All users" italic text when assignment_scope is all', () => {
+    const a = makePolicyAssignment({ username: null, user_id: null, assignment_scope: 'all' })
     renderWithProviders(<PolicyAssignmentsReadonly assignments={[a]} />)
-    expect(screen.getByText('all users')).toBeInTheDocument()
+    expect(screen.getByText('All users')).toBeInTheDocument()
   })
 
   it('datasource name links to /datasources/:id/edit', () => {
@@ -141,7 +149,7 @@ describe('PolicyAssignmentEditPanel', () => {
     await waitFor(() => expect(screen.getByText('my-db')).toBeInTheDocument())
   })
 
-  it('populates user dropdown from listUsers', async () => {
+  it('populates user dropdown from listUsers when scope is user', async () => {
     const user = makeUser({ id: 'u-1', username: 'bob' })
     mockListUsers.mockResolvedValue({ data: [user], total: 1, page: 1, page_size: 100 })
     renderWithProviders(
@@ -152,6 +160,8 @@ describe('PolicyAssignmentEditPanel', () => {
       />,
       { authenticated: true },
     )
+    // Select "Specific User" scope to reveal the user dropdown
+    fireEvent.click(screen.getByLabelText('Specific User'))
     await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument())
   })
 

@@ -17,6 +17,7 @@ use crate::engine::EngineCache;
 use crate::handler::ProxyHandler;
 use crate::hooks::policy::PolicyHook;
 
+pub mod admin_audit;
 pub mod audit_handlers;
 pub mod auth_handlers;
 pub mod catalog_handlers;
@@ -26,6 +27,7 @@ pub mod discovery_job;
 pub mod dto;
 pub mod jwt;
 pub mod policy_handlers;
+pub mod role_handlers;
 pub mod user_handlers;
 
 // ---------- shared state ----------
@@ -200,6 +202,44 @@ fn api_v1() -> Router<AdminState> {
                 .put(policy_handlers::update_policy)
                 .delete(policy_handlers::delete_policy),
         )
+        // roles
+        .route(
+            "/roles",
+            get(role_handlers::list_roles).post(role_handlers::create_role),
+        )
+        .route(
+            "/roles/{id}",
+            get(role_handlers::get_role)
+                .put(role_handlers::update_role)
+                .delete(role_handlers::delete_role),
+        )
+        .route(
+            "/roles/{id}/effective-members",
+            get(role_handlers::get_effective_members),
+        )
+        .route("/roles/{id}/impact", get(role_handlers::get_role_impact))
+        .route("/roles/{id}/members", post(role_handlers::add_members))
+        .route(
+            "/roles/{id}/members/{user_id}",
+            delete(role_handlers::remove_member),
+        )
+        .route("/roles/{id}/parents", post(role_handlers::add_parent))
+        .route(
+            "/roles/{id}/parents/{parent_id}",
+            delete(role_handlers::remove_parent),
+        )
+        // datasource role access
+        .route(
+            "/datasources/{id}/access/roles",
+            get(role_handlers::get_datasource_role_access)
+                .put(role_handlers::set_datasource_role_access),
+        )
         // audit log
         .route("/audit/queries", get(audit_handlers::list_audit_logs))
+        .route("/audit/admin", get(audit_handlers::list_admin_audit_logs))
+        // effective policies
+        .route(
+            "/users/{id}/effective-policies",
+            get(policy_handlers::get_effective_policies),
+        )
 }

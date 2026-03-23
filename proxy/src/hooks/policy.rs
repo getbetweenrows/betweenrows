@@ -26,7 +26,7 @@ use uuid::Uuid;
 use super::QueryHook;
 use super::read_only::is_allowed_statement;
 use crate::engine::BetweenRowsPostgresDialect;
-use crate::entity::{data_source, discovered_schema, policy, policy_assignment, query_audit_log};
+use crate::entity::{data_source, discovered_schema, policy, query_audit_log};
 use crate::policy_match::{PolicyType, TargetEntry, expand_column_patterns};
 
 // ---------- system schema detection ----------
@@ -548,16 +548,9 @@ impl PolicyHook {
             df_to_upstream.insert(alias, s.schema_name.clone());
         }
 
-        // Load policy assignments for this datasource+user (user-specific OR wildcard)
-        let assignments = policy_assignment::Entity::find()
-            .filter(policy_assignment::Column::DataSourceId.eq(ds.id))
-            .all(&self.db)
-            .await?;
-
-        let relevant_assignments: Vec<_> = assignments
-            .into_iter()
-            .filter(|a| a.user_id.is_none() || a.user_id == Some(user_id))
-            .collect();
+        // Load policy assignments for this datasource+user (user-specific, role-based, or wildcard)
+        let relevant_assignments =
+            crate::role_resolver::resolve_effective_assignments(&self.db, user_id, ds.id).await?;
 
         let policy_ids: Vec<Uuid> = relevant_assignments
             .iter()
@@ -566,7 +559,7 @@ impl PolicyHook {
             .into_iter()
             .collect();
 
-        // Build priority map: policy_id → min priority (user-specific beats wildcard)
+        // Build priority map: policy_id → min priority (already deduplicated by resolve_effective_assignments)
         let mut policy_priority: HashMap<Uuid, i32> = HashMap::new();
         for a in &relevant_assignments {
             let entry = policy_priority.entry(a.policy_id).or_insert(a.priority);

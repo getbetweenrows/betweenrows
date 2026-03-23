@@ -11,8 +11,9 @@ use sea_orm::{
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::entity::{data_source, policy, policy_assignment, policy_version, proxy_user};
+use crate::entity::{data_source, policy, policy_assignment, policy_version, proxy_user, role};
 use crate::policy_match::PolicyType;
+use crate::role_resolver;
 
 use super::{
     AdminState, ApiErr,
@@ -31,6 +32,7 @@ fn assignment_response(
     policy_names: &HashMap<Uuid, String>,
     ds_names: &HashMap<Uuid, String>,
     user_names: &HashMap<Uuid, String>,
+    role_names: &HashMap<Uuid, String>,
 ) -> PolicyAssignmentResponse {
     PolicyAssignmentResponse {
         id: m.id,
@@ -40,6 +42,9 @@ fn assignment_response(
         datasource_name: ds_names.get(&m.data_source_id).cloned().unwrap_or_default(),
         user_id: m.user_id,
         username: m.user_id.and_then(|uid| user_names.get(&uid).cloned()),
+        role_id: m.role_id,
+        role_name: m.role_id.and_then(|rid| role_names.get(&rid).cloned()),
+        assignment_scope: m.assignment_scope.clone(),
         priority: m.priority,
         created_at: m.created_at,
         updated_at: m.updated_at,
@@ -97,6 +102,23 @@ async fn fetch_user_names<C: sea_orm::ConnectionTrait>(
         .collect())
 }
 
+async fn fetch_role_names<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    ids: Vec<Uuid>,
+) -> Result<HashMap<Uuid, String>, ApiErr> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    Ok(role::Entity::find()
+        .filter(role::Column::Id.is_in(ids))
+        .all(db)
+        .await
+        .map_err(ApiErr::internal)?
+        .into_iter()
+        .map(|r| (r.id, r.name))
+        .collect())
+}
+
 fn policy_response_basic(p: &policy::Model, assignment_count: usize) -> PolicyResponse {
     let targets: serde_json::Value =
         serde_json::from_str(&p.targets).unwrap_or(serde_json::Value::Array(vec![]));
@@ -150,6 +172,8 @@ async fn create_snapshot<C: sea_orm::ConnectionTrait>(
                 "id": a.id.to_string(),
                 "data_source_id": a.data_source_id.to_string(),
                 "user_id": a.user_id.map(|u| u.to_string()),
+                "role_id": a.role_id.map(|r| r.to_string()),
+                "assignment_scope": &a.assignment_scope,
                 "priority": a.priority,
             })
         }).collect::<Vec<_>>(),
@@ -308,16 +332,18 @@ pub async fn get_policy(
 
     let ds_ids: Vec<Uuid> = assignments.iter().map(|a| a.data_source_id).collect();
     let user_ids: Vec<Uuid> = assignments.iter().filter_map(|a| a.user_id).collect();
+    let role_ids: Vec<Uuid> = assignments.iter().filter_map(|a| a.role_id).collect();
     let policy_names: HashMap<Uuid, String> = [(p.id, p.name.clone())].into_iter().collect();
     let ds_names = fetch_ds_names(&state.db, ds_ids).await?;
     let user_names = fetch_user_names(&state.db, user_ids).await?;
+    let role_names = fetch_role_names(&state.db, role_ids).await?;
 
     let asgn_count = assignments.len();
     let mut resp = policy_response_basic(&p, asgn_count);
     resp.assignments = Some(
         assignments
             .iter()
-            .map(|a| assignment_response(a, &policy_names, &ds_names, &user_names))
+            .map(|a| assignment_response(a, &policy_names, &ds_names, &user_names, &role_names))
             .collect(),
     );
 
@@ -459,17 +485,19 @@ pub async fn update_policy(
 
     let ds_ids: Vec<Uuid> = assignments.iter().map(|a| a.data_source_id).collect();
     let user_ids: Vec<Uuid> = assignments.iter().filter_map(|a| a.user_id).collect();
+    let upd_role_ids: Vec<Uuid> = assignments.iter().filter_map(|a| a.role_id).collect();
     let policy_names: HashMap<Uuid, String> =
         [(updated.id, updated.name.clone())].into_iter().collect();
     let ds_names = fetch_ds_names(&state.db, ds_ids).await?;
     let user_names = fetch_user_names(&state.db, user_ids).await?;
+    let upd_role_names = fetch_role_names(&state.db, upd_role_ids).await?;
 
     let asgn_count = assignments.len();
     let mut resp = policy_response_basic(&updated, asgn_count);
     resp.assignments = Some(
         assignments
             .iter()
-            .map(|a| assignment_response(a, &policy_names, &ds_names, &user_names))
+            .map(|a| assignment_response(a, &policy_names, &ds_names, &user_names, &upd_role_names))
             .collect(),
     );
 
@@ -552,14 +580,18 @@ pub async fn list_datasource_policies(
 
     let policy_ids: Vec<Uuid> = assignments.iter().map(|a| a.policy_id).collect();
     let user_ids: Vec<Uuid> = assignments.iter().filter_map(|a| a.user_id).collect();
+    let list_role_ids: Vec<Uuid> = assignments.iter().filter_map(|a| a.role_id).collect();
     let policy_names = fetch_policy_names(&state.db, policy_ids).await?;
     let ds_names: HashMap<Uuid, String> = [(ds_id, ds.name.clone())].into_iter().collect();
     let user_names = fetch_user_names(&state.db, user_ids).await?;
+    let list_role_names = fetch_role_names(&state.db, list_role_ids).await?;
 
     Ok(Json(
         assignments
             .iter()
-            .map(|a| assignment_response(a, &policy_names, &ds_names, &user_names))
+            .map(|a| {
+                assignment_response(a, &policy_names, &ds_names, &user_names, &list_role_names)
+            })
             .collect(),
     ))
 }
@@ -584,13 +616,78 @@ pub async fn assign_policy(
         .map_err(ApiErr::internal)?
         .ok_or_else(|| ApiErr::not_found("Policy not found"))?;
 
-    // SQLite treats NULL != NULL in unique indexes, so a duplicate (policy, ds, NULL user)
-    // would not be caught by the DB constraint. Check explicitly before inserting.
-    if body.user_id.is_none() {
+    // Infer scope if not provided
+    let scope = match body.scope.as_deref() {
+        Some(s) => s.to_string(),
+        None => {
+            if body.role_id.is_some() {
+                "role".to_string()
+            } else if body.user_id.is_some() {
+                "user".to_string()
+            } else {
+                "all".to_string()
+            }
+        }
+    };
+
+    // Validate scope/field constraints
+    match scope.as_str() {
+        "user" => {
+            if body.user_id.is_none() {
+                return Err(ApiErr::new(
+                    StatusCode::BAD_REQUEST,
+                    "scope 'user' requires user_id",
+                ));
+            }
+            if body.role_id.is_some() {
+                return Err(ApiErr::new(
+                    StatusCode::BAD_REQUEST,
+                    "scope 'user' must not have role_id",
+                ));
+            }
+        }
+        "role" => {
+            if body.role_id.is_none() {
+                return Err(ApiErr::new(
+                    StatusCode::BAD_REQUEST,
+                    "scope 'role' requires role_id",
+                ));
+            }
+            if body.user_id.is_some() {
+                return Err(ApiErr::new(
+                    StatusCode::BAD_REQUEST,
+                    "scope 'role' must not have user_id",
+                ));
+            }
+            // Validate role exists
+            role::Entity::find_by_id(body.role_id.unwrap())
+                .one(&state.db)
+                .await
+                .map_err(ApiErr::internal)?
+                .ok_or_else(|| ApiErr::not_found("Role not found"))?;
+        }
+        "all" => {
+            if body.user_id.is_some() || body.role_id.is_some() {
+                return Err(ApiErr::new(
+                    StatusCode::BAD_REQUEST,
+                    "scope 'all' must not have user_id or role_id",
+                ));
+            }
+        }
+        _ => {
+            return Err(ApiErr::new(
+                StatusCode::BAD_REQUEST,
+                "scope must be 'user', 'role', or 'all'",
+            ));
+        }
+    }
+
+    // Duplicate check for scope='all' (SQLite NULL != NULL in unique indexes)
+    if scope == "all" {
         let existing = policy_assignment::Entity::find()
             .filter(policy_assignment::Column::PolicyId.eq(body.policy_id))
             .filter(policy_assignment::Column::DataSourceId.eq(ds_id))
-            .filter(policy_assignment::Column::UserId.is_null())
+            .filter(policy_assignment::Column::AssignmentScope.eq("all"))
             .one(&state.db)
             .await
             .map_err(ApiErr::internal)?;
@@ -609,6 +706,8 @@ pub async fn assign_policy(
         policy_id: Set(body.policy_id),
         data_source_id: Set(ds_id),
         user_id: Set(body.user_id),
+        role_id: Set(body.role_id),
+        assignment_scope: Set(scope.clone()),
         priority: Set(body.priority),
         created_at: Set(now),
         updated_at: Set(now),
@@ -618,7 +717,7 @@ pub async fn assign_policy(
     .map_err(|e| {
         let msg = e.to_string();
         if msg.contains("UNIQUE") || msg.contains("unique") {
-            ApiErr::conflict("This policy is already assigned to this datasource for this user")
+            ApiErr::conflict("This policy assignment already exists")
         } else {
             ApiErr::internal(e)
         }
@@ -657,10 +756,29 @@ pub async fn assign_policy(
         ph.rebuild_contexts_for_datasource(&ds.name);
     }
 
+    // If role-scoped, also invalidate all role members
+    if scope == "role"
+        && let Some(role_id) = body.role_id
+    {
+        let members = crate::role_resolver::resolve_all_role_members(&state.db, role_id)
+            .await
+            .unwrap_or_default();
+        for uid in members {
+            if let Some(hook) = &state.policy_hook {
+                hook.invalidate_user(uid).await;
+            }
+            if let Some(ph) = &state.proxy_handler {
+                ph.rebuild_contexts_for_user(uid);
+            }
+        }
+    }
+
     let policy_names: HashMap<Uuid, String> = [(p.id, p.name.clone())].into_iter().collect();
     let ds_names: HashMap<Uuid, String> = [(ds_id, ds.name.clone())].into_iter().collect();
-    let user_ids: Vec<Uuid> = body.user_id.into_iter().collect();
-    let user_names = fetch_user_names(&state.db, user_ids).await?;
+    let assign_user_ids: Vec<Uuid> = body.user_id.into_iter().collect();
+    let assign_role_ids: Vec<Uuid> = body.role_id.into_iter().collect();
+    let user_names = fetch_user_names(&state.db, assign_user_ids).await?;
+    let assign_role_names = fetch_role_names(&state.db, assign_role_ids).await?;
 
     Ok((
         StatusCode::CREATED,
@@ -669,6 +787,7 @@ pub async fn assign_policy(
             &policy_names,
             &ds_names,
             &user_names,
+            &assign_role_names,
         )),
     ))
 }
@@ -738,6 +857,43 @@ pub async fn remove_assignment(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------- GET /users/{id}/effective-policies ----------
+
+#[derive(Debug, serde::Deserialize)]
+pub struct EffectivePoliciesQuery {
+    pub datasource_id: Uuid,
+}
+
+pub async fn get_effective_policies(
+    AdminClaims(_): AdminClaims,
+    State(state): State<AdminState>,
+    Path(user_id): Path<Uuid>,
+    Query(params): Query<EffectivePoliciesQuery>,
+) -> Result<Json<Vec<role_resolver::EffectivePolicyEntry>>, ApiErr> {
+    proxy_user::Entity::find_by_id(user_id)
+        .one(&state.db)
+        .await
+        .map_err(ApiErr::internal)?
+        .ok_or_else(|| ApiErr::not_found("User not found"))?;
+
+    let ds = data_source::Entity::find_by_id(params.datasource_id)
+        .one(&state.db)
+        .await
+        .map_err(ApiErr::internal)?
+        .ok_or_else(|| ApiErr::not_found("Data source not found"))?;
+
+    let entries = role_resolver::resolve_effective_policies(
+        &state.db,
+        user_id,
+        params.datasource_id,
+        &ds.name,
+    )
+    .await
+    .map_err(ApiErr::internal)?;
+
+    Ok(Json(entries))
 }
 
 #[cfg(test)]

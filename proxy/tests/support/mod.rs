@@ -710,4 +710,217 @@ impl ProxyTestServer {
             .parse()
             .unwrap()
     }
+
+    // -- RBAC helpers --
+
+    /// Create a role via the admin API.
+    #[allow(dead_code)]
+    pub async fn create_role(&self, name: &str) -> Uuid {
+        let resp = self
+            .admin
+            .post("/api/v1/roles")
+            .authorization_bearer(&self.admin_token)
+            .json(&json!({
+                "name": name,
+            }))
+            .await;
+        resp.assert_status(axum::http::StatusCode::CREATED);
+        resp.json::<Value>()["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    /// Add a user as a member of a role.
+    #[allow(dead_code)]
+    pub async fn add_role_member(&self, role_id: Uuid, user_id: Uuid) {
+        let resp = self
+            .admin
+            .post(&format!("/api/v1/roles/{role_id}/members"))
+            .authorization_bearer(&self.admin_token)
+            .json(&json!({ "user_ids": [user_id] }))
+            .await;
+        resp.assert_status(axum::http::StatusCode::NO_CONTENT);
+    }
+
+    /// Add a parent role to a child role (child inherits from parent).
+    #[allow(dead_code)]
+    pub async fn add_role_parent(&self, child_role_id: Uuid, parent_role_id: Uuid) {
+        let resp = self
+            .admin
+            .post(&format!("/api/v1/roles/{child_role_id}/parents"))
+            .authorization_bearer(&self.admin_token)
+            .json(&json!({ "parent_role_id": parent_role_id }))
+            .await;
+        resp.assert_status(axum::http::StatusCode::NO_CONTENT);
+    }
+
+    /// Set role-based datasource access.
+    #[allow(dead_code)]
+    pub async fn set_datasource_role_access(&self, ds_id: Uuid, role_ids: &[Uuid]) {
+        let resp = self
+            .admin
+            .put(&format!("/api/v1/datasources/{ds_id}/access/roles"))
+            .authorization_bearer(&self.admin_token)
+            .json(&json!({ "role_ids": role_ids }))
+            .await;
+        resp.assert_status(axum::http::StatusCode::NO_CONTENT);
+    }
+
+    /// Assign a policy to a datasource with role scope.
+    #[allow(dead_code)]
+    pub async fn assign_policy_to_role(
+        &self,
+        ds_id: Uuid,
+        policy_id: Uuid,
+        role_id: Uuid,
+        priority: i32,
+    ) {
+        let resp = self
+            .admin
+            .post(&format!("/api/v1/datasources/{ds_id}/policies"))
+            .authorization_bearer(&self.admin_token)
+            .json(&json!({
+                "policy_id": policy_id,
+                "role_id": role_id,
+                "scope": "role",
+                "priority": priority,
+            }))
+            .await;
+        resp.assert_status(axum::http::StatusCode::CREATED);
+    }
+
+    /// Assign a policy to a datasource with scope='all'.
+    #[allow(dead_code)]
+    pub async fn assign_policy_to_all(&self, ds_id: Uuid, policy_id: Uuid, priority: i32) {
+        let resp = self
+            .admin
+            .post(&format!("/api/v1/datasources/{ds_id}/policies"))
+            .authorization_bearer(&self.admin_token)
+            .json(&json!({
+                "policy_id": policy_id,
+                "scope": "all",
+                "priority": priority,
+            }))
+            .await;
+        resp.assert_status(axum::http::StatusCode::CREATED);
+    }
+
+    /// Deactivate a role.
+    #[allow(dead_code)]
+    pub async fn deactivate_role(&self, role_id: Uuid) {
+        let resp = self
+            .admin
+            .put(&format!("/api/v1/roles/{role_id}"))
+            .authorization_bearer(&self.admin_token)
+            .json(&json!({ "is_active": false }))
+            .await;
+        resp.assert_status_ok();
+    }
+
+    /// Reactivate a role.
+    #[allow(dead_code)]
+    pub async fn reactivate_role(&self, role_id: Uuid) {
+        let resp = self
+            .admin
+            .put(&format!("/api/v1/roles/{role_id}"))
+            .authorization_bearer(&self.admin_token)
+            .json(&json!({ "is_active": true }))
+            .await;
+        resp.assert_status_ok();
+    }
+
+    /// Remove a user from a role.
+    #[allow(dead_code)]
+    pub async fn remove_role_member(&self, role_id: Uuid, user_id: Uuid) {
+        let resp = self
+            .admin
+            .delete(&format!("/api/v1/roles/{role_id}/members/{user_id}"))
+            .authorization_bearer(&self.admin_token)
+            .await;
+        resp.assert_status(axum::http::StatusCode::NO_CONTENT);
+    }
+
+    /// Remove direct user access from a datasource (set empty user list).
+    #[allow(dead_code)]
+    pub async fn remove_user_from_datasource(&self, ds_id: Uuid, user_id: Uuid) {
+        // Get current users, remove the target
+        let current_resp = self
+            .admin
+            .get(&format!("/api/v1/datasources/{ds_id}/users"))
+            .authorization_bearer(&self.admin_token)
+            .await;
+        current_resp.assert_status_ok();
+        let user_ids: Vec<Uuid> = current_resp
+            .json::<Value>()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|u| u["id"].as_str()?.parse().ok())
+            .filter(|id: &Uuid| *id != user_id)
+            .collect();
+
+        let assign_resp = self
+            .admin
+            .put(&format!("/api/v1/datasources/{ds_id}/users"))
+            .authorization_bearer(&self.admin_token)
+            .json(&json!({ "user_ids": user_ids }))
+            .await;
+        assign_resp.assert_status(axum::http::StatusCode::NO_CONTENT);
+    }
+
+    /// Delete a role.
+    #[allow(dead_code)]
+    pub async fn delete_role(&self, role_id: Uuid) {
+        let resp = self
+            .admin
+            .delete(&format!("/api/v1/roles/{role_id}"))
+            .authorization_bearer(&self.admin_token)
+            .await;
+        resp.assert_status_ok();
+    }
+
+    /// Create a policy without assigning it to a datasource. Returns the policy ID.
+    #[allow(dead_code)]
+    pub async fn create_policy(
+        &self,
+        name: &str,
+        policy_type: &str,
+        targets: Vec<Value>,
+        definition: Option<Value>,
+    ) -> Uuid {
+        let resp = self
+            .admin
+            .post("/api/v1/policies")
+            .authorization_bearer(&self.admin_token)
+            .json(&json!({
+                "name": name,
+                "policy_type": policy_type,
+                "is_enabled": true,
+                "targets": targets,
+                "definition": definition,
+            }))
+            .await;
+        resp.assert_status(axum::http::StatusCode::CREATED);
+        resp.json::<Value>()["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    /// Create a user without assigning to any datasource; only role-based access.
+    /// This creates a user via the admin API but does NOT add them to the datasource
+    /// user list. They can still connect if they have role-based access.
+    #[allow(dead_code)]
+    pub async fn create_user_no_direct_access(
+        &self,
+        username: &str,
+        password: &str,
+        tenant: &str,
+    ) -> Uuid {
+        self.create_user_unassigned(username, password, tenant)
+            .await
+    }
 }

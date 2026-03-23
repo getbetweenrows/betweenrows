@@ -24,10 +24,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as AsyncRwLock;
 use uuid::Uuid;
 
-use crate::entity::{
-    data_source, discovered_column, discovered_schema, discovered_table, policy, policy_assignment,
-    user_data_source,
-};
+use crate::entity::{data_source, discovered_column, discovered_schema, discovered_table, policy};
 
 // ---------- custom dialect for JSON pushdown ----------
 
@@ -833,14 +830,11 @@ impl EngineCache {
             None => return Ok(false),
         };
 
-        let assignment = user_data_source::Entity::find()
-            .filter(user_data_source::Column::UserId.eq(user_id))
-            .filter(user_data_source::Column::DataSourceId.eq(ds.id))
-            .one(&self.db)
-            .await
-            .map_err(|e| EngineError(format!("DB error: {e}")))?;
-
-        Ok(assignment.is_some())
+        Ok(
+            crate::role_resolver::resolve_datasource_access(&self.db, user_id, ds.id)
+                .await
+                .map_err(|e| EngineError(format!("DB error: {e}")))?,
+        )
     }
 
     /// Get (or lazily load) the raw catalog for a named data source.
@@ -965,17 +959,14 @@ impl EngineCache {
             .map(|(alias, vs)| (alias.clone(), vs.schema_name.clone()))
             .collect();
 
-        // Load policy assignments for this datasource + user (user-specific OR wildcard)
-        let assignments = policy_assignment::Entity::find()
-            .filter(policy_assignment::Column::DataSourceId.eq(catalog.datasource_id))
-            .all(&self.db)
-            .await
-            .map_err(|e| EngineError(format!("DB error loading assignments: {e}")))?;
-
-        let relevant: Vec<_> = assignments
-            .into_iter()
-            .filter(|a| a.user_id.is_none() || a.user_id == Some(user_id))
-            .collect();
+        // Load policy assignments for this datasource + user (user-specific, role-based, or wildcard)
+        let relevant = crate::role_resolver::resolve_effective_assignments(
+            &self.db,
+            user_id,
+            catalog.datasource_id,
+        )
+        .await
+        .map_err(|e| EngineError(format!("DB error loading assignments: {e}")))?;
 
         if relevant.is_empty() {
             if catalog.access_mode == "policy_required" {
@@ -2152,6 +2143,8 @@ mod tests {
             policy_id: sea_orm::Set(policy_id),
             data_source_id: sea_orm::Set(ds_id),
             user_id: sea_orm::Set(Some(user_id)),
+            role_id: sea_orm::Set(None),
+            assignment_scope: sea_orm::Set("user".to_string()),
             priority: sea_orm::Set(100),
             created_at: sea_orm::Set(now),
             updated_at: sea_orm::Set(now),
@@ -2654,6 +2647,8 @@ mod tests {
             policy_id: sea_orm::Set(policy_id),
             data_source_id: sea_orm::Set(ds_id),
             user_id: sea_orm::Set(None), // wildcard — applies to all users
+            role_id: sea_orm::Set(None),
+            assignment_scope: sea_orm::Set("all".to_string()),
             priority: sea_orm::Set(100),
             created_at: sea_orm::Set(now),
             updated_at: sea_orm::Set(now),

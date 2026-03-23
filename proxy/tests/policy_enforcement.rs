@@ -2239,22 +2239,29 @@ async fn tc_audit_01_success_audit_status() {
         .await
         .unwrap();
 
-    // Audit write is async — give it time to complete
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
-    let resp = server
-        .admin
-        .get("/api/v1/audit/queries")
-        .authorization_bearer(&server.admin_token)
-        .await;
-    resp.assert_status_ok();
-    let body = resp.json::<serde_json::Value>();
-    let entries = body["data"].as_array().unwrap();
-
-    let entry = entries
-        .iter()
-        .find(|e| e["username"].as_str() == Some("user_audit01"))
-        .expect("TC-AUDIT-01: no audit entry for user_audit01");
+    // Audit write is async — poll until entry appears
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let entry = loop {
+        let resp = server
+            .admin
+            .get("/api/v1/audit/queries")
+            .authorization_bearer(&server.admin_token)
+            .await;
+        resp.assert_status_ok();
+        let body = resp.json::<serde_json::Value>();
+        let entries = body["data"].as_array().unwrap().clone();
+        if let Some(e) = entries
+            .iter()
+            .find(|e| e["username"].as_str() == Some("user_audit01"))
+        {
+            break e.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "TC-AUDIT-01: audit entry for user_audit01 did not appear within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
 
     assert_eq!(
         entry["status"].as_str(),
@@ -2322,21 +2329,29 @@ async fn tc_audit_02_denied_audit_status() {
         .simple_query(&format!("SELECT * FROM {schema}.accounts"))
         .await; // may error — that's expected
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
-    let resp = server
-        .admin
-        .get("/api/v1/audit/queries")
-        .authorization_bearer(&server.admin_token)
-        .await;
-    resp.assert_status_ok();
-    let body = resp.json::<serde_json::Value>();
-    let entries = body["data"].as_array().unwrap();
-
-    let entry = entries
-        .iter()
-        .find(|e| e["username"].as_str() == Some("user_audit02"))
-        .expect("TC-AUDIT-02: no audit entry for user_audit02");
+    // Audit write is async — poll until entry appears
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let entry = loop {
+        let resp = server
+            .admin
+            .get("/api/v1/audit/queries")
+            .authorization_bearer(&server.admin_token)
+            .await;
+        resp.assert_status_ok();
+        let body = resp.json::<serde_json::Value>();
+        let entries = body["data"].as_array().unwrap().clone();
+        if let Some(e) = entries
+            .iter()
+            .find(|e| e["username"].as_str() == Some("user_audit02"))
+        {
+            break e.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "TC-AUDIT-02: audit entry for user_audit02 did not appear within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
 
     assert_eq!(
         entry["status"].as_str(),
@@ -2388,21 +2403,29 @@ async fn tc_audit_03_error_audit_status() {
         .simple_query(&format!("SELECT * FROM {schema}.nonexistent_table_xyz"))
         .await; // expected to error
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
-    let resp = server
-        .admin
-        .get("/api/v1/audit/queries")
-        .authorization_bearer(&server.admin_token)
-        .await;
-    resp.assert_status_ok();
-    let body = resp.json::<serde_json::Value>();
-    let entries = body["data"].as_array().unwrap();
-
-    let entry = entries
-        .iter()
-        .find(|e| e["username"].as_str() == Some("user_audit03"))
-        .expect("TC-AUDIT-03: no audit entry for user_audit03");
+    // Audit write is async — poll until entry appears
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let entry = loop {
+        let resp = server
+            .admin
+            .get("/api/v1/audit/queries")
+            .authorization_bearer(&server.admin_token)
+            .await;
+        resp.assert_status_ok();
+        let body = resp.json::<serde_json::Value>();
+        let entries = body["data"].as_array().unwrap().clone();
+        if let Some(e) = entries
+            .iter()
+            .find(|e| e["username"].as_str() == Some("user_audit03"))
+        {
+            break e.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "TC-AUDIT-03: audit entry for user_audit03 did not appear within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
 
     assert_eq!(
         entry["status"].as_str(),
@@ -2455,7 +2478,29 @@ async fn tc_audit_04_status_filter() {
         .simple_query(&format!("SELECT * FROM {schema}.data"))
         .await;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    // Audit write is async — poll until entry for user_audit04 appears
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let resp = server
+            .admin
+            .get("/api/v1/audit/queries")
+            .authorization_bearer(&server.admin_token)
+            .await;
+        resp.assert_status_ok();
+        let body = resp.json::<serde_json::Value>();
+        let entries = body["data"].as_array().unwrap().clone();
+        if entries
+            .iter()
+            .any(|e| e["username"].as_str() == Some("user_audit04"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "TC-AUDIT-04: audit entry for user_audit04 did not appear within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 
     // Filter by status=error (table_deny produces "error" not "denied")
     let resp = server
@@ -2530,21 +2575,29 @@ async fn tc_audit_05_write_rejected_audit_status() {
         .simple_query(&format!("INSERT INTO {schema}.items VALUES (1, 'test')"))
         .await; // expected to error
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
-    let resp = server
-        .admin
-        .get("/api/v1/audit/queries")
-        .authorization_bearer(&server.admin_token)
-        .await;
-    resp.assert_status_ok();
-    let body = resp.json::<serde_json::Value>();
-    let entries = body["data"].as_array().unwrap();
-
-    let entry = entries
-        .iter()
-        .find(|e| e["username"].as_str() == Some("user_audit05"))
-        .expect("TC-AUDIT-05: no audit entry for write-rejected statement");
+    // Audit write is async — poll until entry appears
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let entry = loop {
+        let resp = server
+            .admin
+            .get("/api/v1/audit/queries")
+            .authorization_bearer(&server.admin_token)
+            .await;
+        resp.assert_status_ok();
+        let body = resp.json::<serde_json::Value>();
+        let entries = body["data"].as_array().unwrap().clone();
+        if let Some(e) = entries
+            .iter()
+            .find(|e| e["username"].as_str() == Some("user_audit05"))
+        {
+            break e.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "TC-AUDIT-05: audit entry for user_audit05 did not appear within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
 
     assert_eq!(
         entry["status"].as_str(),
@@ -3307,4 +3360,2096 @@ async fn row_filter_and_column_mask_same_column() {
     assert_eq!(rows[0][1], "***-**-6789", "ssn should be masked");
     assert_eq!(rows[1][0], "3");
     assert_eq!(rows[1][1], "***-**-4321", "ssn should be masked");
+}
+
+// ===========================================================================
+// RBAC Integration Tests
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Connection auth tests (1-6)
+// ---------------------------------------------------------------------------
+
+// RBAC-01: Direct user datasource access → connect succeeds
+#[tokio::test]
+async fn rbac_01_direct_user_access_connect_succeeds() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_01";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT, name TEXT);
+             INSERT INTO {schema}.items VALUES (1, 'a');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac01", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    // create_user assigns direct access
+    let _user_id = server
+        .create_user("u_rbac01", support::TEST_PASS, "default", ds_id)
+        .await;
+
+    server
+        .create_column_allow("allow-rbac01", schema, "items", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("u_rbac01", support::TEST_PASS, "ds_rbac01")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.items"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+}
+
+// RBAC-02: Role-based datasource access → connect succeeds
+#[tokio::test]
+async fn rbac_02_role_based_access_connect_succeeds() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_02";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT, name TEXT);
+             INSERT INTO {schema}.items VALUES (1, 'a');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac02", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    // Create user without direct datasource access
+    let user_id = server
+        .create_user_no_direct_access("u_rbac02", support::TEST_PASS, "default")
+        .await;
+
+    // Create role and give it datasource access
+    let role_id = server.create_role("analysts-rbac02").await;
+    server.add_role_member(role_id, user_id).await;
+    server.set_datasource_role_access(ds_id, &[role_id]).await;
+
+    server
+        .create_column_allow("allow-rbac02", schema, "items", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("u_rbac02", support::TEST_PASS, "ds_rbac02")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.items"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+}
+
+// RBAC-03: Inherited role datasource access → connect succeeds
+#[tokio::test]
+async fn rbac_03_inherited_role_access_connect_succeeds() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_03";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT, name TEXT);
+             INSERT INTO {schema}.items VALUES (1, 'a');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac03", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user_no_direct_access("u_rbac03", support::TEST_PASS, "default")
+        .await;
+
+    // Parent role has datasource access, child role has user
+    let parent_role = server.create_role("parent-rbac03").await;
+    let child_role = server.create_role("child-rbac03").await;
+    server.add_role_parent(child_role, parent_role).await;
+    server.add_role_member(child_role, user_id).await;
+    server
+        .set_datasource_role_access(ds_id, &[parent_role])
+        .await;
+
+    server
+        .create_column_allow("allow-rbac03", schema, "items", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("u_rbac03", support::TEST_PASS, "ds_rbac03")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.items"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+}
+
+// RBAC-04: No access (neither direct nor role) → connection rejected
+#[tokio::test]
+async fn rbac_04_no_access_connection_rejected() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_04";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT);
+             INSERT INTO {schema}.items VALUES (1);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac04", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    // User with no direct or role-based access
+    let _user_id = server
+        .create_user_no_direct_access("u_rbac04", support::TEST_PASS, "default")
+        .await;
+
+    let result = server
+        .try_connect_as("u_rbac04", support::TEST_PASS, "ds_rbac04")
+        .await;
+    assert!(
+        result.is_err(),
+        "Connection should be rejected without any access"
+    );
+}
+
+// RBAC-05: User removed from role → loses access on next connect
+#[tokio::test]
+async fn rbac_05_removed_from_role_loses_access() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_05";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT);
+             INSERT INTO {schema}.items VALUES (1);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac05", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user_no_direct_access("u_rbac05", support::TEST_PASS, "default")
+        .await;
+
+    let role_id = server.create_role("analysts-rbac05").await;
+    server.add_role_member(role_id, user_id).await;
+    server.set_datasource_role_access(ds_id, &[role_id]).await;
+
+    server
+        .create_column_allow("allow-rbac05", schema, "items", &["*"], ds_id, None)
+        .await;
+
+    // Can connect
+    let client = server
+        .connect_as("u_rbac05", support::TEST_PASS, "ds_rbac05")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.items"))
+        .await
+        .unwrap();
+    assert_eq!(extract_rows(&msgs).len(), 1);
+    drop(client);
+
+    // Remove user from role
+    server.remove_role_member(role_id, user_id).await;
+
+    // Poll until cache invalidation propagates — connection should be rejected
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let result = server
+            .try_connect_as("u_rbac05", support::TEST_PASS, "ds_rbac05")
+            .await;
+        if result.is_err() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Role member removal did not take effect within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+// RBAC-06: Role datasource access revoked → new connections rejected
+#[tokio::test]
+async fn rbac_06_role_access_revoked_connection_rejected() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_06";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT);
+             INSERT INTO {schema}.items VALUES (1);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac06", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user_no_direct_access("u_rbac06", support::TEST_PASS, "default")
+        .await;
+
+    let role_id = server.create_role("analysts-rbac06").await;
+    server.add_role_member(role_id, user_id).await;
+    server.set_datasource_role_access(ds_id, &[role_id]).await;
+
+    server
+        .create_column_allow("allow-rbac06", schema, "items", &["*"], ds_id, None)
+        .await;
+
+    // Connect while access is active
+    let client = server
+        .connect_as("u_rbac06", support::TEST_PASS, "ds_rbac06")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.items"))
+        .await
+        .unwrap();
+    assert_eq!(extract_rows(&msgs).len(), 1);
+    drop(client);
+
+    // Revoke role's datasource access
+    server.set_datasource_role_access(ds_id, &[]).await;
+
+    // New connection should be rejected (access check at connect time)
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let result = server
+            .try_connect_as("u_rbac06", support::TEST_PASS, "ds_rbac06")
+            .await;
+        if result.is_err() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Role access revocation did not take effect within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Policy resolution tests (7-14)
+// ---------------------------------------------------------------------------
+
+// RBAC-07: Policy assigned to role → applies to all members
+#[tokio::test]
+async fn rbac_07_policy_assigned_to_role_applies_to_members() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_07";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT, amount INT);
+             INSERT INTO {schema}.orders VALUES (1,'acme',100),(2,'globex',200),(3,'acme',300);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac07", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user1_id = server
+        .create_user("u1_rbac07", support::TEST_PASS, "acme", ds_id)
+        .await;
+    let user2_id = server
+        .create_user("u2_rbac07", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    let role_id = server.create_role("analysts-rbac07").await;
+    server.add_role_member(role_id, user1_id).await;
+    server.add_role_member(role_id, user2_id).await;
+
+    // Create a row_filter policy and assign it to the role
+    let policy_id = server
+        .create_policy(
+            "tenant-filter-rbac07",
+            "row_filter",
+            vec![json!({"schemas": [schema], "tables": ["orders"]})],
+            Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+        )
+        .await;
+    server
+        .assign_policy_to_role(ds_id, policy_id, role_id, 100)
+        .await;
+
+    // Also need column_allow for open mode
+    server
+        .create_column_allow("allow-rbac07", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    // Both users should see only acme rows
+    for (uname, upass) in [
+        ("u1_rbac07", support::TEST_PASS),
+        ("u2_rbac07", support::TEST_PASS),
+    ] {
+        let client = server.connect_as(uname, upass, "ds_rbac07").await;
+        let msgs = client
+            .simple_query(&format!(
+                "SELECT id, tenant FROM {schema}.orders ORDER BY id"
+            ))
+            .await
+            .unwrap();
+        let rows = extract_rows(&msgs);
+        assert_eq!(rows.len(), 2, "{uname} should see only acme rows");
+        for row in &rows {
+            assert_eq!(row[1], "acme");
+        }
+    }
+}
+
+// RBAC-08: Policy on parent role → applies to child role members (inheritance)
+#[tokio::test]
+async fn rbac_08_inherited_policy_applies_to_child_members() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_08";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT);
+             INSERT INTO {schema}.orders VALUES (1,'acme'),(2,'globex'),(3,'acme');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac08", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user("u_rbac08", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    let parent_role = server.create_role("parent-rbac08").await;
+    let child_role = server.create_role("child-rbac08").await;
+    server.add_role_parent(child_role, parent_role).await;
+    server.add_role_member(child_role, user_id).await;
+
+    // Assign row filter to parent role
+    let policy_id = server
+        .create_policy(
+            "tenant-filter-rbac08",
+            "row_filter",
+            vec![json!({"schemas": [schema], "tables": ["orders"]})],
+            Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+        )
+        .await;
+    server
+        .assign_policy_to_role(ds_id, policy_id, parent_role, 100)
+        .await;
+
+    server
+        .create_column_allow("allow-rbac08", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("u_rbac08", support::TEST_PASS, "ds_rbac08")
+        .await;
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT tenant FROM {schema}.orders ORDER BY tenant"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 2, "Inherited policy should filter rows");
+    for row in &rows {
+        assert_eq!(row[0], "acme");
+    }
+}
+
+// RBAC-09: User-scoped assignment → only that user
+#[tokio::test]
+async fn rbac_09_user_scoped_assignment_only_affects_target() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_09";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT);
+             INSERT INTO {schema}.orders VALUES (1,'acme'),(2,'globex'),(3,'acme');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac09", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_a = server
+        .create_user("ua_rbac09", support::TEST_PASS, "acme", ds_id)
+        .await;
+    let _user_b = server
+        .create_user("ub_rbac09", support::TEST_PASS, "globex", ds_id)
+        .await;
+
+    // Assign row filter only to user_a
+    server
+        .create_and_assign_policy(
+            "user-filter-rbac09",
+            "row_filter",
+            vec![json!({"schemas": [schema], "tables": ["orders"]})],
+            Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+            ds_id,
+            Some(user_a),
+        )
+        .await;
+
+    server
+        .create_column_allow("allow-rbac09", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    // user_a sees filtered rows
+    let client_a = server
+        .connect_as("ua_rbac09", support::TEST_PASS, "ds_rbac09")
+        .await;
+    let msgs_a = client_a
+        .simple_query(&format!("SELECT id FROM {schema}.orders"))
+        .await
+        .unwrap();
+    assert_eq!(
+        extract_rows(&msgs_a).len(),
+        2,
+        "user_a should see 2 acme rows"
+    );
+
+    // user_b sees all rows (no filter applied to them)
+    let client_b = server
+        .connect_as("ub_rbac09", support::TEST_PASS, "ds_rbac09")
+        .await;
+    let msgs_b = client_b
+        .simple_query(&format!("SELECT id FROM {schema}.orders"))
+        .await
+        .unwrap();
+    assert_eq!(extract_rows(&msgs_b).len(), 3, "user_b should see all rows");
+}
+
+// RBAC-10: Role-scoped assignment → only role members
+#[tokio::test]
+async fn rbac_10_role_scoped_assignment_only_affects_members() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_10";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT);
+             INSERT INTO {schema}.orders VALUES (1,'acme'),(2,'globex'),(3,'acme');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac10", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_member = server
+        .create_user("umem_rbac10", support::TEST_PASS, "acme", ds_id)
+        .await;
+    let _user_nonmember = server
+        .create_user("unon_rbac10", support::TEST_PASS, "globex", ds_id)
+        .await;
+
+    let role_id = server.create_role("analysts-rbac10").await;
+    server.add_role_member(role_id, user_member).await;
+    // user_nonmember is NOT in the role
+
+    let policy_id = server
+        .create_policy(
+            "tenant-filter-rbac10",
+            "row_filter",
+            vec![json!({"schemas": [schema], "tables": ["orders"]})],
+            Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+        )
+        .await;
+    server
+        .assign_policy_to_role(ds_id, policy_id, role_id, 100)
+        .await;
+
+    server
+        .create_column_allow("allow-rbac10", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    // Member sees filtered rows
+    let client_mem = server
+        .connect_as("umem_rbac10", support::TEST_PASS, "ds_rbac10")
+        .await;
+    let msgs = client_mem
+        .simple_query(&format!("SELECT id FROM {schema}.orders"))
+        .await
+        .unwrap();
+    assert_eq!(
+        extract_rows(&msgs).len(),
+        2,
+        "Role member should see filtered rows"
+    );
+
+    // Non-member sees all rows
+    let client_non = server
+        .connect_as("unon_rbac10", support::TEST_PASS, "ds_rbac10")
+        .await;
+    let msgs = client_non
+        .simple_query(&format!("SELECT id FROM {schema}.orders"))
+        .await
+        .unwrap();
+    assert_eq!(
+        extract_rows(&msgs).len(),
+        3,
+        "Non-member should see all rows"
+    );
+}
+
+// RBAC-11: All-scoped assignment → everyone
+#[tokio::test]
+async fn rbac_11_all_scoped_assignment_applies_to_everyone() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_11";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT);
+             INSERT INTO {schema}.orders VALUES (1,'acme'),(2,'globex'),(3,'acme');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac11", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let _user1 = server
+        .create_user("u1_rbac11", support::TEST_PASS, "acme", ds_id)
+        .await;
+    let _user2 = server
+        .create_user("u2_rbac11", support::TEST_PASS, "globex", ds_id)
+        .await;
+
+    let policy_id = server
+        .create_policy(
+            "tenant-filter-rbac11",
+            "row_filter",
+            vec![json!({"schemas": [schema], "tables": ["orders"]})],
+            Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+        )
+        .await;
+    server.assign_policy_to_all(ds_id, policy_id, 100).await;
+
+    server
+        .create_column_allow("allow-rbac11", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    // user1 (acme) sees 2 rows
+    let client1 = server
+        .connect_as("u1_rbac11", support::TEST_PASS, "ds_rbac11")
+        .await;
+    let msgs1 = client1
+        .simple_query(&format!("SELECT id FROM {schema}.orders"))
+        .await
+        .unwrap();
+    assert_eq!(extract_rows(&msgs1).len(), 2, "acme user should see 2 rows");
+
+    // user2 (globex) sees 1 row
+    let client2 = server
+        .connect_as("u2_rbac11", support::TEST_PASS, "ds_rbac11")
+        .await;
+    let msgs2 = client2
+        .simple_query(&format!("SELECT id FROM {schema}.orders"))
+        .await
+        .unwrap();
+    assert_eq!(
+        extract_rows(&msgs2).len(),
+        1,
+        "globex user should see 1 row"
+    );
+}
+
+// RBAC-12: Multiple row_filter policies from different sources are AND-combined
+#[tokio::test]
+async fn rbac_12_multiple_filters_and_combined() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_12";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.data;
+             CREATE TABLE {schema}.data (id INT, tenant TEXT, status TEXT);
+             INSERT INTO {schema}.data VALUES
+               (1,'acme','active'),
+               (2,'acme','deleted'),
+               (3,'globex','active');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac12", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user("u_rbac12", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    let role_id = server.create_role("analysts-rbac12").await;
+    server.add_role_member(role_id, user_id).await;
+
+    // Role-scoped filter at priority 50 (stricter — active only)
+    let policy_strict = server
+        .create_policy(
+            "strict-filter-rbac12",
+            "row_filter",
+            vec![json!({"schemas": [schema], "tables": ["data"]})],
+            Some(json!({"filter_expression": "status = 'active'"})),
+        )
+        .await;
+    server
+        .assign_policy_to_role(ds_id, policy_strict, role_id, 50)
+        .await;
+
+    // User-scoped filter at priority 100 (less strict — tenant only)
+    server
+        .create_and_assign_policy(
+            "tenant-filter-rbac12",
+            "row_filter",
+            vec![json!({"schemas": [schema], "tables": ["data"]})],
+            Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+            ds_id,
+            Some(user_id),
+        )
+        .await;
+
+    server
+        .create_column_allow("allow-rbac12", schema, "data", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("u_rbac12", support::TEST_PASS, "ds_rbac12")
+        .await;
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT id, tenant, status FROM {schema}.data ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    // Both filters are applied (AND-combined): tenant=acme AND status=active
+    // So only row 1 should match
+    assert_eq!(rows.len(), 1, "Both filters should be AND-combined");
+    assert_eq!(rows[0][0], "1");
+    assert_eq!(rows[0][1], "acme");
+    assert_eq!(rows[0][2], "active");
+}
+
+// RBAC-13: Same policy on multiple roles → deduplicated, lowest priority wins
+#[tokio::test]
+async fn rbac_13_same_policy_multiple_roles_dedup() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_13";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT);
+             INSERT INTO {schema}.orders VALUES (1,'acme'),(2,'globex'),(3,'acme');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac13", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user("u_rbac13", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    let role_a = server.create_role("role-a-rbac13").await;
+    let role_b = server.create_role("role-b-rbac13").await;
+    server.add_role_member(role_a, user_id).await;
+    server.add_role_member(role_b, user_id).await;
+
+    // Same policy assigned to both roles at different priorities
+    let policy_id = server
+        .create_policy(
+            "tenant-filter-rbac13",
+            "row_filter",
+            vec![json!({"schemas": [schema], "tables": ["orders"]})],
+            Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+        )
+        .await;
+    server
+        .assign_policy_to_role(ds_id, policy_id, role_a, 50)
+        .await;
+    server
+        .assign_policy_to_role(ds_id, policy_id, role_b, 200)
+        .await;
+
+    server
+        .create_column_allow("allow-rbac13", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    // Should still see only acme rows (policy not double-applied)
+    let client = server
+        .connect_as("u_rbac13", support::TEST_PASS, "ds_rbac13")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT tenant FROM {schema}.orders"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(
+        rows.len(),
+        2,
+        "Deduplicated policy should still filter correctly"
+    );
+    for row in &rows {
+        assert_eq!(row[0], "acme");
+    }
+}
+
+// RBAC-14: Deny-wins: column_deny via role A + column_allow via role B → denied
+#[tokio::test]
+async fn rbac_14_deny_wins_over_allow_from_different_roles() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_14";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.employees;
+             CREATE TABLE {schema}.employees (id INT, name TEXT, ssn TEXT);
+             INSERT INTO {schema}.employees VALUES (1, 'Alice', '123-45-6789');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac14", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user("u_rbac14", support::TEST_PASS, "default", ds_id)
+        .await;
+
+    let role_allow = server.create_role("allow-role-rbac14").await;
+    let role_deny = server.create_role("deny-role-rbac14").await;
+    server.add_role_member(role_allow, user_id).await;
+    server.add_role_member(role_deny, user_id).await;
+
+    // column_allow all columns via role_allow
+    let allow_policy = server
+        .create_policy(
+            "allow-all-rbac14",
+            "column_allow",
+            vec![json!({"schemas": [schema], "tables": ["employees"], "columns": ["*"]})],
+            None,
+        )
+        .await;
+    server
+        .assign_policy_to_role(ds_id, allow_policy, role_allow, 100)
+        .await;
+
+    // column_deny ssn via role_deny
+    let deny_policy = server
+        .create_policy(
+            "deny-ssn-rbac14",
+            "column_deny",
+            vec![json!({"schemas": [schema], "tables": ["employees"], "columns": ["ssn"]})],
+            None,
+        )
+        .await;
+    server
+        .assign_policy_to_role(ds_id, deny_policy, role_deny, 100)
+        .await;
+
+    let client = server
+        .connect_as("u_rbac14", support::TEST_PASS, "ds_rbac14")
+        .await;
+
+    // SELECT * should not include ssn
+    let msgs = client
+        .simple_query(&format!("SELECT * FROM {schema}.employees"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    // Only id and name columns should be present (2 columns)
+    assert_eq!(rows[0].len(), 2, "ssn should be denied: {:?}", rows[0]);
+
+    // Explicitly selecting ssn should error
+    let result = client
+        .simple_query(&format!("SELECT ssn FROM {schema}.employees"))
+        .await;
+    assert!(
+        result.is_err(),
+        "Explicitly selecting denied column should error"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Hierarchy tests (15-20)
+// ---------------------------------------------------------------------------
+
+// RBAC-15: Cycle detection: A→B→C→A rejected at write time
+#[tokio::test]
+async fn rbac_15_cycle_detection_abc() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+
+    let role_a = server.create_role("role-a-rbac15").await;
+    let role_b = server.create_role("role-b-rbac15").await;
+    let role_c = server.create_role("role-c-rbac15").await;
+
+    server.add_role_parent(role_a, role_b).await; // A's parent is B
+    server.add_role_parent(role_b, role_c).await; // B's parent is C
+
+    // Try to make A the parent of C → cycle A→B→C→A
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/roles/{}/parents", role_c))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({"parent_role_id": role_a}))
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+// RBAC-16: Self-referential: A→A rejected
+#[tokio::test]
+async fn rbac_16_self_referential_rejected() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+
+    let role_a = server.create_role("role-a-rbac16").await;
+
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/roles/{}/parents", role_a))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({"parent_role_id": role_a}))
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+// RBAC-17: Depth cap: chain of exactly 10 accepted; chain of 11 rejected
+#[tokio::test]
+async fn rbac_17_depth_cap() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+
+    // Create 12 roles: R0, R1, ..., R11
+    let mut roles = Vec::new();
+    for i in 0..12 {
+        let role_id = server.create_role(&format!("r{i}-rbac17")).await;
+        roles.push(role_id);
+    }
+
+    // Build chain of 10: R0→R1→...→R10 (depth = 10)
+    for i in 0..10 {
+        server.add_role_parent(roles[i], roles[i + 1]).await;
+    }
+
+    // Adding R11 as parent of R10 would make depth 11 → should be rejected
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/roles/{}/parents", roles[10]))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({"parent_role_id": roles[11]}))
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+// RBAC-18: Diamond: no duplicate policy application
+#[tokio::test]
+async fn rbac_18_diamond_no_duplicate_policy() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_18";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT);
+             INSERT INTO {schema}.orders VALUES (1,'acme'),(2,'globex'),(3,'acme');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac18", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user("u_rbac18", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    // Diamond: user → A → C, user → B → C
+    let role_a = server.create_role("role-a-rbac18").await;
+    let role_b = server.create_role("role-b-rbac18").await;
+    let role_c = server.create_role("role-c-rbac18").await;
+    server.add_role_member(role_a, user_id).await;
+    server.add_role_member(role_b, user_id).await;
+    server.add_role_parent(role_a, role_c).await;
+    server.add_role_parent(role_b, role_c).await;
+
+    // Policy on the shared ancestor C
+    let policy_id = server
+        .create_policy(
+            "tenant-filter-rbac18",
+            "row_filter",
+            vec![json!({"schemas": [schema], "tables": ["orders"]})],
+            Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+        )
+        .await;
+    server
+        .assign_policy_to_role(ds_id, policy_id, role_c, 100)
+        .await;
+
+    server
+        .create_column_allow("allow-rbac18", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("u_rbac18", support::TEST_PASS, "ds_rbac18")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT tenant FROM {schema}.orders"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(
+        rows.len(),
+        2,
+        "Diamond should not cause duplicate filtering"
+    );
+    for row in &rows {
+        assert_eq!(row[0], "acme");
+    }
+}
+
+// RBAC-19: Role delete cascades cleanly
+#[tokio::test]
+async fn rbac_19_role_delete_cascades() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_19";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT);
+             INSERT INTO {schema}.items VALUES (1);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac19", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user_no_direct_access("u_rbac19", support::TEST_PASS, "default")
+        .await;
+
+    let role_id = server.create_role("analysts-rbac19").await;
+    server.add_role_member(role_id, user_id).await;
+    server.set_datasource_role_access(ds_id, &[role_id]).await;
+
+    let policy_id = server
+        .create_policy(
+            "allow-rbac19",
+            "column_allow",
+            vec![json!({"schemas": [schema], "tables": ["items"], "columns": ["*"]})],
+            None,
+        )
+        .await;
+    server
+        .assign_policy_to_role(ds_id, policy_id, role_id, 100)
+        .await;
+
+    // Can connect before delete
+    let client = server
+        .connect_as("u_rbac19", support::TEST_PASS, "ds_rbac19")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.items"))
+        .await
+        .unwrap();
+    assert_eq!(extract_rows(&msgs).len(), 1);
+    drop(client);
+
+    // Delete the role
+    server.delete_role(role_id).await;
+
+    // Poll until cache invalidation propagates — connection should be rejected
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let result = server
+            .try_connect_as("u_rbac19", support::TEST_PASS, "ds_rbac19")
+            .await;
+        if result.is_err() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Role deletion did not take effect within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+// RBAC-20: Concurrent inheritance mutation — SQLite serialization prevents race conditions
+// (We test that two conflicting parent additions don't both succeed in creating a cycle)
+#[tokio::test]
+async fn rbac_20_concurrent_inheritance_no_cycle() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+
+    let role_a = server.create_role("role-a-rbac20").await;
+    let role_b = server.create_role("role-b-rbac20").await;
+
+    server.add_role_parent(role_a, role_b).await; // A's parent is B
+
+    // Attempt to create reverse edge (B's parent is A) — should fail (cycle)
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/roles/{}/parents", role_b))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({"parent_role_id": role_a}))
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+// ---------------------------------------------------------------------------
+// Visibility tests (21-25)
+// ---------------------------------------------------------------------------
+
+// RBAC-21: column_deny via role hides columns at schema level
+#[tokio::test]
+async fn rbac_21_column_deny_via_role_hides_columns() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_21";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.employees;
+             CREATE TABLE {schema}.employees (id INT, name TEXT, ssn TEXT, salary INT);
+             INSERT INTO {schema}.employees VALUES (1, 'Alice', '123-45-6789', 90000);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac21", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user("u_rbac21", support::TEST_PASS, "default", ds_id)
+        .await;
+
+    let role_id = server.create_role("restricted-rbac21").await;
+    server.add_role_member(role_id, user_id).await;
+
+    // Deny ssn via role
+    let deny_policy = server
+        .create_policy(
+            "deny-ssn-rbac21",
+            "column_deny",
+            vec![json!({"schemas": [schema], "tables": ["employees"], "columns": ["ssn"]})],
+            None,
+        )
+        .await;
+    server
+        .assign_policy_to_role(ds_id, deny_policy, role_id, 100)
+        .await;
+
+    // Allow all columns (deny overrides)
+    server
+        .create_column_allow("allow-rbac21", schema, "employees", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("u_rbac21", support::TEST_PASS, "ds_rbac21")
+        .await;
+
+    // SELECT * should not include ssn
+    let rows = client
+        .query(&format!("SELECT * FROM {schema}.employees"), &[])
+        .await
+        .unwrap();
+    let col_names: Vec<&str> = rows[0].columns().iter().map(|c| c.name()).collect();
+    assert!(!col_names.contains(&"ssn"), "ssn should be hidden");
+    assert!(col_names.contains(&"id"));
+    assert!(col_names.contains(&"name"));
+    assert!(col_names.contains(&"salary"));
+}
+
+// RBAC-22: column_allow via role restricts to allowed columns
+#[tokio::test]
+async fn rbac_22_column_allow_via_role_restricts() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_22";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.employees;
+             CREATE TABLE {schema}.employees (id INT, name TEXT, ssn TEXT, salary INT);
+             INSERT INTO {schema}.employees VALUES (1, 'Alice', '123-45-6789', 90000);"
+        ))
+        .await;
+
+    let ds_id = server
+        .create_datasource("ds_rbac22", "policy_required")
+        .await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user("u_rbac22", support::TEST_PASS, "default", ds_id)
+        .await;
+
+    let role_id = server.create_role("restricted-rbac22").await;
+    server.add_role_member(role_id, user_id).await;
+
+    // Allow only id and name via role
+    let allow_policy = server
+        .create_policy(
+            "allow-basic-rbac22",
+            "column_allow",
+            vec![json!({"schemas": [schema], "tables": ["employees"], "columns": ["id", "name"]})],
+            None,
+        )
+        .await;
+    server
+        .assign_policy_to_role(ds_id, allow_policy, role_id, 100)
+        .await;
+
+    let client = server
+        .connect_as("u_rbac22", support::TEST_PASS, "ds_rbac22")
+        .await;
+
+    // SELECT id, name should work
+    let msgs = client
+        .simple_query(&format!("SELECT id, name FROM {schema}.employees"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], "1");
+    assert_eq!(rows[0][1], "Alice");
+
+    // SELECT ssn should fail — not in allowed columns
+    let result = client
+        .simple_query(&format!("SELECT ssn FROM {schema}.employees"))
+        .await;
+    assert!(result.is_err(), "ssn should not be accessible");
+}
+
+// RBAC-23: table_deny via role hides tables
+#[tokio::test]
+async fn rbac_23_table_deny_via_role_hides_tables() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_23";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.public_data;
+             DROP TABLE IF EXISTS {schema}.secret_data;
+             CREATE TABLE {schema}.public_data (id INT, name TEXT);
+             CREATE TABLE {schema}.secret_data (id INT, secret TEXT);
+             INSERT INTO {schema}.public_data VALUES (1, 'visible');
+             INSERT INTO {schema}.secret_data VALUES (1, 'hidden');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac23", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user("u_rbac23", support::TEST_PASS, "default", ds_id)
+        .await;
+
+    let role_id = server.create_role("restricted-rbac23").await;
+    server.add_role_member(role_id, user_id).await;
+
+    // Deny secret_data via role
+    let deny_policy = server
+        .create_policy(
+            "deny-secret-rbac23",
+            "table_deny",
+            vec![json!({"schemas": [schema], "tables": ["secret_data"]})],
+            None,
+        )
+        .await;
+    server
+        .assign_policy_to_role(ds_id, deny_policy, role_id, 100)
+        .await;
+
+    server
+        .create_column_allow("allow-rbac23", schema, "*", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("u_rbac23", support::TEST_PASS, "ds_rbac23")
+        .await;
+
+    // public_data is accessible
+    let msgs = client
+        .simple_query(&format!("SELECT name FROM {schema}.public_data"))
+        .await
+        .unwrap();
+    assert_eq!(extract_rows(&msgs).len(), 1);
+
+    // secret_data should be not found (hidden at catalog level)
+    let result = client
+        .simple_query(&format!("SELECT secret FROM {schema}.secret_data"))
+        .await;
+    assert!(result.is_err(), "Denied table should not be visible");
+}
+
+// RBAC-24: row_filter via role filters rows with template variable substitution
+#[tokio::test]
+async fn rbac_24_row_filter_via_role_template_vars() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_24";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT);
+             INSERT INTO {schema}.orders VALUES (1,'acme'),(2,'globex'),(3,'acme');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac24", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user("u_rbac24", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    let role_id = server.create_role("tenants-rbac24").await;
+    server.add_role_member(role_id, user_id).await;
+
+    let policy_id = server
+        .create_policy(
+            "tenant-filter-rbac24",
+            "row_filter",
+            vec![json!({"schemas": [schema], "tables": ["orders"]})],
+            Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+        )
+        .await;
+    server
+        .assign_policy_to_role(ds_id, policy_id, role_id, 100)
+        .await;
+
+    server
+        .create_column_allow("allow-rbac24", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("u_rbac24", support::TEST_PASS, "ds_rbac24")
+        .await;
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT id, tenant FROM {schema}.orders ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0][1], "acme");
+    assert_eq!(rows[1][1], "acme");
+}
+
+// RBAC-25: column_mask via role masks data at scan level
+#[tokio::test]
+async fn rbac_25_column_mask_via_role() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_25";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.customers;
+             CREATE TABLE {schema}.customers (id INT, name TEXT, ssn TEXT);
+             INSERT INTO {schema}.customers VALUES (1, 'Alice', '123-45-6789');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac25", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user("u_rbac25", support::TEST_PASS, "default", ds_id)
+        .await;
+
+    let role_id = server.create_role("masked-rbac25").await;
+    server.add_role_member(role_id, user_id).await;
+
+    // Mask ssn via role
+    let mask_policy = server
+        .create_policy(
+            "mask-ssn-rbac25",
+            "column_mask",
+            vec![json!({"schemas": [schema], "tables": ["customers"], "columns": ["ssn"]})],
+            Some(json!({"mask_expression": "CONCAT('***-**-', RIGHT(ssn, 4))"})),
+        )
+        .await;
+    server
+        .assign_policy_to_role(ds_id, mask_policy, role_id, 100)
+        .await;
+
+    server
+        .create_column_allow("allow-rbac25", schema, "customers", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("u_rbac25", support::TEST_PASS, "ds_rbac25")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT ssn FROM {schema}.customers"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0][0], "***-**-6789",
+        "SSN should be masked via role policy"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// API validation tests (32-36)
+// ---------------------------------------------------------------------------
+
+// RBAC-32: Empty role name → 422
+#[tokio::test]
+async fn rbac_32_empty_role_name() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+
+    let resp = server
+        .admin
+        .post("/api/v1/roles")
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({"name": ""}))
+        .await;
+
+    assert!(
+        resp.status_code().is_client_error(),
+        "Empty role name should be rejected"
+    );
+}
+
+// RBAC-33: Duplicate role name → 409
+#[tokio::test]
+async fn rbac_33_duplicate_role_name() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+
+    server.create_role("unique-role-rbac33").await;
+
+    let resp = server
+        .admin
+        .post("/api/v1/roles")
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({"name": "unique-role-rbac33"}))
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::CONFLICT);
+}
+
+// RBAC-34: Role name with invalid characters → 422
+#[tokio::test]
+async fn rbac_34_invalid_role_name_chars() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+
+    let resp = server
+        .admin
+        .post("/api/v1/roles")
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({"name": "role with spaces!"}))
+        .await;
+
+    assert!(
+        resp.status_code().is_client_error(),
+        "Invalid characters should be rejected"
+    );
+}
+
+// RBAC-35: Assign policy to non-existent role → 404
+#[tokio::test]
+async fn rbac_35_assign_policy_to_nonexistent_role() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_35";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT);
+             INSERT INTO {schema}.items VALUES (1);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac35", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let policy_id = server
+        .create_policy(
+            "allow-rbac35",
+            "column_allow",
+            vec![json!({"schemas": [schema], "tables": ["items"], "columns": ["*"]})],
+            None,
+        )
+        .await;
+
+    let fake_role_id = uuid::Uuid::now_v7();
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/datasources/{ds_id}/policies"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "policy_id": policy_id,
+            "role_id": fake_role_id,
+            "scope": "role",
+        }))
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::NOT_FOUND);
+}
+
+// RBAC-36: Add non-existent user to role → 404
+#[tokio::test]
+async fn rbac_36_add_nonexistent_user_to_role() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+
+    let role_id = server.create_role("role-rbac36").await;
+    let fake_user_id = uuid::Uuid::now_v7();
+
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/roles/{role_id}/members"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({"user_ids": [fake_user_id]}))
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// Soft delete tests (42-45)
+// ---------------------------------------------------------------------------
+
+// RBAC-42: Deactivate role → members immediately lose role-granted policies
+#[tokio::test]
+async fn rbac_42_deactivate_role_loses_policies() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_42";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT);
+             INSERT INTO {schema}.orders VALUES (1,'acme'),(2,'globex'),(3,'acme');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac42", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user("u_rbac42", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    let role_id = server.create_role("analysts-rbac42").await;
+    server.add_role_member(role_id, user_id).await;
+
+    let policy_id = server
+        .create_policy(
+            "tenant-filter-rbac42",
+            "row_filter",
+            vec![json!({"schemas": [schema], "tables": ["orders"]})],
+            Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+        )
+        .await;
+    server
+        .assign_policy_to_role(ds_id, policy_id, role_id, 100)
+        .await;
+
+    server
+        .create_column_allow("allow-rbac42", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    // Before deactivation: filtered
+    let client = server
+        .connect_as("u_rbac42", support::TEST_PASS, "ds_rbac42")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.orders"))
+        .await
+        .unwrap();
+    assert_eq!(
+        extract_rows(&msgs).len(),
+        2,
+        "Should see only acme rows while role active"
+    );
+    drop(client);
+
+    // Deactivate role
+    server.deactivate_role(role_id).await;
+
+    // Poll until cache invalidation propagates — new connection should see all 3 rows
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let client = server
+            .connect_as("u_rbac42", support::TEST_PASS, "ds_rbac42")
+            .await;
+        let msgs = client
+            .simple_query(&format!("SELECT id FROM {schema}.orders"))
+            .await
+            .unwrap();
+        if extract_rows(&msgs).len() == 3 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Role deactivation did not take effect within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+// RBAC-43: Deactivate role in middle of inheritance chain → chain breaks
+#[tokio::test]
+async fn rbac_43_deactivate_middle_role_breaks_chain() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_43";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT);
+             INSERT INTO {schema}.orders VALUES (1,'acme'),(2,'globex'),(3,'acme');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac43", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user("u_rbac43", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    // Chain: child → middle → grandparent
+    let child_role = server.create_role("child-rbac43").await;
+    let middle_role = server.create_role("middle-rbac43").await;
+    let grandparent_role = server.create_role("grandparent-rbac43").await;
+    server.add_role_parent(child_role, middle_role).await;
+    server.add_role_parent(middle_role, grandparent_role).await;
+    server.add_role_member(child_role, user_id).await;
+
+    // Policy on grandparent
+    let policy_id = server
+        .create_policy(
+            "tenant-filter-rbac43",
+            "row_filter",
+            vec![json!({"schemas": [schema], "tables": ["orders"]})],
+            Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+        )
+        .await;
+    server
+        .assign_policy_to_role(ds_id, policy_id, grandparent_role, 100)
+        .await;
+
+    server
+        .create_column_allow("allow-rbac43", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    // Before: policy applies through chain
+    let client = server
+        .connect_as("u_rbac43", support::TEST_PASS, "ds_rbac43")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.orders"))
+        .await
+        .unwrap();
+    assert_eq!(
+        extract_rows(&msgs).len(),
+        2,
+        "Should see filtered rows through chain"
+    );
+    drop(client);
+
+    // Deactivate middle role → breaks chain
+    server.deactivate_role(middle_role).await;
+
+    // Poll until cache invalidation propagates — new connection should see all 3 rows
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let client = server
+            .connect_as("u_rbac43", support::TEST_PASS, "ds_rbac43")
+            .await;
+        let msgs = client
+            .simple_query(&format!("SELECT id FROM {schema}.orders"))
+            .await
+            .unwrap();
+        if extract_rows(&msgs).len() == 3 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Middle role deactivation did not take effect within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+// RBAC-44: Reactivate role → members regain access immediately
+#[tokio::test]
+async fn rbac_44_reactivate_role_regains_policies() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_44";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT);
+             INSERT INTO {schema}.orders VALUES (1,'acme'),(2,'globex'),(3,'acme');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac44", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user("u_rbac44", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    let role_id = server.create_role("analysts-rbac44").await;
+    server.add_role_member(role_id, user_id).await;
+
+    let policy_id = server
+        .create_policy(
+            "tenant-filter-rbac44",
+            "row_filter",
+            vec![json!({"schemas": [schema], "tables": ["orders"]})],
+            Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+        )
+        .await;
+    server
+        .assign_policy_to_role(ds_id, policy_id, role_id, 100)
+        .await;
+
+    server
+        .create_column_allow("allow-rbac44", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    // Deactivate
+    server.deactivate_role(role_id).await;
+
+    // Poll until cache invalidation propagates — new connection should see all 3 rows
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let client = server
+            .connect_as("u_rbac44", support::TEST_PASS, "ds_rbac44")
+            .await;
+        let msgs = client
+            .simple_query(&format!("SELECT id FROM {schema}.orders"))
+            .await
+            .unwrap();
+        if extract_rows(&msgs).len() == 3 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Role deactivation did not take effect within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // Reactivate
+    server.reactivate_role(role_id).await;
+
+    // Poll until cache invalidation propagates — new connection should see filtered 2 rows
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let client = server
+            .connect_as("u_rbac44", support::TEST_PASS, "ds_rbac44")
+            .await;
+        let msgs = client
+            .simple_query(&format!("SELECT id FROM {schema}.orders"))
+            .await
+            .unwrap();
+        if extract_rows(&msgs).len() == 2 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Role reactivation did not take effect within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+// RBAC-45: Deactivated role excluded from datasource access
+#[tokio::test]
+async fn rbac_45_deactivated_role_no_datasource_access() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_45";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT);
+             INSERT INTO {schema}.items VALUES (1);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac45", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user_no_direct_access("u_rbac45", support::TEST_PASS, "default")
+        .await;
+
+    let role_id = server.create_role("analysts-rbac45").await;
+    server.add_role_member(role_id, user_id).await;
+    server.set_datasource_role_access(ds_id, &[role_id]).await;
+
+    server
+        .create_column_allow("allow-rbac45", schema, "items", &["*"], ds_id, None)
+        .await;
+
+    // Can connect while role is active
+    let client = server
+        .connect_as("u_rbac45", support::TEST_PASS, "ds_rbac45")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.items"))
+        .await
+        .unwrap();
+    assert_eq!(extract_rows(&msgs).len(), 1);
+    drop(client);
+
+    // Deactivate role
+    server.deactivate_role(role_id).await;
+
+    // Poll until cache invalidation propagates — connection should be rejected
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let result = server
+            .try_connect_as("u_rbac45", support::TEST_PASS, "ds_rbac45")
+            .await;
+        if result.is_err() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Deactivated role did not lose datasource access within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scope mismatch validation tests (70-73)
+// ---------------------------------------------------------------------------
+
+// RBAC-70: Both user_id AND role_id → 400
+#[tokio::test]
+async fn rbac_70_both_user_and_role_rejected() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_70";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT);
+             INSERT INTO {schema}.items VALUES (1);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac70", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user("u_rbac70", support::TEST_PASS, "default", ds_id)
+        .await;
+    let role_id = server.create_role("role-rbac70").await;
+
+    let policy_id = server
+        .create_policy(
+            "allow-rbac70",
+            "column_allow",
+            vec![json!({"schemas": [schema], "tables": ["items"], "columns": ["*"]})],
+            None,
+        )
+        .await;
+
+    // Providing both user_id and role_id without explicit scope — server must
+    // reject the ambiguous input (scope infers "role", then validation rejects user_id)
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/datasources/{ds_id}/policies"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "policy_id": policy_id,
+            "user_id": user_id,
+            "role_id": role_id,
+        }))
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+}
+
+// RBAC-71: scope='user' but role_id provided → 400
+#[tokio::test]
+async fn rbac_71_scope_user_with_role_id_rejected() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_71";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT);
+             INSERT INTO {schema}.items VALUES (1);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac71", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user("u_rbac71", support::TEST_PASS, "default", ds_id)
+        .await;
+    let role_id = server.create_role("role-rbac71").await;
+
+    let policy_id = server
+        .create_policy(
+            "allow-rbac71",
+            "column_allow",
+            vec![json!({"schemas": [schema], "tables": ["items"], "columns": ["*"]})],
+            None,
+        )
+        .await;
+
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/datasources/{ds_id}/policies"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "policy_id": policy_id,
+            "user_id": user_id,
+            "role_id": role_id,
+            "scope": "user",
+        }))
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+}
+
+// RBAC-72: scope='role' but user_id provided → 400
+#[tokio::test]
+async fn rbac_72_scope_role_with_user_id_rejected() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_72";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT);
+             INSERT INTO {schema}.items VALUES (1);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac72", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user("u_rbac72", support::TEST_PASS, "default", ds_id)
+        .await;
+    let role_id = server.create_role("role-rbac72").await;
+
+    let policy_id = server
+        .create_policy(
+            "allow-rbac72",
+            "column_allow",
+            vec![json!({"schemas": [schema], "tables": ["items"], "columns": ["*"]})],
+            None,
+        )
+        .await;
+
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/datasources/{ds_id}/policies"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "policy_id": policy_id,
+            "user_id": user_id,
+            "role_id": role_id,
+            "scope": "role",
+        }))
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+}
+
+// RBAC-73: scope='all' but user_id or role_id provided → 400
+#[tokio::test]
+async fn rbac_73_scope_all_with_ids_rejected() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_73";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT);
+             INSERT INTO {schema}.items VALUES (1);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac73", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server
+        .create_user("u_rbac73", support::TEST_PASS, "default", ds_id)
+        .await;
+
+    let policy_id = server
+        .create_policy(
+            "allow-rbac73",
+            "column_allow",
+            vec![json!({"schemas": [schema], "tables": ["items"], "columns": ["*"]})],
+            None,
+        )
+        .await;
+
+    // scope='all' with user_id → 400
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/datasources/{ds_id}/policies"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "policy_id": policy_id,
+            "user_id": user_id,
+            "scope": "all",
+        }))
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+    // scope='all' with role_id → 400
+    let role_id = server.create_role("role-rbac73").await;
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/datasources/{ds_id}/policies"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "policy_id": policy_id,
+            "role_id": role_id,
+            "scope": "all",
+        }))
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+}
+
+// ===========================================================================
+// RBAC-74: set_datasource_role_access rejects inactive roles
+// ===========================================================================
+
+#[tokio::test]
+async fn rbac_74_set_datasource_role_access_rejects_inactive_role() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "rbac_74";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.t;
+             CREATE TABLE {schema}.t (id INT);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rbac74", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let role_id = server.create_role("role-rbac74").await;
+
+    // Active role → 204 OK
+    server.set_datasource_role_access(ds_id, &[role_id]).await;
+
+    // Deactivate the role
+    server.deactivate_role(role_id).await;
+
+    // Inactive role → 400
+    let resp = server
+        .admin
+        .put(&format!("/api/v1/datasources/{ds_id}/access/roles"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({ "role_ids": [role_id] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
 }

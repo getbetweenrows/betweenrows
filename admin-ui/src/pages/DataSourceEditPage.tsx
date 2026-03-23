@@ -4,7 +4,9 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getDataSource, updateDataSource } from '../api/datasources'
 import { DataSourceForm } from '../components/DataSourceForm'
 import { UserAssignmentPanel } from '../components/UserAssignmentPanel'
+import { RoleAccessPanel } from '../components/RoleAccessPanel'
 import { DatasourceAssignmentsReadonly } from '../components/PolicyAssignmentPanel'
+import { AuditTimeline } from '../components/AuditTimeline'
 
 export function DataSourceEditPage() {
   const { id } = useParams<{ id: string }>()
@@ -93,10 +95,14 @@ export function DataSourceEditPage() {
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 p-6 mb-6">
+        <RoleAccessPanel datasourceId={dsId} />
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 p-6 mb-6">
         <DatasourceAssignmentsReadonly datasourceId={dsId} />
       </div>
 
-      <div className="bg-white rounded-xl border border-gray-200 p-6">
+      <div className="bg-white rounded-xl border border-gray-200 p-6 mb-6">
         <h2 className="text-base font-semibold text-gray-900 mb-2">Schema Catalog</h2>
         <p className="text-sm text-gray-500 mb-3">
           Discover and select which schemas and tables are accessible via the proxy.
@@ -107,6 +113,11 @@ export function DataSourceEditPage() {
         >
           Manage Catalog
         </button>
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <h2 className="text-base font-semibold text-gray-900 mb-3">Activity</h2>
+        <AuditTimeline resourceType="datasource" resourceId={dsId} />
       </div>
     </div>
   )

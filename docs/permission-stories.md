@@ -267,8 +267,8 @@ Every story carries a `Priority` label. Use these tiers when planning the roadma
 
 | Tier | Label | Criteria |
 |------|-------|----------|
-| **P0 — MVP** | Must-have for first paying customer | Directly maps to PLAN.md Phases B–E. Core tenant isolation, basic column masking, column hiding, role-based access. |
-| **P1 — V1** | Required for production-grade product | Conditional masking, ABAC, basic ReBAC, audit logging, YAML policy-as-code, break-glass access. |
+| **P0 — MVP** | Must-have for first paying customer | Directly maps to PLAN.md Phases B–E. Core tenant isolation, basic column masking, column hiding, role-based access. **Status: complete.** |
+| **P1 — V1** | Required for production-grade product | Conditional masking, ABAC, ~~basic ReBAC~~ (done — DAG-based RBAC with hierarchy), audit logging, YAML policy-as-code, break-glass access. |
 | **P2 — Future** | Differentiators and edge cases | Hierarchical/recursive access, contextual guardrails, migration tooling, advanced ReBAC, TBAC, Logic Decoupling, Programmable Governance, JIT Access. |
 
 **P0 stories (11):** DS-01, DS-02, DS-04, DS-10, MT-01, MT-05, MT-06, RE-01, CC-01, CC-03, AU-01

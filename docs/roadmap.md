@@ -1,5 +1,13 @@
 # Roadmap
 
+## MVP Checklist
+
+- [x] **Roles (RBAC)** — DAG-based role hierarchy for policy assignment and datasource access. `role`, `role_member`, `role_inheritance` tables. Policy assignments can target a role (`assignment_scope='role'`), and users in the role (including via inheritance) receive those policies. Includes cycle detection, depth cap (10), soft delete, admin audit log, effective policy preview, and immediate cache invalidation for active connections.
+- [ ] **User Attributes (ABAC)** — Key-value attributes on users (`user_attributes` table: `user_id, key, value`). Available as `{user.*}` template variables in filter/mask expressions and conditions. Extends the current hardcoded `{user.tenant}`, `{user.username}`, `{user.id}`. No IDP sync for MVP.
+- [ ] **Conditional Policies** — Optional `condition` field on all policy types. Policy only applies when condition evaluates to true. Uses same expression syntax and `{user.*}` substitution as filter/mask expressions. Enables attribute-based policy activation (e.g., `user.role != 'admin'`).
+- [ ] **Shadow Mode** — Per-policy dry-run state. Instead of blocking/masking, log what would have happened. Removes "fear of breaking prod" adoption blocker. Each policy gets an `action_status` field: `enforce` (default) or `shadow`.
+- [ ] **YAML Import/Export** — Export all policies for a datasource as YAML. Import YAML to create/update policies. Enables version-controlled policy-as-code workflows and easy promotion between environments (dev → staging → prod).
+
 ## Policy System
 
 ### Remaining Integration Test Cases
@@ -301,6 +309,25 @@ The MCP server is a thin wrapper over the existing admin API:
 
 ## UI/UX Improvements
 
+### Proxy Connection Info & User Self-Service
+
+- **Problem:** There is no clear instruction or UI for users on how to connect to the proxy. After an admin creates a user and assigns datasource access, the user has no easy way to find their connection details (host, port, database/datasource name, username).
+- **Admin UI — "Connect" panel:** Add a connection info section (per datasource or global) that shows proxy connection details: host, port, datasource name, and a copyable connection string (e.g., `psql -h <host> -p <port> -U <username> -d <datasource>`). Could also show API key in the future when that auth method is supported.
+- **The regular user problem:** Currently only admins can access the admin UI. Regular proxy users have no self-service way to:
+  - View which datasources they have access to
+  - See their connection details
+  - Reset their password
+  - View their assigned policies / effective permissions
+- **Possible approaches:**
+  1. **User-facing portal (separate or scoped view):** A lightweight read-only UI that regular users can log into to see their own connection info and access summary. Could be a subset of the admin UI behind a different auth scope.
+  2. **Welcome email / onboarding flow:** When admin creates a user, optionally generate a shareable connection guide (copy-paste or email).
+  3. **CLI / SQL-based self-service:** Users could query their own metadata via the proxy itself (e.g., `SELECT * FROM betweenrows.my_access`), though this adds complexity.
+  4. **API key management:** If/when API key auth is added, users need a way to generate and rotate their own keys — this further motivates a user-facing portal.
+- **Open questions:**
+  - Should the user portal be part of the admin UI (role-scoped) or a completely separate app?
+  - What's the minimum viable self-service surface? Just connection info, or also password reset and access visibility?
+  - How does this interact with future IDP/SSO integration — does the portal become unnecessary if auth is fully delegated?
+
 ### User Name, Datasource Name, Policy Name Validation
 
 - Currently only have hints, need live validation in the UI
@@ -466,6 +493,7 @@ Given complexity of new policy system (interaction with DataFusion and PostgreSQ
 - 2026-03-04: DataFusion query error - Invalid function 'quote_ident'. Did you mean 'date_bin'?
 - 2026-03-09: JOIN with duplicate column names (e.g., `id`) and `SELECT *` causes "Ambiguous reference to unqualified field id" error. — **Partially mitigated 2026-03-11**: column deny/allow now uses `DFSchema` qualifier-aware iteration so deny policies no longer collide across tables. Root ambiguity for `SELECT *` on JOINs with duplicate column names is a DataFusion limitation, not directly related to policy enforcement.
 - Sometimes SQL queries take long time and cause UI to hang - need performance testing, may be missing indexes
+- 2026-03-18: Catalog cache not invalidated after resync discovers new columns/tables/schemas — newly discovered objects are not immediately visible in queries until the cache expires or is manually cleared
 
 ### Git Commit Hook Improvements
 
@@ -538,6 +566,33 @@ When a policy changes, `rebuild_contexts_for_datasource` spawns background tasks
 #### `ConnectionEntry` may grow
 
 `ConnectionEntry` in `handler.rs` now holds `ctx`, `user_id`, and `datasource_name`. If future features need additional per-connection state (e.g., active transaction, client application name, audit context), this struct is the right place — but worth a deliberate review rather than ad-hoc field additions.
+
+## Configurable Audit Tracking
+
+### Problem Context
+
+- Currently, all audit events are always recorded (query audit trail, admin audit logs for all entity types)
+- Some deployments may want to disable certain audit streams for performance, storage, or compliance reasons
+- Need a configuration system that lets admins toggle audit tracking on/off per category
+
+### Proposed Configuration
+
+- **Query audit trail**: Global on/off toggle for logging every SQL query execution (the `query_audit_log` entries)
+- **Admin audit log per entity type**: Individual on/off toggles for each entity type tracked in admin audit logs, e.g.:
+  - User mutations
+  - Datasource mutations
+  - Policy mutations
+  - Role mutations
+  - Policy assignment mutations
+- Configuration could live in a `system_config` table or as environment variables / startup config
+
+### Open Questions
+
+- Is this a good idea at all? Turning off audit logging could be a security risk — need to debate trade-offs
+- Should there be a minimum audit level that cannot be disabled (e.g., always log policy changes)?
+- Where should the config live — database table (runtime changeable) vs. env vars (deploy-time only)?
+- Should disabling audit log also suppress the async `tokio::spawn` insert, or just mark entries as "not stored"?
+- If audit is off, should the audit UI show a banner indicating that logging is disabled?
 
 ## Column Access Behavior Configuration
 

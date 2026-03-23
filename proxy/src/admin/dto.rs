@@ -445,7 +445,11 @@ pub struct ListPoliciesQuery {
 #[derive(Debug, Deserialize)]
 pub struct AssignPolicyRequest {
     pub policy_id: uuid::Uuid,
-    pub user_id: Option<uuid::Uuid>, // None = all users
+    pub user_id: Option<uuid::Uuid>,
+    pub role_id: Option<uuid::Uuid>,
+    /// "user", "role", or "all". Inferred if not provided:
+    /// role_id set → "role", user_id set → "user", both null → "all"
+    pub scope: Option<String>,
     #[serde(default = "default_priority")]
     pub priority: i32,
 }
@@ -483,7 +487,10 @@ pub struct PolicyAssignmentResponse {
     pub data_source_id: uuid::Uuid,
     pub datasource_name: String,
     pub user_id: Option<uuid::Uuid>,
-    pub username: Option<String>, // None = all users
+    pub username: Option<String>,
+    pub role_id: Option<uuid::Uuid>,
+    pub role_name: Option<String>,
+    pub assignment_scope: String,
     pub priority: i32,
     pub created_at: chrono::NaiveDateTime,
     pub updated_at: chrono::NaiveDateTime,

@@ -11,4 +11,5 @@ pub mod entity;
 pub mod handler;
 pub mod hooks;
 pub mod policy_match;
+pub mod role_resolver;
 pub mod server;

@@ -1,4 +1,6 @@
+pub mod admin_audit_log;
 pub mod data_source;
+pub mod data_source_access;
 pub mod discovered_column;
 pub mod discovered_schema;
 pub mod discovered_table;
@@ -7,4 +9,6 @@ pub mod policy_assignment;
 pub mod policy_version;
 pub mod proxy_user;
 pub mod query_audit_log;
-pub mod user_data_source;
+pub mod role;
+pub mod role_inheritance;
+pub mod role_member;

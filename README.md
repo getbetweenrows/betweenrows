@@ -117,7 +117,7 @@ psql / app
     ↓  PostgreSQL wire protocol (port 5434)
 QueryProxy (Rust)
     ├─ Authenticates user (Argon2id)
-    ├─ Checks data source access (user_data_source table)
+    ├─ Checks data source access (data_source_access table — direct, role-based, or all)
     ├─ Runs query hook pipeline:
     │      ReadOnlyHook  — blocks writes (SQLSTATE 25006)
     │      PolicyHook    — row filters, column masks, column access control
@@ -147,7 +147,7 @@ Upstream PostgreSQL
 ```
 betweenrows/
 ├── Cargo.toml                        workspace root (proxy, migration crates)
-├── migration/src/                    SeaORM migrations (7 total)
+├── migration/src/                    SeaORM migrations (41 total)
 ├── docs/                             User-facing documentation
 │   ├── permission-system.md          Policy system user guide
 │   ├── permission-security-tests.md  Security test plan
@@ -159,9 +159,10 @@ betweenrows/
 │       ├── api/                      axios + fetch-event-source clients
 │       ├── auth/                     AuthContext, ProtectedRoute, LoginPage
 │       ├── components/               Layout, DataSourceForm, CatalogDiscoveryWizard,
-│       │                             PolicyForm, PolicyAssignmentPanel, …
+│       │                             PolicyForm, PolicyAssignmentPanel, RoleForm,
+│       │                             RoleMemberPanel, RoleInheritancePanel, AuditTimeline, …
 │       ├── pages/                    Users*, DataSources*, DataSourceCatalogPage,
-│       │                             Policies*, QueryAuditPage
+│       │                             Policies*, Roles*, QueryAuditPage
 │       └── types/                    TypeScript interfaces
 └── proxy/src/
     ├── main.rs                       entry point: CLI, DB init, EngineCache, servers
@@ -170,11 +171,14 @@ betweenrows/
     ├── auth.rs                       Argon2 auth, user creation
     ├── crypto.rs                     AES-256-GCM encrypt/decrypt
     ├── admin/                        REST API: mod, dto, jwt, handlers, discovery_job,
-    │                                 policy_handlers, audit_handlers, policy_yaml
+    │                                 policy_handlers, role_handlers, audit_handlers,
+    │                                 admin_audit
     ├── discovery/                    DiscoveryProvider trait + Postgres impl
-    ├── entity/                       SeaORM entities (proxy_user, data_source, policy,
-    │                                 policy_assignment, policy_version,
-    │                                 query_audit_log, …)
+    ├── entity/                       SeaORM entities (proxy_user, data_source, role,
+    │                                 role_member, role_inheritance, data_source_access,
+    │                                 policy, policy_assignment, policy_version,
+    │                                 admin_audit_log, query_audit_log, …)
+    ├── role_resolver.rs              BFS role resolution, cycle detection, effective assignments
     ├── engine/mod.rs                 EngineCache, VirtualCatalogProvider, build_arrow_schema()
     └── hooks/                        QueryHook trait, ReadOnlyHook, PolicyHook
 ```
@@ -301,7 +305,7 @@ After authentication succeeds in `handler.rs`, a background task pre-builds the 
 Access control is enforced **before** any query reaches the engine:
 
 1. `validate_data_source()` — datasource must exist and be active
-2. `check_access(user_id, datasource_name)` — user must have an explicit `user_data_source` row
+2. `check_access(user_id, datasource_name)` — user must have access via `data_source_access` (direct, role-based, or all-scoped)
 3. If either check fails → `FATAL` PG error, connection rejected before `get_ctx()` is ever called
 
 ### Why the Shared Pool Is Safe
@@ -309,8 +313,8 @@ Access control is enforced **before** any query reaches the engine:
 The upstream connection pool carries **no user identity** — it is pure TCP connectivity to the upstream Postgres server. All identity and access decisions are made at the pgwire auth layer (steps 1–2 above), not at the pool layer.
 
 Per-user isolation is enforced by:
-- **Data plane** — `user_data_source` allowlist (no row → connection rejected)
-- **RLS hook** — per-query `WHERE tenant = '<value>'` filter injected via DataFusion's logical plan tree, based on the authenticated user's tenant metadata
+- **Data plane** — `data_source_access` allowlist (no matching row → connection rejected). Access can be granted directly to a user, via role membership (including inherited roles), or to all users.
+- **Policy hook** — per-query row filters, column masks, and access controls injected via DataFusion's logical plan tree, based on the authenticated user's policy assignments (direct, role-based, or wildcard)
 - **Virtual catalog** — the stored catalog is an allowlist; tables/columns not explicitly saved are invisible to the engine
 
 The shared pool is safe for all authorized users of a datasource: Pool = "how to talk to upstream". Auth + RLS = "what this user can see". These are orthogonal.
@@ -328,8 +332,8 @@ QueryProxy enforces a two-layer access control model:
 **Management plane** — controlled by `is_admin` flag. Admins manage users, data sources, policies, and catalogs via the Admin API. Non-admins have no Admin API access.
 
 **Data plane** — controlled by two independent mechanisms:
-1. *Connection access* — explicit `user_data_source` assignment. A user can only connect to a datasource with an explicit row. Being an admin does **not** automatically grant data plane access.
-2. *Query policy* — `PolicyHook` applies row filters, column masks, and column access controls per-query based on assigned policies. If the datasource `access_mode` is `"policy_required"`, tables with no matching permit policy return empty results.
+1. *Connection access* — `data_source_access` entries. A user can connect to a datasource via direct assignment, role membership (including inherited roles), or all-user scope. Being an admin does **not** automatically grant data plane access.
+2. *Query policy* — `PolicyHook` applies row filters, column masks, and column access controls per-query based on assigned policies (direct, role-based, or all-scoped). If the datasource `access_mode` is `"policy_required"`, tables with no matching permit policy return empty results.
 
 See `docs/permission-system.md` for the full policy system user guide.
 
@@ -337,7 +341,7 @@ Connection flow:
 1. Client connects: `psql -d <datasource_name> -U <username>`
 2. Proxy authenticates (Argon2id)
 3. Proxy validates data source exists and is active
-4. Proxy checks `user_data_source` — denied if no row
+4. Proxy checks `data_source_access` — denied if no matching row (direct, role, or all scope)
 5. Background task pre-warms `SessionContext` + pool
 6. First query: fast path — context and pool already ready
 
@@ -377,7 +381,24 @@ All endpoints require `Authorization: Bearer <token>` (obtained from `/auth/logi
 | DELETE | `/datasources/{id}` | Delete data source |
 | POST | `/datasources/{id}/test` | Test upstream connection |
 | GET | `/datasources/{id}/users` | List assigned users |
-| PUT | `/datasources/{id}/users` | Replace user assignments |
+| PUT | `/datasources/{id}/users` | Replace user assignments (user-scoped access) |
+| PUT | `/datasources/{id}/access/roles` | Set role-based access `{ role_ids: [uuid] }` |
+
+### Roles
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/roles` | List roles (paginated, searchable) |
+| POST | `/roles` | Create role `{ name, description? }` |
+| GET | `/roles/{id}` | Get role + members + inheritance + policy assignments |
+| PUT | `/roles/{id}` | Update name/description/is_active |
+| DELETE | `/roles/{id}` | Delete role → returns impact `{ affected_users, affected_assignments }` |
+| GET | `/roles/{id}/effective-members` | All users inheriting policies (direct + inherited), with source |
+| GET | `/roles/{id}/impact` | Preview impact of deleting this role |
+| POST | `/roles/{id}/members` | Add members `{ user_ids: [uuid] }` |
+| DELETE | `/roles/{id}/members/{user_id}` | Remove member |
+| POST | `/roles/{id}/parents` | Add parent `{ parent_role_id }` (cycle detection + depth check) |
+| DELETE | `/roles/{id}/parents/{parent_id}` | Remove parent |
 
 ### Catalog Discovery
 
@@ -431,14 +452,21 @@ All policy endpoints require admin (`is_admin = true`).
 | GET | `/policies/export` | Export all policies as YAML |
 | POST | `/policies/import` | Import YAML (`?dry_run=true` to preview) |
 | GET | `/datasources/{id}/policies` | List policy assignments for datasource |
-| POST | `/datasources/{id}/policies` | Assign policy to datasource (optionally scoped to a user) |
+| POST | `/datasources/{id}/policies` | Assign policy to datasource (scope: user/role/all) |
 | DELETE | `/datasources/{id}/policies/{assignment_id}` | Remove assignment |
 
 ### Audit Log
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/audit/queries` | Paginated query audit log (filter by user, datasource, date range) |
+| GET | `/audit/queries` | Paginated query audit log (filter by user, datasource, date range, status) |
+| GET | `/audit/admin` | Paginated admin audit log (filter by resource_type, resource_id, actor_id, date range) |
+
+### Effective Policies
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/users/{id}/effective-policies?datasource_id=X` | All policies applying to user (with source annotation) |
 
 ## Catalog Workflow
 
@@ -458,21 +486,26 @@ The catalog is an **allowlist** — the proxy can never expose tables or columns
 All primary keys are UUIDs. The admin store uses SQLite by default (configurable via `DATABASE_URL`).
 
 ```
-proxy_user        (id UUID, username, password_hash, tenant, is_admin, is_active, …)
-data_source       (id UUID, name, ds_type, config JSON, secure_config encrypted,
-                   is_active, access_mode, last_sync_at, last_sync_result, …)
-user_data_source  (id UUID, user_id → proxy_user, data_source_id → data_source)
-discovered_schema (id UUID v5, data_source_id, schema_name, is_selected)
-discovered_table  (id UUID v5, discovered_schema_id, table_name, table_type, is_selected)
-discovered_column (id UUID v5, discovered_table_id, column_name, ordinal_position,
-                   data_type, is_nullable, column_default, arrow_type)
+proxy_user         (id UUID, username, password_hash, tenant, is_admin, is_active, …)
+data_source        (id UUID, name, ds_type, config JSON, secure_config encrypted,
+                    is_active, access_mode, last_sync_at, last_sync_result, …)
+data_source_access (id UUID, user_id?, role_id?, data_source_id, assignment_scope, …)
+role               (id UUID, name UNIQUE, description, is_active, …)
+role_member        (id UUID, role_id → role, user_id → proxy_user)
+role_inheritance   (id UUID, parent_role_id → role, child_role_id → role)
+discovered_schema  (id UUID v5, data_source_id, schema_name, is_selected)
+discovered_table   (id UUID v5, discovered_schema_id, table_name, table_type, is_selected)
+discovered_column  (id UUID v5, discovered_table_id, column_name, ordinal_position,
+                    data_type, is_nullable, column_default, arrow_type)
 
-policy            (id UUID v7, name, description, policy_type, is_enabled, version, targets JSON, definition JSON, …)
-policy_version    (id UUID v7, policy_id, version, snapshot JSON, change_type, changed_by)
-policy_assignment (id UUID v7, policy_id, data_source_id, user_id?, priority)
-query_audit_log   (id UUID v7, user_id, username, data_source_id, datasource_name,
-                   original_query, rewritten_query, policies_applied JSON,
-                   execution_time_ms, client_ip, client_info, created_at)
+policy             (id UUID v7, name, description, policy_type, is_enabled, version, targets JSON, definition JSON, …)
+policy_version     (id UUID v7, policy_id, version, snapshot JSON, change_type, changed_by)
+policy_assignment  (id UUID v7, policy_id, data_source_id, user_id?, role_id?,
+                    assignment_scope, priority)
+admin_audit_log    (id UUID v7, resource_type, resource_id, action, actor_id, changes JSON, created_at)
+query_audit_log    (id UUID v7, user_id, username, data_source_id, datasource_name,
+                    original_query, rewritten_query, policies_applied JSON,
+                    execution_time_ms, client_ip, client_info, created_at)
 ```
 
 Catalog entity IDs (schemas, tables, columns) are deterministic UUID v5 fingerprints derived from their natural keys. Re-discovering the same upstream object always produces the same ID, so re-syncs are safe upserts.
@@ -481,6 +514,6 @@ Catalog entity IDs (schemas, tables, columns) are deterministic UUID v5 fingerpr
 
 ```bash
 cargo build -p proxy          # compile
-cargo test -p proxy           # run tests (101 unit tests)
+cargo test -p proxy           # run tests (213 unit tests + integration tests)
 cd admin-ui && npm run build  # production UI bundle
 ```

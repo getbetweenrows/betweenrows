@@ -46,6 +46,18 @@ export function Layout() {
             Data Sources
           </NavLink>
           <NavLink
+            to="/roles"
+            className={({ isActive }) =>
+              `flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+                isActive
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-300 hover:bg-gray-700 hover:text-white'
+              }`
+            }
+          >
+            Roles
+          </NavLink>
+          <NavLink
             to="/policies"
             className={({ isActive }) =>
               `flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
@@ -68,6 +80,18 @@ export function Layout() {
             }
           >
             Query Audit
+          </NavLink>
+          <NavLink
+            to="/admin-audit"
+            className={({ isActive }) =>
+              `flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+                isActive
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-300 hover:bg-gray-700 hover:text-white'
+              }`
+            }
+          >
+            Admin Audit
           </NavLink>
         </nav>
 

@@ -10,10 +10,13 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
-use crate::entity::{data_source, proxy_user, user_data_source};
+use std::collections::HashSet;
+
+use crate::entity::{data_source, data_source_access, proxy_user};
 
 use super::{
     AdminState, ApiErr,
+    admin_audit::{AuditAction, AuditedTxn},
     datasource_types::{self, DataSourceTypeResponse},
     dto::{
         CreateDataSourceRequest, DataSourceResponse, ListDataSourcesQuery, PaginatedResponse,
@@ -21,6 +24,7 @@ use super::{
         validate_access_mode, validate_datasource_name,
     },
     jwt::AdminClaims,
+    role_handlers::invalidate_user,
 };
 
 // ---------- helper: build DataSourceResponse from model ----------
@@ -156,10 +160,12 @@ pub async fn create_datasource(
     })?;
 
     // Auto-assign creator
-    user_data_source::ActiveModel {
+    data_source_access::ActiveModel {
         id: Set(Uuid::now_v7()),
-        user_id: Set(claims.sub),
+        user_id: Set(Some(claims.sub)),
+        role_id: Set(None),
         data_source_id: Set(model.id),
+        assignment_scope: Set("user".to_string()),
         created_at: Set(now),
     }
     .insert(&txn)
@@ -340,13 +346,14 @@ pub async fn get_datasource_users(
         .map_err(ApiErr::internal)?
         .ok_or_else(|| ApiErr::not_found("Data source not found"))?;
 
-    let assignments = user_data_source::Entity::find()
-        .filter(user_data_source::Column::DataSourceId.eq(id))
+    let assignments = data_source_access::Entity::find()
+        .filter(data_source_access::Column::DataSourceId.eq(id))
+        .filter(data_source_access::Column::AssignmentScope.eq("user"))
         .all(&state.db)
         .await
         .map_err(ApiErr::internal)?;
 
-    let user_ids: Vec<Uuid> = assignments.iter().map(|a| a.user_id).collect();
+    let user_ids: Vec<Uuid> = assignments.iter().filter_map(|a| a.user_id).collect();
 
     let users = proxy_user::Entity::find()
         .filter(proxy_user::Column::Id.is_in(user_ids))
@@ -361,42 +368,72 @@ pub async fn get_datasource_users(
 // ---------- PUT /datasources/{id}/users ----------
 
 pub async fn set_datasource_users(
-    AdminClaims(_): AdminClaims,
+    AdminClaims(claims): AdminClaims,
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
     Json(body): Json<SetDataSourceUsersRequest>,
 ) -> Result<StatusCode, ApiErr> {
-    // Confirm data source exists
     data_source::Entity::find_by_id(id)
         .one(&state.db)
         .await
         .map_err(ApiErr::internal)?
         .ok_or_else(|| ApiErr::not_found("Data source not found"))?;
 
-    let txn = state.db.begin().await.map_err(ApiErr::internal)?;
-
-    // Delete all existing assignments
-    user_data_source::Entity::delete_many()
-        .filter(user_data_source::Column::DataSourceId.eq(id))
-        .exec(&txn)
+    let mut txn = AuditedTxn::begin(&state.db)
         .await
         .map_err(ApiErr::internal)?;
 
-    // Insert new assignments
+    let old_entries = data_source_access::Entity::find()
+        .filter(data_source_access::Column::DataSourceId.eq(id))
+        .filter(data_source_access::Column::AssignmentScope.eq("user"))
+        .all(&*txn)
+        .await
+        .map_err(ApiErr::internal)?;
+    let old_user_ids: HashSet<Uuid> = old_entries.iter().filter_map(|e| e.user_id).collect();
+
+    data_source_access::Entity::delete_many()
+        .filter(data_source_access::Column::DataSourceId.eq(id))
+        .filter(data_source_access::Column::AssignmentScope.eq("user"))
+        .exec(&*txn)
+        .await
+        .map_err(ApiErr::internal)?;
+
     let now = Utc::now().naive_utc();
-    for user_id in body.user_ids {
-        user_data_source::ActiveModel {
+    let new_user_ids: HashSet<Uuid> = body.user_ids.iter().copied().collect();
+    for user_id in &body.user_ids {
+        data_source_access::ActiveModel {
             id: Set(Uuid::now_v7()),
-            user_id: Set(user_id),
+            user_id: Set(Some(*user_id)),
+            role_id: Set(None),
             data_source_id: Set(id),
+            assignment_scope: Set("user".to_string()),
             created_at: Set(now),
         }
-        .insert(&txn)
+        .insert(&*txn)
         .await
         .map_err(ApiErr::internal)?;
     }
 
+    let old_ids_json: Vec<String> = old_user_ids.iter().map(|id| id.to_string()).collect();
+    let new_ids_json: Vec<String> = new_user_ids.iter().map(|id| id.to_string()).collect();
+    txn.audit(
+        "datasource",
+        id,
+        AuditAction::Update,
+        claims.sub,
+        serde_json::json!({
+            "field": "user_access",
+            "before": old_ids_json,
+            "after": new_ids_json,
+        }),
+    );
+
     txn.commit().await.map_err(ApiErr::internal)?;
+
+    let all_affected: HashSet<Uuid> = old_user_ids.union(&new_user_ids).copied().collect();
+    for user_id in all_affected {
+        invalidate_user(&state, user_id).await;
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -525,19 +562,21 @@ mod tests {
         let ds = create_ds(&db, &master_key, "myds").await;
 
         // Simulate auto-assignment (as handler would do)
-        user_data_source::ActiveModel {
+        data_source_access::ActiveModel {
             id: Set(Uuid::now_v7()),
-            user_id: Set(user.id),
+            user_id: Set(Some(user.id)),
+            role_id: Set(None),
             data_source_id: Set(ds.id),
+            assignment_scope: Set("user".to_string()),
             created_at: Set(Utc::now().naive_utc()),
         }
         .insert(&db)
         .await
         .unwrap();
 
-        let assignment = user_data_source::Entity::find()
-            .filter(user_data_source::Column::UserId.eq(user.id))
-            .filter(user_data_source::Column::DataSourceId.eq(ds.id))
+        let assignment = data_source_access::Entity::find()
+            .filter(data_source_access::Column::UserId.eq(user.id))
+            .filter(data_source_access::Column::DataSourceId.eq(ds.id))
             .one(&db)
             .await
             .unwrap();
@@ -581,10 +620,12 @@ mod tests {
         // Assign user1 and user2
         let now = Utc::now().naive_utc();
         for uid in [user1.id, user2.id] {
-            user_data_source::ActiveModel {
+            data_source_access::ActiveModel {
                 id: Set(Uuid::now_v7()),
-                user_id: Set(uid),
+                user_id: Set(Some(uid)),
+                role_id: Set(None),
                 data_source_id: Set(ds.id),
+                assignment_scope: Set("user".to_string()),
                 created_at: Set(now),
             }
             .insert(&db)
@@ -593,37 +634,39 @@ mod tests {
         }
 
         // Read assignments
-        let assignments = user_data_source::Entity::find()
-            .filter(user_data_source::Column::DataSourceId.eq(ds.id))
+        let assignments = data_source_access::Entity::find()
+            .filter(data_source_access::Column::DataSourceId.eq(ds.id))
             .all(&db)
             .await
             .unwrap();
         assert_eq!(assignments.len(), 2);
 
         // Replace with just user1
-        user_data_source::Entity::delete_many()
-            .filter(user_data_source::Column::DataSourceId.eq(ds.id))
+        data_source_access::Entity::delete_many()
+            .filter(data_source_access::Column::DataSourceId.eq(ds.id))
             .exec(&db)
             .await
             .unwrap();
 
-        user_data_source::ActiveModel {
+        data_source_access::ActiveModel {
             id: Set(Uuid::now_v7()),
-            user_id: Set(user1.id),
+            user_id: Set(Some(user1.id)),
+            role_id: Set(None),
             data_source_id: Set(ds.id),
+            assignment_scope: Set("user".to_string()),
             created_at: Set(now),
         }
         .insert(&db)
         .await
         .unwrap();
 
-        let remaining = user_data_source::Entity::find()
-            .filter(user_data_source::Column::DataSourceId.eq(ds.id))
+        let remaining = data_source_access::Entity::find()
+            .filter(data_source_access::Column::DataSourceId.eq(ds.id))
             .all(&db)
             .await
             .unwrap();
         assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].user_id, user1.id);
+        assert_eq!(remaining[0].user_id, Some(user1.id));
     }
 
     #[tokio::test]
@@ -632,10 +675,12 @@ mod tests {
         let user = create_user(&db, "alice", true).await;
         let ds = create_ds(&db, &master_key, "myds").await;
 
-        user_data_source::ActiveModel {
+        data_source_access::ActiveModel {
             id: Set(Uuid::now_v7()),
-            user_id: Set(user.id),
+            user_id: Set(Some(user.id)),
+            role_id: Set(None),
             data_source_id: Set(ds.id),
+            assignment_scope: Set("user".to_string()),
             created_at: Set(Utc::now().naive_utc()),
         }
         .insert(&db)

@@ -400,3 +400,234 @@ There is no ambiguous per-definition `action` field. `compute_user_visibility()`
 
 **Test**: `row_filter_and_column_mask_same_column` — filter excludes `ssn = '000-00-0000'`, mask replaces ssn with `'***-**-XXXX'`. Verifies 2 rows returned (not 3) and values are masked.
 
+---
+
+## RBAC (Role-Based Access Control) — Vectors 33–45
+
+### 33. Role-based datasource access grants connection
+
+**Vector**: User has no direct `data_source_access` entry but is a member of a role that has role-scoped access.
+
+**Defense**: `resolve_datasource_access()` checks all three scopes: user-direct, role-based (resolving full role hierarchy), and all-scoped.
+
+**Test**: `rbac_02_role_based_access` — user with no direct access but member of role with datasource access can connect.
+
+---
+
+### 34. Inherited role datasource access
+
+**Vector**: User is member of child role; parent role has datasource access. Child role has no direct access grant.
+
+**Defense**: `resolve_user_roles()` BFS traverses the full inheritance DAG upward, so parent role access is found.
+
+**Test**: `rbac_03_inherited_role_access` — user in child role connects via parent role's datasource access.
+
+---
+
+### 35. Cycle detection in role inheritance
+
+**Vector**: Admin attempts to create a circular inheritance chain (A→B→C→A) to cause infinite loops in role resolution.
+
+**Defense**: `detect_cycle()` runs BFS from proposed parent upward before insertion. SQLite single-writer prevents concurrent cycle creation.
+
+**Test**: `rbac_15_cycle_detection` — creating A→B→C, then C→A, returns 422 error.
+
+---
+
+### 36. Self-referential role inheritance
+
+**Vector**: Admin sets a role as its own parent to create a trivial cycle.
+
+**Defense**: `detect_cycle()` short-circuits on `parent_id == child_id`.
+
+**Test**: `rbac_16_self_referential` — returns 422 error.
+
+---
+
+### 37. Inheritance depth cap (max 10)
+
+**Vector**: Admin creates a chain deeper than 10 levels to cause performance degradation or stack overflow in BFS.
+
+**Defense**: `resolve_user_roles()` caps BFS at depth 10. `check_inheritance_depth()` rejects edges that would exceed the limit.
+
+**Test**: `rbac_17_depth_cap` — chain of 10 accepted; chain of 11 rejected with 422.
+
+---
+
+### 38. Deny-wins across roles
+
+**Vector**: User is member of Role A (which has `column_deny` on `ssn`) and Role B (which has `column_allow` including `ssn`). User expects to see `ssn`.
+
+**Defense**: Deny policies always win regardless of source. `column_deny` from any assignment path removes the column.
+
+**Test**: `rbac_14_deny_wins_across_roles` — column is denied despite allow from another role.
+
+---
+
+### 39. Scope mismatch: both user_id AND role_id
+
+**Vector**: API caller sends both `user_id` and `role_id` in an assignment request, attempting to create an ambiguous assignment.
+
+**Defense**: `assign_policy` validates scope constraints. `scope='user'` requires only `user_id`, `scope='role'` requires only `role_id`, `scope='all'` requires neither.
+
+**Tests**: `rbac_70` through `rbac_73` — all combinations return 400.
+
+---
+
+### 40. Role deactivation immediately removes access
+
+**Vector**: Admin deactivates a role. Users still in the role attempt to access data on their next query.
+
+**Defense**: `resolve_user_roles()` skips inactive roles. Deactivation triggers cache invalidation + context rebuild for all affected users.
+
+**Test**: `rbac_42_deactivate_loses_policies` — after deactivation, member's query returns no rows (in policy_required mode).
+
+---
+
+### 41. Deactivated role in middle of inheritance chain
+
+**Vector**: Chain A→B→C where B is deactivated. Users in A expect to still get C's policies via B.
+
+**Defense**: BFS stops at inactive roles — B being inactive means C (and everything above B) is unreachable from A.
+
+**Test**: `rbac_43_deactivate_middle_breaks_chain` — policies from C no longer apply to A's members.
+
+---
+
+### 42. Template variables resolve from user, not role
+
+**Vector**: `row_filter` with `{user.tenant}` assigned to a role. Attacker expects the filter to use the role's properties instead of the connecting user's tenant.
+
+**Defense**: Template variable substitution happens in `PolicyHook` using the authenticated user's metadata, not role metadata. Roles have no tenant/username properties.
+
+**Test**: `rbac_24_row_filter_via_role` — filter uses the connecting user's tenant, not any role property.
+
+---
+
+### 43. SQL injection via role name
+
+**Vector**: Admin creates a role named `"; DROP TABLE role; --"`.
+
+**Defense**: Role name validation restricts to `[a-zA-Z0-9_.-]`, 3-50 chars, must start with a letter.
+
+**Test**: `rbac_34_invalid_characters` — returns 422 error.
+
+---
+
+### 44. Diamond inheritance deduplication
+
+**Vector**: User is in role A which inherits from B and C, both of which inherit from D. Policy on D should apply once, not twice.
+
+**Defense**: `resolve_effective_assignments()` deduplicates by `policy_id`, keeping the assignment with the lowest priority number.
+
+**Test**: `rbac_18_diamond_dedup` — policy applied exactly once.
+
+---
+
+### 45a. Revoked role datasource access persists on active connections (H1)
+
+**Vector**: Admin revokes a role's access to a datasource via `PUT /datasources/{id}/access/roles` (removing the role from the list). Users who are already connected via that role's access still have active `SessionContext` entries reflecting the old access.
+
+**Bug**: `set_datasource_role_access` only invalidated members of newly-added roles, not members of removed roles. Users who lost access could continue querying until they disconnected.
+
+**Defense**: Before deleting old role-scoped entries, capture `old_role_ids`. After commit, compute `all_affected = old_role_ids ∪ new_role_ids` and invalidate members of all affected roles. Also added audit log entry.
+
+**Test**: Code review — `set_datasource_role_access` now invalidates `old_role_ids.union(&new_role_ids)`.
+
+---
+
+### 45b. Revoked user datasource access has no invalidation or audit (H3b)
+
+**Vector**: Admin changes the user access list via `PUT /datasources/{id}/users`, removing a user. The removed user's active connections retain the old `SessionContext` and can continue querying. No audit trail is recorded.
+
+**Bug**: `set_datasource_users` had no cache invalidation and no audit log call.
+
+**Defense**: Before deleting old user-scoped entries, capture `old_user_ids`. After commit, invalidate `old_user_ids ∪ new_user_ids`. Added audit log entry with `resource_type: "datasource"`, `action: "update"`, changes showing before/after user IDs.
+
+**Test**: Code review — `set_datasource_users` now invalidates all affected users and writes audit log.
+
+---
+
+### 45c. Silent rebuild failure leaves stale SessionContext (H2)
+
+**Vector**: After a policy or role mutation, `rebuild_contexts_for_datasource` or `rebuild_contexts_for_user` fails for a specific connection (e.g., the upstream database is unreachable). The stale `SessionContext` remains, potentially missing new deny policies.
+
+**Bug**: On rebuild failure, the error was logged but the connection entry was left in place with the old context.
+
+**Defense**: On rebuild failure, the stale connection entry is removed from `connection_contexts`. The user's next query will receive a "Session context not found — please reconnect" error, forcing a fresh connection that re-evaluates `check_access` and `build_user_context`.
+
+**Test**: Code review — both `rebuild_contexts_for_datasource` and `rebuild_contexts_for_user` now call `conn_store.connection_contexts.remove(&conn_id)` in the error branch.
+
+---
+
+### 45d. Inheritance depth check ignores child subtree (H4)
+
+**Vector**: Role A has depth 2 above. Role B has depth 8 below (child chain). Adding A as parent of B: old check only looked at depth above A (2 + 1 = 3 < 10, accepted). But total chain depth is 2 + 1 + 8 = 11, exceeding the limit.
+
+**Bug**: `add_parent` only called `check_inheritance_depth` on the parent (upward), ignoring the child's downward subtree.
+
+**Defense**: Added `check_inheritance_depth_down` (BFS downward). The depth check now computes `total = depth_above_parent + 1 + depth_below_child` and rejects if > 10.
+
+**Test**: `u16_depth_down_chain` — verifies downward depth calculation. `u17_total_depth_check` — verifies total depth accounting.
+
+---
+
+### 46. Effective members source annotation shows wrong role name
+
+**Vector**: Admin views the Members tab for a parent role (e.g., `data-analysts`). A user who is a direct member of a child role (`data-architect`, which inherits from `data-analysts`) appears as "via role 'data-analysts'" instead of "via role 'data-architect'". This misleads admins about where the member relationship actually exists.
+
+**Bug**: In `resolve_effective_members()`, the BFS source annotation for child roles used `all_roles.get(&role_id)` (the top-level role being viewed) and `all_roles.get(&current)` (the intermediate parent) instead of `all_roles.get(&child_id)` (the actual child role the member belongs to). The source label should indicate which role the user is a *direct member of*, not which role is being viewed.
+
+**Defense**: Changed both BFS levels in `resolve_effective_members()` to use `child_id` for the role name lookup. The source label now correctly says "via role '<child_role_name>'" — identifying the child role the member actually belongs to.
+
+**Test**: `u13_resolve_all_members` — verifies BFS downward member collection. Manual: create parent→child hierarchy, add member to child, view parent's effective members — should show "via role '<child_name>'".
+
+---
+
+### 45. Role deletion cascade integrity
+
+**Vector**: Deleting a role that has members, inheritance edges, and policy assignments. Orphaned references could cause query failures.
+
+**Defense**: All FK relationships use `ON DELETE CASCADE`. Members, inheritance edges, policy assignments, and data_source_access entries are automatically deleted.
+
+**Test**: `rbac_19_delete_cascades` — after deletion, no orphaned rows exist.
+
+---
+
+### 47. Inactive role granted datasource access
+
+**Vector**: Admin grants datasource access to an inactive (deactivated) role via `PUT /datasources/{id}/access/roles`. If accepted, the inactive role's access entry exists in `data_source_access` but has no effect — until someone reactivates the role, at which point members unexpectedly gain access without an explicit grant decision.
+
+**Defense**: `set_datasource_role_access` now validates `is_active` on each role before inserting the access entry. Inactive roles are rejected with HTTP 400.
+
+**Test**: `rbac_74_set_datasource_role_access_rejects_inactive_role` — create role, grant access (204), deactivate role, attempt grant again (400).
+
+---
+
+### 48. TOCTOU in role inheritance cycle detection
+
+**Vector**: Two concurrent `add_parent` requests could each pass cycle detection independently but together create a cycle, because the detection and insert were not atomic.
+
+**Defense**: `add_parent` now wraps `detect_cycle` + `check_inheritance_depth` + `insert` in a single database transaction. SQLite's single-writer serialization ensures that the second concurrent request sees the first's insert during its cycle detection.
+
+**Test**: Covered by existing `rbac_15_cycle_detection` and `rbac_16_self_referential`. The TOCTOU fix is structural (transaction boundary), not behavioral.
+
+---
+
+### 49. Audit log outside transaction — all mutation handlers
+
+**Vector**: Multiple handlers performed entity mutations and audit log insertion as separate operations, or called `audit_log` outside the transaction boundary. Specific cases:
+- `create_role` / `update_role`: mutation on `&state.db`, audit on `&state.db` — two separate statements, not atomic.
+- `set_datasource_users`: mutation inside `txn`, audit after `txn.commit()` on `&state.db` — audit completely outside the transaction.
+- `delete_role`: did not audit cascaded policy assignment deletions.
+- `remove_parent`: invalidated caches before `txn.commit()` — stale cache served during the window between invalidation and commit.
+
+**Defense**: All mutation handlers now use `AuditedTxn` (from `admin_audit.rs`), a wrapper around `DatabaseTransaction` that queues audit entries via `txn.audit(...)` and writes them atomically on `commit()`. This makes the correct pattern (audit inside the transaction) the only pattern — `AuditedTxn::commit()` errors if no entries are queued, preventing unaudited commits. The old `audit_delete` / `audit_insert` helpers have been removed.
+
+Additional fixes:
+- `delete_role` now audits each cascaded policy assignment as `Unassign` before deleting the role.
+- `remove_parent` collects affected user IDs before the transaction and invalidates caches after `txn.commit()`.
+- `set_datasource_role_access` validates all roles before any mutations (no validate-after-delete).
+
+**Test**: `audited_txn_commits_with_entries`, `audited_txn_rejects_empty_commit`, `audited_txn_rollback_on_drop`, `audited_txn_multiple_entries` (unit tests in `admin_audit.rs`). Structural enforcement via the type system.
+

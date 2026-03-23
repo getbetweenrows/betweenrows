@@ -32,6 +32,47 @@ git config core.hooksPath .githooks
 
 Use `/release` to prepare the changelog, bump versions, commit, and tag. Use `/commit` for day-to-day commits.
 
+## Planning & Feature Design
+
+### Design-First, Discuss Before Building
+For any non-trivial feature, enter plan mode and work through the design iteratively with the user before writing code. Don't jump to implementation — discuss trade-offs, edge cases, and security implications first. The goal is alignment on approach before any code is written.
+
+**Planning workflow:**
+1. **Explore** — read the relevant code paths end-to-end. Understand what exists before proposing what to build.
+2. **Design** — propose the approach with concrete trade-offs. Present options with pros/cons, not just one solution.
+3. **Discuss** — ask the user targeted questions about design decisions. Don't make assumptions on ambiguous points. Use AskUserQuestion for specific choices, not open-ended "what do you think?" questions.
+4. **Harden** — after the core design is agreed, proactively ask: "What else can we improve?" Look for security gaps, edge cases, performance concerns, and missing test coverage. Iterate until the user says "enough."
+5. **Finalize** — write the plan with all decisions documented, then exit plan mode.
+
+### Test Vector Design During Planning (Non-Optional)
+Every feature plan MUST include a comprehensive test case inventory before implementation begins. Tests are designed during planning, not added as an afterthought. The test cases serve as the specification — if you can't write the test case, you don't understand the feature well enough.
+
+**Systematic test categories to cover for every feature:**
+
+| Category | What to ask | Examples |
+|----------|------------|---------|
+| **Happy path** | Does the basic flow work? | CRUD operations, expected inputs, normal usage |
+| **Attack vectors** | Can it be exploited? | SQL injection, parameter tampering, scope mismatches, privilege escalation |
+| **Deny-wins / security invariants** | Do security guarantees hold? | Deny overrides allow, deactivation blocks access, audit can't be tampered |
+| **State interactions** | How does it interact with existing features? | is_active flags, is_enabled flags, access_mode, template variables |
+| **FK cascades / data integrity** | What happens when related entities are deleted? | Delete parent → child cleanup, unique constraint violations |
+| **Cache consistency** | Do changes take effect immediately? | Mutation → cache invalidation → next query reflects change |
+| **Timing / concurrency** | What about race conditions? | Mid-session changes, concurrent mutations, rapid successive operations |
+| **Edge cases** | What about boundary conditions? | Empty sets, max lengths, zero members, duplicate entries |
+| **API validation** | Are invalid inputs rejected? | Missing fields, wrong types, out-of-range values, conflicting parameters |
+| **Audit integrity** | Are all mutations tracked? | Every CRUD op logged, correct actor, accurate before/after snapshots |
+| **Multi-entity interaction** | How do multiple instances interact? | Multiple roles, multiple datasources, overlapping policies, priority conflicts |
+| **Backward compatibility** | Does existing functionality still work? | Old API formats, migration of existing data, default values |
+
+**Test naming convention:** Group tests by category with descriptive names. Map security-relevant tests to vector numbers in `docs/permission-security-tests.md`.
+
+### Security-First Thinking
+This is a data security product. Every feature that touches access control, policy resolution, or data visibility must be evaluated through a security lens:
+- **What can an attacker do?** — enumerate bypass vectors before building defenses
+- **What breaks when state changes?** — deactivation, deletion, membership changes, policy mutations
+- **What's the blast radius?** — how many users/connections are affected by a change?
+- **Is the audit trail complete?** — can every mutation be traced back to who did it and when?
+
 ## Migrations (`migration/`)
 
 ### Rules (violations here cause hard-to-fix production incidents)

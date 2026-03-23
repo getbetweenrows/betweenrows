@@ -6,6 +6,7 @@ import { PolicyForm } from '../components/PolicyForm'
 import type { PolicyFormValues } from '../components/PolicyForm'
 import { PolicyAssignmentEditPanel } from '../components/PolicyAssignmentPanel'
 import { PolicyCodeView } from '../components/PolicyCodeView'
+import { AuditTimeline } from '../components/AuditTimeline'
 import { useCatalogHints } from '../hooks/useCatalogHints'
 
 export function PolicyEditPage() {
@@ -113,6 +114,11 @@ export function PolicyEditPage() {
       </div>
 
       <PolicyCodeView policy={policy} assignments={policy.assignments ?? []} />
+
+      <div className="bg-white rounded-xl border border-gray-200 p-6 mt-4">
+        <h2 className="text-base font-semibold text-gray-900 mb-3">Activity</h2>
+        <AuditTimeline resourceType="policy" resourceId={policyId} />
+      </div>
     </div>
   )
 }

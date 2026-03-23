@@ -10,6 +10,10 @@ pub struct Model {
     pub data_source_id: Uuid,
     /// NULL means applies to all users of this datasource
     pub user_id: Option<Uuid>,
+    /// Role-based assignment target
+    pub role_id: Option<Uuid>,
+    /// "user", "role", or "all"
+    pub assignment_scope: String,
     /// Lower = higher precedence
     pub priority: i32,
     pub created_at: DateTime,

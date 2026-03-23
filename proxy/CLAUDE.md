@@ -13,12 +13,14 @@ pgwire 0.38, DataFusion 52, axum 0.8, SeaORM 1, tokio-postgres 0.7, argon2 0.5, 
 - `src/engine/rewrite.rs` — `rewrite_statement()` AST visitor (pg_catalog table qualification, schema-stripped function calls)
 - `src/hooks/read_only.rs` — `ReadOnlyHook` (allowlist: Query, Show*, Explain*)
 - `src/hooks/policy.rs` — `PolicyHook` (five policy types: row_filter, column_mask, column_allow, column_deny, table_deny; audit logging)
-- `src/admin/policy_handlers.rs` — policy CRUD + assignment endpoints
-- `src/admin/audit_handlers.rs` — `GET /audit/queries`
-- `src/admin/policy_yaml.rs` — YAML export/import
+- `src/admin/policy_handlers.rs` — policy CRUD + assignment endpoints (scope: user/role/all)
+- `src/admin/role_handlers.rs` — role CRUD, member management, inheritance, datasource role access (GET+PUT), effective members; `get_role()` includes `datasource_access` (direct + inherited) and `policy_assignments` (direct + inherited)
+- `src/admin/admin_audit.rs` — `AuditAction` enum, `AuditedTxn` transactional audit wrapper, `audit_log()` (internal)
+- `src/admin/audit_handlers.rs` — `GET /audit/queries`, `GET /audit/admin`
+- `src/role_resolver.rs` — BFS role resolution, cycle detection, depth check, effective assignments/access/policies/members
 - `src/discovery/` — `DiscoveryProvider` trait + Postgres impl
 - `src/crypto.rs` — AES-256-GCM `encrypt_json` / `decrypt_json`
-- `../migration/src/lib.rs` — `Migrator` (23 migrations)
+- `../migration/src/lib.rs` — `Migrator` (41 migrations)
 
 ## Critical Gotchas
 
@@ -73,13 +75,43 @@ Policy CRUD handlers also call `state.proxy_handler.rebuild_contexts_for_datasou
 
 **access_mode**: If the datasource is `"policy_required"`, tables with no matching `column_allow` policy get `Filter(lit(false))` injected → empty results, no upstream round-trip.
 
-**Cache invalidation**: call `policy_hook.invalidate_datasource(&name)` after any policy or datasource mutation. Call `policy_hook.invalidate_user(&user_id)` after user tenant/deactivation changes. Also call `proxy_handler.rebuild_contexts_for_datasource(&name)` after policy mutations so active connections immediately see the updated schema (column visibility changes without reconnect).
+**Cache invalidation**: call `policy_hook.invalidate_datasource(&name)` after any policy or datasource mutation. Call `policy_hook.invalidate_user(user_id)` after user tenant/deactivation changes. Also call `proxy_handler.rebuild_contexts_for_datasource(&name)` after policy mutations so active connections immediately see the updated schema (column visibility changes without reconnect). For role changes, call `proxy_handler.rebuild_contexts_for_user(user_id)` for each affected user (resolved via `role_resolver::resolve_all_role_members`).
 
 **Enforcement order in `apply_policies`**: (1) `apply_column_mask_at_scan` — mask Projection above TableScan, (2) `apply_row_filters` — Filter below mask Projection but above TableScan, (3) `apply_projection_qualified` — top-level Projection for allow/deny. Masks must run before filters so that `transform_up` places the Filter between TableScan and the mask Projection. This ensures row filters evaluate against raw (unmasked) data. Swapping this order is a security bug — see vector 32 in `docs/permission-security-tests.md`.
 
 **Column-level policies must be enforced at scan level**: All column-level policies (deny, mask, and any future types) MUST be enforced at the `TableScan` level (visibility-level for deny, `transform_up` Projection for mask) to prevent CTE/subquery alias bypass. `SubqueryAlias` and CTE nodes change the DFSchema qualifier from the real table name to the alias, causing top-level-only matching to miss. Top-level `apply_projection_qualified` is defense-in-depth only.
 
 **Audit logging**: after each query, `PolicyHook` spawns a `tokio::spawn` task to insert a `query_audit_log` row asynchronously. The row captures `original_query`, `rewritten_query`, `policies_applied` (JSON with name+version snapshot), `client_ip`, and `client_info` (application_name from pgwire startup params).
+
+## RBAC (Role-Based Access Control)
+
+`role_resolver.rs` contains all role resolution logic. Key functions:
+
+- **`resolve_user_roles(db, user_id)`** — BFS from user's direct roles through `role_inheritance` to collect all ancestor active role IDs. Depth cap: 10. Skips inactive roles and their ancestors.
+- **`resolve_effective_assignments(db, user_id, datasource_id)`** — returns all policy assignments matching the user: scope='all' OR (scope='user' AND user_id=X) OR (scope='role' AND role_id in user_roles). Deduplicates by policy_id, keeping lowest priority.
+- **`resolve_datasource_access(db, user_id, datasource_id)`** — checks `data_source_access` for same three-scope pattern. Used by `check_access()` in `engine/mod.rs`.
+- **`resolve_all_role_members(db, role_id)`** — BFS downward from role through child roles to collect all member user IDs. Used for cache invalidation.
+- **`resolve_effective_members(db, role_id)`** — BFS downward, returns `EffectiveMemberEntry { user_id, username, source }` with "direct" or "via role '<child_name>'" source annotation. Source indicates which role the user is a *direct member of*, not the role being viewed.
+- **`detect_cycle(db, parent_id, child_id)`** — BFS from proposed parent upward; returns true if child is reachable (would create cycle).
+
+**`data_source_access`** replaces `user_data_source`. Supports scopes: user (direct user access), role (role-based access), all (everyone). The `user_data_source` table is dropped in migration 037.
+
+**`policy_assignment`** now has `role_id: Option<Uuid>` and `assignment_scope: String` ("user"/"role"/"all"). The backfill migration 033 sets scope='all' where user_id IS NULL.
+
+**Admin audit log** (`admin_audit_log` table) is append-only — no UPDATE/DELETE endpoints.
+
+### Admin Audit Patterns
+- **Always use `AuditedTxn`** (from `admin_audit.rs`) for handlers that mutate entities. It wraps a `DatabaseTransaction`, queues audit entries via `txn.audit(...)`, and writes them atomically on `txn.commit()`. This makes the correct pattern (audit inside the transaction) the only pattern.
+- **`AuditedTxn::commit()` errors if no audit entries were queued** — prevents accidentally unaudited transactions. Use a plain `DatabaseTransaction` if you genuinely don't need audit (e.g., `create_datasource` auto-assign).
+- **`audit_log()` is `pub(crate)`** — used internally by `AuditedTxn::commit()`. Handlers should not call it directly.
+- **`audit_delete` / `audit_insert` have been removed** — replaced by direct entity operations + `txn.audit(...)`.
+- Convention: log on the owning entity (role membership → role, policy assignment → policy).
+- **Cache invalidation after commit**: always invalidate caches *after* `txn.commit()`, not before or inside the transaction. Collect affected user IDs before the transaction if needed (e.g., `remove_parent` collects members before removing the inheritance edge).
+
+**Role handler cache invalidation pattern**:
+- Member add/remove → `invalidate_user(affected_user_id)` + `rebuild_contexts_for_user(user_id)`
+- Inheritance add/remove → `resolve_all_role_members` on child subtree, invalidate each
+- Role deactivate/reactivate/delete → same as inheritance (all affected members)
 
 ## Testing
 

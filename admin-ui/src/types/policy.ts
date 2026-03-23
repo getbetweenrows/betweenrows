@@ -1,5 +1,7 @@
 export type PolicyType = 'row_filter' | 'column_mask' | 'column_allow' | 'column_deny' | 'table_deny'
 
+export type AssignmentScope = 'all' | 'user' | 'role'
+
 export interface TargetEntry {
   schemas: string[]
   tables: string[]
@@ -14,6 +16,9 @@ export interface PolicyAssignmentResponse {
   datasource_name: string
   user_id: string | null
   username: string | null
+  role_id: string | null
+  role_name: string | null
+  assignment_scope: AssignmentScope
   priority: number
   created_at: string
 }
@@ -57,5 +62,7 @@ export interface UpdatePolicyPayload {
 export interface AssignPolicyPayload {
   policy_id: string
   user_id?: string | null
+  role_id?: string | null
+  scope?: AssignmentScope
   priority: number
 }

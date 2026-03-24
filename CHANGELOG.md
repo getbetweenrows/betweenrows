@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-03-23
+
+### Added
+- **RBAC with transactional audit enforcement** — role-based access control with `AuditedTxn` wrapper
+  - Roles with hierarchical membership (BFS traversal, cycle detection, depth cap)
+  - Policy assignments scoped to user, role, or all
+  - `AuditedTxn` ensures every admin mutation is atomically committed with its audit log entries
+  - Role deactivation/reactivation cascades to policy visibility
+  - Datasource access gating by role membership
+
+### Infrastructure
+- **Remove LICENSE from git history** — dropped LICENSE commit from history, added `LICENSE*`/`LICENCE*` to `.dockerignore`
+
 ## [0.5.2] - 2026-03-18
 
 ### Added

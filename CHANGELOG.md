@@ -48,8 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Audit duration and rewritten query** — fixed these fields not being recorded correctly
 - **SPA routing** — production build now serves `index.html` for client-side routes
 
-### Infrastructure
-- **LICENSE** — added license file
 
 ## [0.4.0] - 2026-03-08
 

@@ -39,6 +39,8 @@ admin-ui/.vite/
 ## Docs / local files
 *.md
 **/*.md
+LICENSE*
+LICENCE*
 mydocs/
 pythonpoc/
 

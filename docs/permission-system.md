@@ -40,6 +40,7 @@ Every policy has:
 - **`definition`** — nullable JSON with type-specific logic (only for `row_filter` and `column_mask`)
 - **`is_enabled`** — whether the policy is currently active
 - **`version`** — incremented on each update (used for optimistic concurrency)
+- **`decision_function_id`** — optional FK to a `decision_function` entity; when set, the decision function gates whether the policy fires for each query
 
 ## Targets
 
@@ -236,6 +237,90 @@ SELECT * FROM customers JOIN orders ON customers.id = orders.customer_id
 ```
 
 Column qualifiers from DataFusion's query planner identify which table each output column originated from, ensuring column policies apply only to their intended table.
+
+## Decision Functions
+
+Decision functions are optional, programmable gates that control whether a policy fires for a given query. They are standalone entities with their own lifecycle, separate from policies. A policy references a decision function via `decision_function_id`; one decision function can be reused across multiple policies.
+
+### What they are
+
+A decision function is a JavaScript function compiled to WebAssembly via Javy. At query time, the function receives a JSON context object and returns `{ fire: boolean }`. If `fire` is `false`, the policy is skipped for that query. If `fire` is `true` (or no decision function is attached), the policy applies normally.
+
+This enables logic that is too complex or dynamic for static SQL — for example, role-based masking decisions, time-of-day access windows, or join-count limits.
+
+### Entity lifecycle
+
+Decision functions are managed independently of policies:
+
+- `GET /decision-functions` — list all
+- `POST /decision-functions` — create (with JS source; WASM compiled at save time via Javy CLI)
+- `GET /decision-functions/{id}` — get single
+- `PUT /decision-functions/{id}` — update (recompiles WASM, evicts module cache)
+- `DELETE /decision-functions/{id}` — delete (rejected if any policy references it)
+
+The `decision_fn` field holds the JS source. The `decision_wasm` field holds the compiled WASM binary (populated after successful save). Both are stored in the database.
+
+### Function signature
+
+The JS function must be named `evaluate` and return `{ fire: boolean }`:
+
+```js
+function evaluate(ctx, config) {
+  // ctx: session and/or query context (see evaluate_context)
+  // config: hardcoded parameters from the decision function's config field
+  return { fire: ctx.session.user.roles.includes("analyst") };
+}
+```
+
+### Context modes (`evaluate_context`)
+
+| Value | `ctx` contains | When it can fire |
+|-------|---------------|-----------------|
+| `"session"` | `ctx.session` only: user id/username/tenant/roles, time (hour, day_of_week), datasource name/access_mode | Both at connect time (visibility) and query time |
+| `"query"` | `ctx.session` + `ctx.query`: tables, columns, join_count, has_aggregation, has_subquery, has_where, statement_type | Query time only — visibility effect skipped at connect time (policy deferred to query time) |
+
+**Visibility-level enforcement**: `column_deny`, `table_deny`, and `column_allow` policies are enforced at connect time (visibility level) by removing columns/tables from the per-user schema. Decision functions on these policy types are evaluated at visibility time when `evaluate_context = "session"`. If the decision function returns `fire: false`, the policy is skipped and the column/table remains visible. For `evaluate_context = "query"`, the policy's visibility effect is skipped entirely (deferred to query time), since query metadata is not available at connect time — the column/table stays visible in the schema and the decision function runs at query time as normal.
+
+### Error handling (`on_error`)
+
+| Value | Behavior when function fails |
+|-------|------------------------------|
+| `"deny"` | Policy fires (fail-secure) — treat errors as if `fire: true` |
+| `"skip"` | Policy skipped (fail-open) — treat errors as if `fire: false` |
+
+Errors include: WASM compilation failure, fuel exhaustion, runtime traps, invalid return shape.
+
+### Logging (`log_level`)
+
+| Value | Effect |
+|-------|--------|
+| `"off"` | No log capture |
+| `"error"` | Capture stderr (exception messages) |
+| `"info"` | Capture all output (`console.log` from stdout, exceptions from stderr) |
+
+Captured logs are included in the `DecisionResult` returned by evaluation and appear in the `policies_applied` audit field. Note: Javy 8.x routes `console.log` to stdout by default. The runtime parses stdout robustly, extracting the JSON result and capturing any preceding `console.log` lines as logs.
+
+### `is_enabled`
+
+When `is_enabled = false` on a decision function, the gate is disabled and the policy always fires. This allows temporarily bypassing the gate without changing the policy assignment.
+
+### Config (hardcoded vs parameterized)
+
+The `decision_config` field on the decision function is a JSON object passed as `config` to the JS function. It allows parameterizing a single function for different policies:
+
+```json
+{ "max_joins": 3, "allowed_hours": [9, 17] }
+```
+
+The function receives this as its second argument: `function evaluate(ctx, config)`.
+
+### Fuel limits
+
+Evaluation is capped at **1,000,000 WASM instructions** per invocation. Exceeding the limit triggers a fuel exhaustion error, which is handled according to `on_error`. This prevents runaway scripts from blocking query processing.
+
+### Audit integration
+
+Decision function results are included in the `policies_applied` JSON field of each `query_audit_log` row. Each entry records `fire`, `fuel_consumed`, `time_us`, `error` (if any), and `logs` (if log_level is not `"off"`). This gives a complete trace of which policies fired and why.
 
 ## Known limitations
 

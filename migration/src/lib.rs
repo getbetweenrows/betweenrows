@@ -41,6 +41,10 @@ mod m20260320_000038_idx_data_source_access_unique;
 mod m20260320_000039_fk_data_source_access_user;
 mod m20260320_000040_fk_data_source_access_role;
 mod m20260320_000041_fk_role_inheritance_child;
+mod m20260325_000048_create_decision_function;
+mod m20260325_000049_idx_decision_function_name;
+mod m20260325_000050_add_decision_function_id_to_policy;
+mod m20260325_000051_clear_static_wasm;
 
 pub struct Migrator;
 
@@ -89,6 +93,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20260320_000039_fk_data_source_access_user::Migration),
             Box::new(m20260320_000040_fk_data_source_access_role::Migration),
             Box::new(m20260320_000041_fk_role_inheritance_child::Migration),
+            Box::new(m20260325_000048_create_decision_function::Migration),
+            Box::new(m20260325_000049_idx_decision_function_name::Migration),
+            Box::new(m20260325_000050_add_decision_function_id_to_policy::Migration),
+            Box::new(m20260325_000051_clear_static_wasm::Migration),
         ]
     }
 }

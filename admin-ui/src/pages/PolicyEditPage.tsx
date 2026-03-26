@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getPolicy, updatePolicy } from '../api/policies'
+import { getDecisionFunction } from '../api/decisionFunctions'
 import { PolicyForm } from '../components/PolicyForm'
 import type { PolicyFormValues } from '../components/PolicyForm'
 import { PolicyAssignmentEditPanel } from '../components/PolicyAssignmentPanel'
@@ -21,6 +22,14 @@ export function PolicyEditPage() {
     queryKey: ['policy', policyId],
     queryFn: () => getPolicy(policyId),
     enabled: !!policyId,
+  })
+
+  // Load the full decision function if the policy has one attached
+  const decisionFnId = policy?.decision_function_id ?? null
+  const { data: decisionFunction, isLoading: decisionFnLoading } = useQuery({
+    queryKey: ['decision-function', decisionFnId],
+    queryFn: () => getDecisionFunction(decisionFnId!),
+    enabled: !!decisionFnId,
   })
 
   const hintDatasourceId = policy?.assignments?.[0]?.data_source_id ?? ''
@@ -43,6 +52,7 @@ export function PolicyEditPage() {
             : values.policy_type === 'column_mask'
               ? { mask_expression: values.mask_expression }
               : null,
+        decision_function_id: values.decision_function_id,
         version: policy.version,
       })
       queryClient.invalidateQueries({ queryKey: ['policies'] })
@@ -95,6 +105,8 @@ export function PolicyEditPage() {
       <div className="bg-white rounded-xl border border-gray-200 p-6">
         <PolicyForm
           initial={policy}
+          initialDecisionFunction={decisionFunction ?? null}
+          decisionFnLoading={!!decisionFnId && decisionFnLoading}
           onSubmit={handleSubmit}
           submitLabel="Save changes"
           isSubmitting={isSubmitting}

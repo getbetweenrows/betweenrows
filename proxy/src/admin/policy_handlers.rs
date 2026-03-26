@@ -11,16 +11,19 @@ use sea_orm::{
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::entity::{data_source, policy, policy_assignment, policy_version, proxy_user, role};
+use crate::entity::{
+    data_source, decision_function, policy, policy_assignment, policy_version, proxy_user, role,
+};
 use crate::policy_match::PolicyType;
 use crate::role_resolver;
 
 use super::{
     AdminState, ApiErr,
+    decision_function_handlers::df_summary,
     dto::{
-        AssignPolicyRequest, CreatePolicyRequest, ListPoliciesQuery, PaginatedResponse,
-        PolicyAssignmentResponse, PolicyResponse, UpdatePolicyRequest, validate_definition,
-        validate_policy_name, validate_targets,
+        AssignPolicyRequest, CreatePolicyRequest, DecisionFunctionSummary, ListPoliciesQuery,
+        PaginatedResponse, PolicyAssignmentResponse, PolicyResponse, UpdatePolicyRequest,
+        validate_definition, validate_policy_name, validate_targets,
     },
     jwt::AdminClaims,
 };
@@ -119,7 +122,26 @@ async fn fetch_role_names<C: sea_orm::ConnectionTrait>(
         .collect())
 }
 
-fn policy_response_basic(p: &policy::Model, assignment_count: usize) -> PolicyResponse {
+async fn load_decision_function_summaries(
+    db: &impl sea_orm::ConnectionTrait,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, DecisionFunctionSummary>, ApiErr> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let dfs = decision_function::Entity::find()
+        .filter(decision_function::Column::Id.is_in(ids.to_vec()))
+        .all(db)
+        .await
+        .map_err(ApiErr::internal)?;
+    Ok(dfs.iter().map(|df| (df.id, df_summary(df))).collect())
+}
+
+fn policy_response_basic(
+    p: &policy::Model,
+    assignment_count: usize,
+    df_summary: Option<DecisionFunctionSummary>,
+) -> PolicyResponse {
     let targets: serde_json::Value =
         serde_json::from_str(&p.targets).unwrap_or(serde_json::Value::Array(vec![]));
     let definition: Option<serde_json::Value> = p
@@ -135,6 +157,8 @@ fn policy_response_basic(p: &policy::Model, assignment_count: usize) -> PolicyRe
         definition,
         is_enabled: p.is_enabled,
         version: p.version,
+        decision_function_id: p.decision_function_id,
+        decision_function: df_summary,
         assignment_count,
         created_by: p.created_by,
         updated_by: p.updated_by,
@@ -167,6 +191,7 @@ async fn create_snapshot<C: sea_orm::ConnectionTrait>(
         "policy_type": p.policy_type,
         "targets": targets,
         "definition": definition,
+        "decision_function_id": p.decision_function_id.map(|id| id.to_string()),
         "assignments": assignments.iter().map(|a| {
             serde_json::json!({
                 "id": a.id.to_string(),
@@ -234,9 +259,21 @@ pub async fn list_policies(
         *asgn_counts.entry(a.policy_id).or_insert(0) += 1;
     }
 
+    // Load decision functions referenced by these policies
+    let df_ids: Vec<Uuid> = items
+        .iter()
+        .filter_map(|p| p.decision_function_id)
+        .collect();
+    let df_map = load_decision_function_summaries(&state.db, &df_ids).await?;
+
     let data = items
         .iter()
-        .map(|p| policy_response_basic(p, *asgn_counts.get(&p.id).unwrap_or(&0)))
+        .map(|p| {
+            let df = p
+                .decision_function_id
+                .and_then(|id| df_map.get(&id).cloned());
+            policy_response_basic(p, *asgn_counts.get(&p.id).unwrap_or(&0), df)
+        })
         .collect();
 
     Ok(Json(PaginatedResponse {
@@ -263,6 +300,24 @@ pub async fn create_policy(
     validate_definition(body.policy_type, &body.definition)
         .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
 
+    // Validate decision_function_id if provided
+    let df = if let Some(df_id) = body.decision_function_id {
+        Some(
+            decision_function::Entity::find_by_id(df_id)
+                .one(&state.db)
+                .await
+                .map_err(ApiErr::internal)?
+                .ok_or_else(|| {
+                    ApiErr::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "decision_function_id references a non-existent decision function",
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+
     let now = Utc::now().naive_utc();
     let policy_id = Uuid::now_v7();
 
@@ -285,6 +340,7 @@ pub async fn create_policy(
         definition: Set(definition_json),
         is_enabled: Set(body.is_enabled),
         version: Set(1),
+        decision_function_id: Set(body.decision_function_id),
         created_by: Set(claims.sub),
         updated_by: Set(claims.sub),
         created_at: Set(now),
@@ -305,9 +361,10 @@ pub async fn create_policy(
 
     txn.commit().await.map_err(ApiErr::internal)?;
 
+    let df_sum = df.as_ref().map(df_summary);
     Ok((
         StatusCode::CREATED,
-        Json(policy_response_basic(&policy_model, 0)),
+        Json(policy_response_basic(&policy_model, 0, df_sum)),
     ))
 }
 
@@ -338,8 +395,19 @@ pub async fn get_policy(
     let user_names = fetch_user_names(&state.db, user_ids).await?;
     let role_names = fetch_role_names(&state.db, role_ids).await?;
 
+    // Load decision function summary if attached
+    let df_sum = if let Some(df_id) = p.decision_function_id {
+        decision_function::Entity::find_by_id(df_id)
+            .one(&state.db)
+            .await
+            .map_err(ApiErr::internal)?
+            .map(|d| df_summary(&d))
+    } else {
+        None
+    };
+
     let asgn_count = assignments.len();
-    let mut resp = policy_response_basic(&p, asgn_count);
+    let mut resp = policy_response_basic(&p, asgn_count, df_sum);
     resp.assignments = Some(
         assignments
             .iter()
@@ -401,6 +469,20 @@ pub async fn update_policy(
     validate_definition(final_policy_type, &final_definition)
         .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
 
+    // Validate decision_function_id if changing
+    if let Some(Some(df_id)) = body.decision_function_id {
+        decision_function::Entity::find_by_id(df_id)
+            .one(&state.db)
+            .await
+            .map_err(ApiErr::internal)?
+            .ok_or_else(|| {
+                ApiErr::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "decision_function_id references a non-existent decision function",
+                )
+            })?;
+    }
+
     let now = Utc::now().naive_utc();
     let new_version = p.version + 1;
 
@@ -435,6 +517,10 @@ pub async fn update_policy(
         PolicyType::ColumnAllow | PolicyType::ColumnDeny | PolicyType::TableDeny => {
             active.definition = Set(None);
         }
+    }
+    // Decision function FK: 3-state — absent=no change, null=detach, uuid=attach
+    if let Some(df_id_val) = body.decision_function_id {
+        active.decision_function_id = Set(df_id_val);
     }
     active.version = Set(new_version);
     active.updated_by = Set(claims.sub);
@@ -492,8 +578,19 @@ pub async fn update_policy(
     let user_names = fetch_user_names(&state.db, user_ids).await?;
     let upd_role_names = fetch_role_names(&state.db, upd_role_ids).await?;
 
+    // Load decision function summary if attached
+    let df_sum = if let Some(df_id) = updated.decision_function_id {
+        decision_function::Entity::find_by_id(df_id)
+            .one(&state.db)
+            .await
+            .map_err(ApiErr::internal)?
+            .map(|d| df_summary(&d))
+    } else {
+        None
+    };
+
     let asgn_count = assignments.len();
-    let mut resp = policy_response_basic(&updated, asgn_count);
+    let mut resp = policy_response_basic(&updated, asgn_count, df_sum);
     resp.assignments = Some(
         assignments
             .iter()

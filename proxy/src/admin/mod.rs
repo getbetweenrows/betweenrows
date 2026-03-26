@@ -23,6 +23,7 @@ pub mod auth_handlers;
 pub mod catalog_handlers;
 pub mod datasource_handlers;
 pub mod datasource_types;
+pub mod decision_function_handlers;
 pub mod discovery_job;
 pub mod dto;
 pub mod jwt;
@@ -201,6 +202,22 @@ fn api_v1() -> Router<AdminState> {
             get(policy_handlers::get_policy)
                 .put(policy_handlers::update_policy)
                 .delete(policy_handlers::delete_policy),
+        )
+        // decision functions
+        .route(
+            "/decision-functions",
+            get(decision_function_handlers::list_decision_functions)
+                .post(decision_function_handlers::create_decision_function),
+        )
+        .route(
+            "/decision-functions/{id}",
+            get(decision_function_handlers::get_decision_function)
+                .put(decision_function_handlers::update_decision_function)
+                .delete(decision_function_handlers::delete_decision_function),
+        )
+        .route(
+            "/decision-functions/test",
+            post(decision_function_handlers::test_decision_fn),
         )
         // roles
         .route(

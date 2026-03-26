@@ -1,0 +1,124 @@
+use sea_orm_migration::prelude::*;
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(DecisionFunction::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(DecisionFunction::Id)
+                            .text()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(DecisionFunction::Name)
+                            .text()
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(ColumnDef::new(DecisionFunction::Description).text().null())
+                    .col(
+                        ColumnDef::new(DecisionFunction::Language)
+                            .text()
+                            .not_null()
+                            .default("javascript"),
+                    )
+                    .col(
+                        ColumnDef::new(DecisionFunction::DecisionFn)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(DecisionFunction::DecisionWasm).blob().null())
+                    .col(
+                        ColumnDef::new(DecisionFunction::DecisionConfig)
+                            .text()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(DecisionFunction::EvaluateContext)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(DecisionFunction::OnError)
+                            .text()
+                            .not_null()
+                            .default("deny"),
+                    )
+                    .col(
+                        ColumnDef::new(DecisionFunction::LogLevel)
+                            .text()
+                            .not_null()
+                            .default("off"),
+                    )
+                    .col(
+                        ColumnDef::new(DecisionFunction::IsEnabled)
+                            .integer()
+                            .not_null()
+                            .default(1),
+                    )
+                    .col(
+                        ColumnDef::new(DecisionFunction::Version)
+                            .integer()
+                            .not_null()
+                            .default(1),
+                    )
+                    .col(
+                        ColumnDef::new(DecisionFunction::CreatedBy)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(DecisionFunction::UpdatedBy)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(DecisionFunction::CreatedAt)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(DecisionFunction::UpdatedAt)
+                            .text()
+                            .not_null(),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(DecisionFunction::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(Iden)]
+enum DecisionFunction {
+    Table,
+    Id,
+    Name,
+    Description,
+    Language,
+    DecisionFn,
+    DecisionWasm,
+    DecisionConfig,
+    EvaluateContext,
+    OnError,
+    LogLevel,
+    IsEnabled,
+    Version,
+    CreatedBy,
+    UpdatedBy,
+    CreatedAt,
+    UpdatedAt,
+}

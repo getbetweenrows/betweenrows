@@ -61,7 +61,10 @@ Shadow Mode is a "dry-run" state for individual SQL security policies. Instead o
 
 ### Programmable Governance (The "Leapfrog" Layer)
 
-- **Programmable Policies (Rhai/Wasm)**: Allow Policy Templates to be written in a sandboxed scripting language for logic too complex for SQL (e.g., custom decryption, calling external risk APIs).
+- **Programmable Policies (WASM Decision Functions)**: **Implemented.** Policy decision functions are JS functions compiled to WASM via Javy and evaluated at query time via wasmtime. Each policy can reference an optional `decision_function_id`. The function receives session and/or query context and returns `{ fire: boolean }`. Fuel-limited to 1M WASM instructions. `on_error` controls fail-secure vs fail-open behavior. Decision results are captured in the query audit log. See `docs/permission-system.md` for full details.
+  - **WASM Linear Memory Limit**: Add a configurable per-function memory cap (e.g., 10 MB default) to prevent a single decision function from allocating unbounded memory. wasmtime supports `Store::limiter()` for this — wire it into `evaluate_wasm_sync` alongside the existing fuel limit.
+  - **Module Cache in PolicyHook**: Pre-compile WASM modules once per `(decision_function_id, version)` and cache them in PolicyHook, instead of recompiling from bytes on every query evaluation. Evict on decision function update/delete. Reduces per-query overhead from ~ms compilation to ~us lookup.
+  - **Decision Function Integration Tests**: Add integration tests in `policy_enforcement.rs` that exercise decision functions through the full proxy stack (real WASM evaluation via pgwire). Current coverage is unit tests only (`hooks/policy.rs`). Requires javy CLI in CI.
 - **Validated Purpose (PBAC)**: Move beyond roles to "Purposes." Require a validated claim (e.g., a ticket ID from a ticketing system) to unlock specific data lenses.
 - **Clean Room Joins**: Support "Blind Joins" where two tables can be joined on a sensitive key, but the proxy guarantees the key cannot be leaked in results or filters.
 - **User Attribute Sync**: Dynamically pull ABAC attributes (Region, Department, Clearance) from identity claims at connect time.

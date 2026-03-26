@@ -29,6 +29,13 @@ impl PolicyType {
     pub fn is_deny(self) -> bool {
         matches!(self, Self::ColumnDeny | Self::TableDeny)
     }
+
+    /// Returns true for policy types that affect catalog-level visibility
+    /// (schema filtering at connect time). Decision functions on these types
+    /// are evaluated at visibility time when `evaluate_context = "session"`.
+    pub fn affects_visibility(self) -> bool {
+        matches!(self, Self::ColumnAllow | Self::ColumnDeny | Self::TableDeny)
+    }
 }
 
 impl std::fmt::Display for PolicyType {
@@ -456,6 +463,15 @@ mod tests {
         assert!(!PolicyType::ColumnAllow.is_deny());
         assert!(PolicyType::ColumnDeny.is_deny());
         assert!(PolicyType::TableDeny.is_deny());
+    }
+
+    #[test]
+    fn test_policy_type_affects_visibility() {
+        assert!(!PolicyType::RowFilter.affects_visibility());
+        assert!(!PolicyType::ColumnMask.affects_visibility());
+        assert!(PolicyType::ColumnAllow.affects_visibility());
+        assert!(PolicyType::ColumnDeny.affects_visibility());
+        assert!(PolicyType::TableDeny.affects_visibility());
     }
 
     #[test]

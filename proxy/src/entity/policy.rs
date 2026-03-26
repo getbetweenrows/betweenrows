@@ -17,6 +17,7 @@ pub struct Model {
     pub definition: Option<String>,
     pub is_enabled: bool,
     pub version: i32,
+    pub decision_function_id: Option<Uuid>,
     pub created_by: Uuid,
     pub updated_by: Uuid,
     pub created_at: DateTime,
@@ -29,6 +30,12 @@ pub enum Relation {
     PolicyVersion,
     #[sea_orm(has_many = "super::policy_assignment::Entity")]
     PolicyAssignment,
+    #[sea_orm(
+        belongs_to = "super::decision_function::Entity",
+        from = "Column::DecisionFunctionId",
+        to = "super::decision_function::Column::Id"
+    )]
+    DecisionFunction,
 }
 
 impl Related<super::policy_version::Entity> for Entity {
@@ -40,6 +47,12 @@ impl Related<super::policy_version::Entity> for Entity {
 impl Related<super::policy_assignment::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::PolicyAssignment.def()
+    }
+}
+
+impl Related<super::decision_function::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::DecisionFunction.def()
     }
 }
 

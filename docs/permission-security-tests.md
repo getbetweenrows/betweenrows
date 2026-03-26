@@ -614,6 +614,78 @@ There is no ambiguous per-definition `action` field. `compute_user_visibility()`
 
 ---
 
+## Decision Functions — Vectors 50–56
+
+### 50. WASM sandbox escape
+
+**Vector**: A malicious decision function attempts to break out of the WASM sandbox to read host files, make network calls, or execute arbitrary code.
+
+**Defense**: wasmtime provides a hardware-enforced memory sandbox. The linker only exposes WASI preview 1 stubs for stdin/stdout/stderr (`fd_read`, `fd_write`). No filesystem, network, or host call imports are provided. Any import request for an unregistered function causes instantiation to fail.
+
+**Test**: Verify that a JS function calling `Deno.readFile` or `fetch()` fails at compilation (Javy does not include these APIs). Verify the WASM module instantiation fails if it imports functions not in the provided stub set.
+
+---
+
+### 51. Fuel exhaustion DoS
+
+**Vector**: A malicious or buggy decision function enters an infinite loop or performs excessive computation, blocking the query processing thread and denying service to other users.
+
+**Defense**: wasmtime fuel metering caps execution at 1,000,000 WASM instructions (`DEFAULT_FUEL_LIMIT` in `wasm.rs`). On exhaustion, wasmtime raises a fuel-exhaustion trap. The error is caught and dispatched to `on_error` behavior (deny or skip). Evaluation runs on a `tokio::task::spawn_blocking` thread, so even a slow evaluation does not block the async runtime.
+
+**Test**: `decision_fn_on_error_deny_fires` — decision function with broken WASM triggers error path; `on_error=deny` fires the policy. `decision_fn_on_error_skip_does_not_fire` — same broken WASM with `on_error=skip` skips the policy.
+
+---
+
+### 52. Cross-policy state leakage
+
+**Vector**: A decision function caches state in a WASM global variable. A subsequent evaluation for a different user or policy picks up the previous user's state (e.g., tenant ID, role list), causing incorrect policy decisions.
+
+**Defense**: `evaluate_wasm` creates a fresh `Store` and instantiates a new WASM module instance for every evaluation call. WASM linear memory and global variables are reset on each instantiation. The compiled `Module` is cached (keyed by `(policy_id, version)`) but instance state is never reused across calls.
+
+**Test**: Evaluate the same decision function twice with different `ctx.session.user` values. Verify the second result reflects the second user's context, not the first.
+
+---
+
+### 53. SQL injection via decision function return value
+
+**Vector**: A decision function returns a value that is interpolated into SQL, allowing injection of arbitrary SQL clauses.
+
+**Defense**: The `fire` return value is a boolean extracted via `.as_bool()`. Only `true` or `false` affect policy behavior — no string interpolation occurs. If the return shape is not `{ fire: boolean }`, the Javy harness throws before the result is used, and `RuntimeError::InvalidResult` is raised. No part of the decision function's output is ever used in SQL construction.
+
+**Test**: A function returning `{ fire: "1=1; DROP TABLE users" }` fails validation with `InvalidResult`. Verify the harness rejects non-boolean `fire` values.
+
+---
+
+### 54. Admin bypassing deny via decision function (`fire: false` on deny)
+
+**Vector**: An admin attaches a decision function that always returns `fire: false` to a `table_deny` or `column_deny` policy, effectively disabling the deny policy without removing it from the assignment.
+
+**Defense**: `fire: false` on a deny policy causes it to be skipped, which is consistent with `is_enabled = false` semantics — both are opt-out mechanisms. The decision function attachment is audited when the policy is updated (`PUT /policies/{id}`). The audit log records the `decision_function_id` change, the admin actor, and the before/after policy snapshot. Any skip is also recorded in `policies_applied` in the query audit log, providing a full trace.
+
+**Test**: Attach a `fire: false` decision function to a `table_deny` policy. Verify the table becomes accessible. Verify the policy mutation is recorded in `admin_audit_log`. Verify the query audit entry's `policies_applied` shows the decision result with `fire: false`.
+
+---
+
+### 55. Corrupted WASM binary
+
+**Vector**: A decision function's `decision_wasm` field contains a corrupted or invalid WASM binary (e.g., truncated file, bit-flip in storage, or manual DB edit). Instantiation fails unexpectedly during query processing.
+
+**Defense**: `Module::new(&engine, wasm_bytes)` returns an error if the binary is invalid. This is caught as `RuntimeError::ExecutionError` and dispatched to `on_error`. `on_error = "deny"` fires the policy (fail-secure); `on_error = "skip"` skips it. An error is logged with `tracing::error!`. The query continues with the result of the `on_error` decision — it does not crash the proxy.
+
+**Test**: Store an invalid WASM binary (`vec![0u8; 10]`) in `decision_wasm`. Run a query that would trigger the policy. Verify behavior matches `on_error` setting.
+
+---
+
+### 56. Non-boolean `fire` return
+
+**Vector**: A decision function returns a truthy non-boolean value (`{ fire: 1 }`, `{ fire: "yes" }`, `{ fire: null }`), which JavaScript would treat as truthy but is not a valid boolean.
+
+**Defense**: The Javy harness wraps the user function and validates the return shape: `typeof result.fire !== 'boolean'` causes `throw new Error(...)` before writing to stdout. This error propagates as `RuntimeError::ExecutionError`. Additionally, `evaluate_wasm` uses `.as_bool()` on the parsed JSON value, which returns `None` for non-boolean values, causing `RuntimeError::InvalidResult`. Both layers reject non-boolean fire values.
+
+**Test**: `test_validate_bad_return` in `wasm.rs` — function returning `{ wrong: "shape" }` → validation fails with error. Verify `{ fire: 1 }` and `{ fire: "yes" }` also fail due to JS harness type check.
+
+---
+
 ### 49. Audit log outside transaction — all mutation handlers
 
 **Vector**: Multiple handlers performed entity mutations and audit log insertion as separate operations, or called `audit_log` outside the transaction boundary. Specific cases:
@@ -630,4 +702,25 @@ Additional fixes:
 - `set_datasource_role_access` validates all roles before any mutations (no validate-after-delete).
 
 **Test**: `audited_txn_commits_with_entries`, `audited_txn_rejects_empty_commit`, `audited_txn_rollback_on_drop`, `audited_txn_multiple_entries` (unit tests in `admin_audit.rs`). Structural enforcement via the type system.
+
+---
+
+### 57. Visibility-level decision function bypass — column_deny fire:false
+
+**Vector**: A `column_deny` policy with a session decision function returning `fire: false` should NOT hide the column at visibility time. Before this fix, `compute_user_visibility()` ignored decision functions on visibility-affecting policies, applying them unconditionally — making decision functions on `column_deny`, `table_deny`, and `column_allow` ineffective.
+
+**Defense**: `compute_user_visibility()` now loads decision functions for visibility-affecting policies (`affects_visibility()` returns true for `column_allow`, `column_deny`, `table_deny`), builds a session context, and evaluates each decision function via `evaluate_visibility_decision_fn()`. If the function returns `fire: false`, the policy is skipped at visibility time.
+
+**Test**: `df_column_deny_visibility_fire_false` — column_deny + session df fire:false → column visible in query results. `df_column_deny_visibility_fire_true` — column_deny + session df fire:true → column hidden. `df_table_deny_conditional` — table_deny + session df fire:false → table accessible.
+
+---
+
+### 58. Visibility-level decision function — query context deferred
+
+**Vector**: A `column_deny` policy with `evaluate_context = "query"` should defer enforcement to query time. At visibility time, query metadata is not available, so the policy's visibility effect is skipped — the column stays visible in the schema. The decision function runs at query time where query context is available, and the column_deny is enforced there if `fire: true`.
+
+**Defense**: `evaluate_visibility_decision_fn()` returns `false` (skip visibility effect) when `evaluate_context == "query"`. The policy is still enforced at query time by `PolicyEffects::collect()` via the defense-in-depth top-level Projection. This ensures `evaluate_context = "query"` decision functions work correctly on visibility-affecting policies.
+
+**Test**: `df_column_deny_query_ctx_skipped_at_visibility` — column_deny + query df fire:false → column visible (visibility skipped, query-time fire:false). `df_column_deny_query_ctx_username_check_deferred` — column_deny + query df that fires only for admin → non-admin sees columns.
+
 

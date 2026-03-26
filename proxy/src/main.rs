@@ -7,7 +7,7 @@ use proxy::handler::ProxyHandler;
 use proxy::hooks::policy::PolicyHook;
 use proxy::server::process_socket_with_idle_timeout;
 use rand_core::RngCore;
-use sea_orm::Database;
+use sea_orm::{ColumnTrait, Database, EntityTrait, QueryFilter};
 use socket2::{SockRef, TcpKeepalive};
 use std::sync::Arc;
 use std::time::Duration;
@@ -68,6 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let db = Database::connect(&database_url).await?;
     Migrator::up(&db, None).await?;
+
+    recompile_decision_functions(&db).await;
 
     tracing::info!("database initialized");
 
@@ -188,7 +190,7 @@ async fn serve(
     let engine_cache = EngineCache::new(db.clone(), master_key);
 
     // ── Policy hook (shared between admin API and proxy handler) ──────────────
-    let policy_hook = PolicyHook::new(db.clone());
+    let policy_hook = PolicyHook::new(db.clone()).expect("Failed to create WASM engine");
 
     // ── Admin REST API ────────────────────────────────────────────────────────
     let jwt_secret = std::env::var("BR_ADMIN_JWT_SECRET").unwrap_or_else(|_| {
@@ -310,4 +312,55 @@ async fn handle_user_action(
         }
     }
     Ok(())
+}
+
+/// Recompile any decision functions that have JS source but no WASM bytecode.
+/// This happens after the migration clears old static WASM, ensuring all functions
+/// are compiled in dynamic mode and ready for query-time evaluation.
+async fn recompile_decision_functions(db: &sea_orm::DatabaseConnection) {
+    use proxy::entity::decision_function::{self, Column, Entity as DecisionFunction};
+
+    let functions = match DecisionFunction::find()
+        .filter(Column::DecisionFn.is_not_null())
+        .filter(Column::DecisionWasm.is_null())
+        .all(db)
+        .await
+    {
+        Ok(fns) => fns,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to query decision functions for recompilation");
+            return;
+        }
+    };
+
+    if functions.is_empty() {
+        return;
+    }
+
+    tracing::info!(
+        count = functions.len(),
+        "Recompiling decision functions in dynamic mode"
+    );
+
+    for df in functions {
+        let name = df.name.clone();
+        match proxy::decision::wasm::compile_with_javy(&df.decision_fn).await {
+            Ok(wasm_bytes) => {
+                let mut model: decision_function::ActiveModel = df.into();
+                model.decision_wasm = sea_orm::ActiveValue::Set(Some(wasm_bytes));
+                if let Err(e) = EntityTrait::update(model).exec(db).await {
+                    tracing::error!(name = %name, error = %e, "Failed to save recompiled WASM");
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    name = %name,
+                    error = %e,
+                    "Failed to recompile decision function"
+                );
+            }
+        }
+    }
+
+    tracing::info!("Decision function recompilation complete");
 }

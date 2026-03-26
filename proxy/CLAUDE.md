@@ -9,7 +9,7 @@ pgwire 0.38, DataFusion 52, axum 0.8, SeaORM 1, tokio-postgres 0.7, argon2 0.5, 
 - `src/admin/jwt.rs` — `AdminClaims` / `AuthClaims` extractors
 - `src/admin/datasource_types.rs` — `split_config`, `merge_config`, `get_type_defs`
 - `src/admin/discovery_job.rs` — `JobStore`, `DiscoveryJob`, `DiscoveryEvent`, `DiscoveryRequest`
-- `src/engine/mod.rs` — `EngineCache`, `VirtualCatalogProvider`, `build_arrow_schema()`, `arrow_type_to_string()`
+- `src/engine/mod.rs` — `EngineCache` (includes `wasm_engine` + `plugin_module` for visibility-level decision fn evaluation), `VirtualCatalogProvider`, `build_arrow_schema()`, `arrow_type_to_string()`
 - `src/engine/rewrite.rs` — `rewrite_statement()` AST visitor (pg_catalog table qualification, schema-stripped function calls)
 - `src/hooks/read_only.rs` — `ReadOnlyHook` (allowlist: Query, Show*, Explain*)
 - `src/hooks/policy.rs` — `PolicyHook` (five policy types: row_filter, column_mask, column_allow, column_deny, table_deny; audit logging)
@@ -19,8 +19,11 @@ pgwire 0.38, DataFusion 52, axum 0.8, SeaORM 1, tokio-postgres 0.7, argon2 0.5, 
 - `src/admin/audit_handlers.rs` — `GET /audit/queries`, `GET /audit/admin`
 - `src/role_resolver.rs` — BFS role resolution, cycle detection, depth check, effective assignments/access/policies/members
 - `src/discovery/` — `DiscoveryProvider` trait + Postgres impl
+- `src/decision/` — WASM-based decision function runtime (`mod.rs`: `DecisionRuntime` trait + `DecisionResult`; `context.rs`: `SessionInfo`, `QueryMetadata`, `build_session_context`, `build_query_context`; `wasm.rs`: `WasmDecisionRuntime` backed by wasmtime + Javy dynamic mode — QuickJS plugin compiled once at startup, per-function bytecode ~1ms)
+- `src/entity/decision_function.rs` — SeaORM entity for the `decision_function` table (id, name, decision_fn JS source, decision_wasm bytes, decision_config JSON, evaluate_context, on_error, log_level, is_enabled, version)
+- `src/admin/decision_function_handlers.rs` — CRUD endpoints for decision functions (`GET/POST /decision-functions`, `GET/PUT/DELETE /decision-functions/{id}`)
 - `src/crypto.rs` — AES-256-GCM `encrypt_json` / `decrypt_json`
-- `../migration/src/lib.rs` — `Migrator` (41 migrations)
+- `../migration/src/lib.rs` — `Migrator` (45 migrations)
 
 ## Critical Gotchas
 
@@ -53,7 +56,7 @@ Policy CRUD handlers also call `state.proxy_handler.rebuild_contexts_for_datasou
 
 ## Key Patterns
 - **Always-stream response**: `handler.rs` always returns `Response::Query(encode_dataframe(...))` for every statement that reaches DataFusion — no `is_select` enumeration. The only exception is `Statement::Explain`, which is intercepted before streaming and reformatted into PostgreSQL's single `"QUERY PLAN"` column via `execute_explain()`. Arrow → pgwire encoding is handled by `arrow-pg`.
-- **Hook ordering**: `ReadOnlyHook` runs first (blocks writes with SQLSTATE 25006), then `PolicyHook`. Hooks run in both simple and extended query paths. The allowlist in `ReadOnlyHook` must be reviewed before adding new `Statement` variants.
+- **Hook ordering**: `PolicyHook` runs first (audits write rejections, then returns `None`), then `ReadOnlyHook` (blocks writes with SQLSTATE 25006). Hooks run in both simple and extended query paths. The allowlist in `ReadOnlyHook` must be reviewed before adding new `Statement` variants.
 - `ApiErr` implements `IntoResponse` → JSON `{"error": "..."}` error bodies
 - `AdminClaims` / `AuthClaims` use `FromRequestParts<S> where AdminState: FromRef<S>`; `AdminClaims` also checks `is_admin == true`
 - Cache invalidation: `engine_cache.invalidate(name)` after catalog operations (keeps shared pool). `engine_cache.invalidate_all(name)` after datasource edit/delete (removes pool too). Never swap these — see README § Performance.
@@ -81,7 +84,37 @@ Policy CRUD handlers also call `state.proxy_handler.rebuild_contexts_for_datasou
 
 **Column-level policies must be enforced at scan level**: All column-level policies (deny, mask, and any future types) MUST be enforced at the `TableScan` level (visibility-level for deny, `transform_up` Projection for mask) to prevent CTE/subquery alias bypass. `SubqueryAlias` and CTE nodes change the DFSchema qualifier from the real table name to the alias, causing top-level-only matching to miss. Top-level `apply_projection_qualified` is defense-in-depth only.
 
-**Audit logging**: after each query, `PolicyHook` spawns a `tokio::spawn` task to insert a `query_audit_log` row asynchronously. The row captures `original_query`, `rewritten_query`, `policies_applied` (JSON with name+version snapshot), `client_ip`, and `client_info` (application_name from pgwire startup params).
+**Audit logging**: after each query, `PolicyHook` spawns a `tokio::spawn` task to insert a `query_audit_log` row asynchronously. The row captures `original_query`, `rewritten_query`, `policies_applied` (JSON with name+version snapshot including decision function results), `client_ip`, and `client_info` (application_name from pgwire startup params).
+
+### Decision Functions in PolicyHook
+
+`PolicyHook` holds a `wasmtime::Engine` and a pre-compiled `plugin_module` (QuickJS engine, ~869 KB, compiled once at startup). Decision functions are compiled in **Javy dynamic mode** — the JS source produces a small bytecode WASM (1-16 KB) that imports the QuickJS engine from the plugin module at runtime. This two-module linking approach compiles in ~1ms per function vs ~1-2s for the old static mode.
+
+**`evaluate_decision_fn` flow** (called once per policy in `PolicyEffects::collect`):
+
+1. If the policy has no `decision_function_id` → always fires (return `true`).
+2. If the resolved `DecisionFunction` has `is_enabled = false` → always fires (gate disabled).
+3. If `decision_wasm` is `None` or empty → always fires (not compiled yet).
+4. If `evaluate_context = "query"` but the `DecisionEvalContext` has no `"query"` key → always fires (defensive fallback — in practice query context is always present at query time).
+5. Compile the small bytecode module via `wasmtime::Module::new(engine, wasm_bytes)` (~1ms for 1-16 KB).
+6. Call `evaluate_wasm_sync(engine, plugin_module, bytecode_module, ctx, config, 1_000_000, log_level)` on the blocking thread. This instantiates the plugin, registers its exports under `"javy-default-plugin-v3"`, then instantiates the bytecode module which imports from the plugin.
+7. On success: cache the `DecisionResult`, return `result.fire`.
+8. On error: log with `tracing::error!`, set `fire = (on_error == "deny")`, cache the error result, return `fire`.
+
+**`DecisionEvalContext`** is built in `handle_query` and passed into `PolicyEffects::collect`. It carries:
+- `decision_ctx: serde_json::Value` — the full context JSON (session or session+query depending on policies present)
+- `engine: &Engine` — shared engine reference
+- `plugin_module: &Module` — pre-compiled QuickJS engine plugin
+
+**`QueryMetadata` extraction** happens after DataFusion plans the query. The `LogicalPlan` is walked to extract `tables` (from `TableScan` nodes, filtering system schemas), `columns` (from the top-level output schema fields), `join_count` (from `Join` nodes), `has_aggregation` (from `Aggregate` nodes), `has_subquery` (from `SubqueryAlias` nodes), `has_where` (from `Filter` nodes), and `statement_type` (hardcoded `"SELECT"` since only SELECT reaches PolicyHook). This data populates the `"query"` key in the context JSON for `evaluate_context = "query"` functions.
+
+**Module compilation** uses the `wasm_bytes` stored in the `decision_function` entity (loaded from DB during `load_session`). The stored bytes are dynamic-mode bytecode (1-16 KB), compiled at save time via `javy build -C dynamic`. At query time, `evaluate_decision_fn` compiles the bytecode module (~1ms) and links it with the pre-compiled plugin module. No module cache is needed since bytecode compilation is fast. On decision function update, `invalidate_for_decision_function()` clears the `SessionData` cache, so the next query reloads fresh `wasm_bytes` from DB.
+
+**JS harness**: User JS is wrapped in a strict-mode IIFE that prevents global variable leaks. The IIFE validates that the user code defines an `evaluate(ctx, config)` function, then the harness reads stdin JSON, calls `evaluate()`, validates the result shape, and writes to stdout. Note: Javy 8.x routes `console.log` to stdout (fd 1) by default — `parse_stdout_result()` in `wasm.rs` handles this by extracting the JSON result from the last stdout line and treating preceding lines as log output.
+
+**Visibility-level decision function evaluation**: `EngineCache` holds its own `wasm_engine` and `plugin_module` (same pattern as `PolicyHook`) for evaluating decision functions at connect time in `compute_user_visibility()`. Policies with `affects_visibility() == true` (column_allow, column_deny, table_deny) have their decision functions evaluated via `evaluate_visibility_decision_fn()`. If `evaluate_context = "session"` and `fire: false`, the policy is skipped (column/table stays visible). If `evaluate_context = "query"`, the visibility effect is skipped entirely (deferred to query time — column/table stays visible in schema, enforcement happens at query time via `PolicyEffects::collect`). Error handling uses `on_error`: `"deny"` → apply, `"skip"` → skip.
+
+**Startup recompilation**: After migrations run, `recompile_decision_functions()` in `main.rs` queries for any decision functions with `decision_fn IS NOT NULL AND decision_wasm IS NULL` and recompiles them in dynamic mode. This ensures all functions are ready after deployment without manual re-save.
 
 ## RBAC (Role-Based Access Control)
 

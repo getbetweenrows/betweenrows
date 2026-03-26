@@ -20,12 +20,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy workspace manifests and lockfile for dependency caching
+# Copy workspace manifests, lockfile, and build script for dependency caching
 COPY Cargo.toml Cargo.lock ./
 COPY proxy/Cargo.toml proxy/Cargo.toml
+COPY proxy/build.rs proxy/build.rs
 COPY migration/ migration/
 
 # Create a dummy binary so `cargo build` can cache dependencies
+# build.rs downloads Javy CLI and emits plugin.wasm (cached in OUT_DIR)
 RUN mkdir -p proxy/src && echo 'fn main() {}' > proxy/src/main.rs \
     && cargo build --release \
     && rm -rf proxy/src
@@ -47,7 +49,9 @@ FROM base AS builder
 
 COPY proxy/src proxy/src
 
-RUN cargo build --release
+RUN cargo build --release \
+    && cp target/release/javy /usr/local/bin/javy \
+    && cp target/release/engine.wasm /usr/local/lib/engine.wasm
 
 # ── prod: minimal runtime image ───────────────────────────────────────────────
 FROM debian:bookworm-slim AS prod
@@ -61,6 +65,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /data && chown -R 1000:1000 /data
 
 COPY --from=builder /app/target/release/proxy /usr/local/bin/proxy
+COPY --from=builder /usr/local/bin/javy /usr/local/bin/javy
+COPY --from=builder /usr/local/lib/engine.wasm /usr/local/lib/engine.wasm
 COPY --from=ui-builder /app/admin-ui/dist /usr/local/share/admin-ui
 
 ENV BR_PROXY_BIND_ADDR=0.0.0.0:5434

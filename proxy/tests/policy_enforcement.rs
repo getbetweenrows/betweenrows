@@ -11,7 +11,8 @@
 
 mod support;
 
-use serde_json::json;
+use serde_json::{Value, json};
+use uuid::Uuid;
 
 // `extract_rows` lives in support so all test binaries can share it.
 use support::extract_rows;
@@ -2917,9 +2918,9 @@ async fn tc_zt_04_sidebar_sync_row_filter_only() {
     let schemas = body["schemas"].as_array().unwrap_or(&empty);
     let has_table = schemas.iter().any(|s| {
         s["schema_name"].as_str() == Some(schema)
-            && s["tables"].as_array().map_or(false, |ts| {
-                ts.iter().any(|t| t["table_name"].as_str() == Some("users"))
-            })
+            && s["tables"]
+                .as_array()
+                .is_some_and(|ts| ts.iter().any(|t| t["table_name"].as_str() == Some("users")))
     });
     assert!(
         has_table,
@@ -5452,4 +5453,1211 @@ async fn rbac_74_set_datasource_role_access_rejects_inactive_role() {
         .json(&json!({ "role_ids": [role_id] }))
         .await;
     resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+}
+
+// ===========================================================================
+// Decision Function integration tests
+// ===========================================================================
+
+/// Helper: create a decision function via the admin API, returns its UUID.
+async fn create_decision_fn(
+    server: &support::ProxyTestServer,
+    name: &str,
+    js_source: &str,
+    evaluate_context: &str,
+    on_error: &str,
+    config: Option<Value>,
+) -> Uuid {
+    let mut body = json!({
+        "name": name,
+        "decision_fn": js_source,
+        "evaluate_context": evaluate_context,
+        "on_error": on_error,
+    });
+    if let Some(cfg) = config {
+        body["decision_config"] = cfg;
+    }
+    let resp = server
+        .admin
+        .post("/api/v1/decision-functions")
+        .authorization_bearer(&server.admin_token)
+        .json(&body)
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    resp.json::<Value>()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// Helper: create a policy with a decision function attached and assign it.
+#[allow(clippy::too_many_arguments)]
+async fn create_policy_with_decision_fn(
+    server: &support::ProxyTestServer,
+    name: &str,
+    policy_type: &str,
+    targets: Vec<Value>,
+    definition: Option<Value>,
+    ds_id: Uuid,
+    user_id: Option<Uuid>,
+    decision_function_id: Uuid,
+) -> Uuid {
+    let resp = server
+        .admin
+        .post("/api/v1/policies")
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "name": name,
+            "policy_type": policy_type,
+            "is_enabled": true,
+            "targets": targets,
+            "definition": definition,
+            "decision_function_id": decision_function_id,
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let policy_id: Uuid = resp.json::<Value>()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let assign_resp = server
+        .admin
+        .post(&format!("/api/v1/datasources/{ds_id}/policies"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "policy_id": policy_id,
+            "user_id": user_id,
+        }))
+        .await;
+    assign_resp.assert_status(axum::http::StatusCode::CREATED);
+
+    policy_id
+}
+
+// ---------------------------------------------------------------------------
+// DF1: fire:true → row_filter applied
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn df_fire_true_row_filter_applied() {
+    let _pg = require_postgres!();
+    require_javy!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "df_t1";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT, amount INT);
+             INSERT INTO {schema}.orders VALUES (1,'acme',100),(2,'globex',200),(3,'acme',300);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_df_t1", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("alice_df1", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    let decision_fn_id = create_decision_fn(
+        &server,
+        "df-true-1",
+        "function evaluate(ctx, config) { return { fire: true }; }",
+        "session",
+        "deny",
+        None,
+    )
+    .await;
+
+    create_policy_with_decision_fn(
+        &server,
+        "filter-df1",
+        "row_filter",
+        vec![json!({"schemas": [schema], "tables": ["orders"]})],
+        Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+        ds_id,
+        None,
+        decision_fn_id,
+    )
+    .await;
+
+    server
+        .create_column_allow("allow-df1", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("alice_df1", support::TEST_PASS, "ds_df_t1")
+        .await;
+    let rows = client
+        .simple_query(&format!(
+            "SELECT id, tenant, amount FROM {schema}.orders ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let data = extract_rows(&rows);
+    assert_eq!(data.len(), 2, "fire:true → filter applied, only acme rows");
+    assert!(data.iter().all(|r| r[1] == "acme"));
+}
+
+// ---------------------------------------------------------------------------
+// DF2: fire:false → row_filter skipped
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn df_fire_false_row_filter_skipped() {
+    let _pg = require_postgres!();
+    require_javy!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "df_t2";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT, amount INT);
+             INSERT INTO {schema}.orders VALUES (1,'acme',100),(2,'globex',200),(3,'acme',300);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_df_t2", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("alice_df2", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    let decision_fn_id = create_decision_fn(
+        &server,
+        "df-false-2",
+        "function evaluate(ctx, config) { return { fire: false }; }",
+        "session",
+        "deny",
+        None,
+    )
+    .await;
+
+    create_policy_with_decision_fn(
+        &server,
+        "filter-df2",
+        "row_filter",
+        vec![json!({"schemas": [schema], "tables": ["orders"]})],
+        Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+        ds_id,
+        None,
+        decision_fn_id,
+    )
+    .await;
+
+    server
+        .create_column_allow("allow-df2", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("alice_df2", support::TEST_PASS, "ds_df_t2")
+        .await;
+    let rows = client
+        .simple_query(&format!(
+            "SELECT id, tenant, amount FROM {schema}.orders ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let data = extract_rows(&rows);
+    assert_eq!(
+        data.len(),
+        3,
+        "fire:false → filter skipped, all rows returned"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DF3: throwing function + on_error=deny → filter applied
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn df_on_error_deny_fires() {
+    let _pg = require_postgres!();
+    require_javy!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "df_t3";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT, amount INT);
+             INSERT INTO {schema}.orders VALUES (1,'acme',100),(2,'globex',200),(3,'acme',300);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_df_t3", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("alice_df3", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    let decision_fn_id = create_decision_fn(
+        &server,
+        "df-throw-deny",
+        "function evaluate(ctx, config) { throw new Error('boom'); }",
+        "session",
+        "deny",
+        None,
+    )
+    .await;
+
+    create_policy_with_decision_fn(
+        &server,
+        "filter-df3",
+        "row_filter",
+        vec![json!({"schemas": [schema], "tables": ["orders"]})],
+        Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+        ds_id,
+        None,
+        decision_fn_id,
+    )
+    .await;
+
+    server
+        .create_column_allow("allow-df3", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("alice_df3", support::TEST_PASS, "ds_df_t3")
+        .await;
+    let rows = client
+        .simple_query(&format!(
+            "SELECT id, tenant, amount FROM {schema}.orders ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let data = extract_rows(&rows);
+    assert_eq!(
+        data.len(),
+        2,
+        "on_error=deny → error makes policy fire, only acme rows"
+    );
+    assert!(data.iter().all(|r| r[1] == "acme"));
+}
+
+// ---------------------------------------------------------------------------
+// DF4: throwing function + on_error=skip → filter skipped
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn df_on_error_skip_does_not_fire() {
+    let _pg = require_postgres!();
+    require_javy!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "df_t4";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT, amount INT);
+             INSERT INTO {schema}.orders VALUES (1,'acme',100),(2,'globex',200),(3,'acme',300);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_df_t4", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("alice_df4", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    let decision_fn_id = create_decision_fn(
+        &server,
+        "df-throw-skip",
+        "function evaluate(ctx, config) { throw new Error('boom'); }",
+        "session",
+        "skip",
+        None,
+    )
+    .await;
+
+    create_policy_with_decision_fn(
+        &server,
+        "filter-df4",
+        "row_filter",
+        vec![json!({"schemas": [schema], "tables": ["orders"]})],
+        Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+        ds_id,
+        None,
+        decision_fn_id,
+    )
+    .await;
+
+    server
+        .create_column_allow("allow-df4", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("alice_df4", support::TEST_PASS, "ds_df_t4")
+        .await;
+    let rows = client
+        .simple_query(&format!(
+            "SELECT id, tenant, amount FROM {schema}.orders ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let data = extract_rows(&rows);
+    assert_eq!(
+        data.len(),
+        3,
+        "on_error=skip → error makes policy skip, all rows returned"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DF5: disabled decision function → policy always fires
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn df_disabled_always_fires() {
+    let _pg = require_postgres!();
+    require_javy!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "df_t5";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT, amount INT);
+             INSERT INTO {schema}.orders VALUES (1,'acme',100),(2,'globex',200),(3,'acme',300);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_df_t5", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("alice_df5", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    // Create a DF that returns fire:false ...
+    let decision_fn_id = create_decision_fn(
+        &server,
+        "df-false-disabled",
+        "function evaluate(ctx, config) { return { fire: false }; }",
+        "session",
+        "deny",
+        None,
+    )
+    .await;
+
+    // ... then disable it via PUT
+    let resp = server
+        .admin
+        .put(&format!("/api/v1/decision-functions/{decision_fn_id}"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({ "is_enabled": false, "version": 1 }))
+        .await;
+    resp.assert_status_ok();
+
+    create_policy_with_decision_fn(
+        &server,
+        "filter-df5",
+        "row_filter",
+        vec![json!({"schemas": [schema], "tables": ["orders"]})],
+        Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+        ds_id,
+        None,
+        decision_fn_id,
+    )
+    .await;
+
+    server
+        .create_column_allow("allow-df5", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("alice_df5", support::TEST_PASS, "ds_df_t5")
+        .await;
+    let rows = client
+        .simple_query(&format!(
+            "SELECT id, tenant, amount FROM {schema}.orders ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let data = extract_rows(&rows);
+    assert_eq!(
+        data.len(),
+        2,
+        "disabled DF → gate bypassed, policy always fires, only acme rows"
+    );
+    assert!(data.iter().all(|r| r[1] == "acme"));
+}
+
+// ---------------------------------------------------------------------------
+// DF6: table_deny + fire:false → query succeeds (deny skipped)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn df_table_deny_conditional() {
+    let _pg = require_postgres!();
+    require_javy!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "df_t6";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT, amount INT);
+             INSERT INTO {schema}.orders VALUES (1,'acme',100),(2,'globex',200);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_df_t6", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("alice_df6", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    let decision_fn_id = create_decision_fn(
+        &server,
+        "df-false-deny",
+        "function evaluate(ctx, config) { return { fire: false }; }",
+        "session",
+        "deny",
+        None,
+    )
+    .await;
+
+    create_policy_with_decision_fn(
+        &server,
+        "deny-df6",
+        "table_deny",
+        vec![json!({"schemas": [schema], "tables": ["orders"]})],
+        None,
+        ds_id,
+        None,
+        decision_fn_id,
+    )
+    .await;
+
+    server
+        .create_column_allow("allow-df6", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("alice_df6", support::TEST_PASS, "ds_df_t6")
+        .await;
+    let rows = client
+        .simple_query(&format!(
+            "SELECT id, tenant, amount FROM {schema}.orders ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let data = extract_rows(&rows);
+    assert_eq!(
+        data.len(),
+        2,
+        "fire:false on table_deny → deny skipped, query succeeds"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DF7: FK guard — delete blocked while policy references decision function
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn df_delete_blocked_by_policy_reference() {
+    let _pg = require_postgres!();
+    require_javy!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "df_t7";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT);
+             INSERT INTO {schema}.orders VALUES (1,'acme');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_df_t7", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("alice_df7", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    let df_id = create_decision_fn(
+        &server,
+        "df-del-guard",
+        "function evaluate(ctx, config) { return { fire: true }; }",
+        "session",
+        "deny",
+        None,
+    )
+    .await;
+
+    let policy_id = create_policy_with_decision_fn(
+        &server,
+        "filter-df7",
+        "row_filter",
+        vec![json!({"schemas": [schema], "tables": ["orders"]})],
+        Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+        ds_id,
+        None,
+        df_id,
+    )
+    .await;
+
+    // Attempt to delete DF while policy references it → 409 Conflict
+    let del_resp = server
+        .admin
+        .delete(&format!("/api/v1/decision-functions/{df_id}"))
+        .authorization_bearer(&server.admin_token)
+        .await;
+    del_resp.assert_status(axum::http::StatusCode::CONFLICT);
+
+    // Detach by setting decision_function_id to null, then delete policy
+    let get_resp = server
+        .admin
+        .get(&format!("/api/v1/policies/{policy_id}"))
+        .authorization_bearer(&server.admin_token)
+        .await;
+    let policy_version = get_resp.json::<Value>()["version"].as_i64().unwrap();
+
+    server
+        .admin
+        .put(&format!("/api/v1/policies/{policy_id}"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "decision_function_id": null,
+            "version": policy_version,
+        }))
+        .await
+        .assert_status(axum::http::StatusCode::OK);
+
+    // Now delete DF succeeds
+    let del_resp2 = server
+        .admin
+        .delete(&format!("/api/v1/decision-functions/{df_id}"))
+        .authorization_bearer(&server.admin_token)
+        .await;
+    del_resp2.assert_status(axum::http::StatusCode::NO_CONTENT);
+}
+
+// ---------------------------------------------------------------------------
+// DF8: backward compat — policy without decision function fires normally
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn df_policy_without_decision_fn_fires_normally() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "df_t8";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT, amount INT);
+             INSERT INTO {schema}.orders VALUES (1,'acme',100),(2,'globex',200),(3,'acme',300);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_df_t8", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("alice_df8", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    // Create a row_filter policy WITHOUT decision_function_id
+    let resp = server
+        .admin
+        .post("/api/v1/policies")
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "name": "filter-no-df",
+            "policy_type": "row_filter",
+            "is_enabled": true,
+            "targets": [{"schemas": [schema], "tables": ["orders"]}],
+            "definition": {"filter_expression": "tenant = {user.tenant}"},
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let policy_id: Uuid = resp.json::<Value>()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    server
+        .admin
+        .post(&format!("/api/v1/datasources/{ds_id}/policies"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({"policy_id": policy_id}))
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    server
+        .create_column_allow("allow-df8", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("alice_df8", support::TEST_PASS, "ds_df_t8")
+        .await;
+    let rows = client
+        .simple_query(&format!(
+            "SELECT id, tenant, amount FROM {schema}.orders ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let data = extract_rows(&rows);
+    assert_eq!(
+        data.len(),
+        2,
+        "row_filter without decision function should still apply (acme rows only)"
+    );
+    assert_eq!(data[0][1], "acme");
+    assert_eq!(data[1][1], "acme");
+}
+
+// ---------------------------------------------------------------------------
+// DF9: cache consistency — update DF takes effect on next query
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn df_update_takes_effect_on_next_query() {
+    let _pg = require_postgres!();
+    require_javy!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "df_t9";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT, amount INT);
+             INSERT INTO {schema}.orders VALUES (1,'acme',100),(2,'globex',200),(3,'acme',300);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_df_t9", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("alice_df9", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    // Create DF that fires (filter applied)
+    let df_id = create_decision_fn(
+        &server,
+        "df-mutable",
+        "function evaluate(ctx, config) { return { fire: true }; }",
+        "session",
+        "deny",
+        None,
+    )
+    .await;
+
+    create_policy_with_decision_fn(
+        &server,
+        "filter-df9",
+        "row_filter",
+        vec![json!({"schemas": [schema], "tables": ["orders"]})],
+        Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+        ds_id,
+        None,
+        df_id,
+    )
+    .await;
+
+    server
+        .create_column_allow("allow-df9", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    // Query 1: DF fires → filter applied → only acme rows
+    let client = server
+        .connect_as("alice_df9", support::TEST_PASS, "ds_df_t9")
+        .await;
+    let rows = client
+        .simple_query(&format!(
+            "SELECT id, tenant FROM {schema}.orders ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let data = extract_rows(&rows);
+    assert_eq!(data.len(), 2, "fire:true → filter applied, acme rows only");
+
+    // Update DF to return fire:false (need current version for OCC)
+    let get_resp = server
+        .admin
+        .get(&format!("/api/v1/decision-functions/{df_id}"))
+        .authorization_bearer(&server.admin_token)
+        .await;
+    let df_version = get_resp.json::<Value>()["version"].as_i64().unwrap();
+
+    server
+        .admin
+        .put(&format!("/api/v1/decision-functions/{df_id}"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "decision_fn": "function evaluate(ctx, config) { return { fire: false }; }",
+            "version": df_version,
+        }))
+        .await
+        .assert_status(axum::http::StatusCode::OK);
+
+    // Query 2: DF now returns fire:false → filter skipped → all rows
+    // Need a new connection since session cache was invalidated
+    let client2 = server
+        .connect_as("alice_df9", support::TEST_PASS, "ds_df_t9")
+        .await;
+    let rows2 = client2
+        .simple_query(&format!(
+            "SELECT id, tenant FROM {schema}.orders ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let data2 = extract_rows(&rows2);
+    assert_eq!(
+        data2.len(),
+        3,
+        "fire:false after update → filter skipped, all rows returned"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DF10: API validation — rejects invalid inputs
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn df_create_validation_rejects_invalid_inputs() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+
+    // 1. Invalid evaluate_context
+    let resp = server
+        .admin
+        .post("/api/v1/decision-functions")
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "name": "bad-eval-ctx",
+            "decision_fn": "function evaluate(ctx, config) { return { fire: true }; }",
+            "evaluate_context": "custom",
+            "on_error": "deny",
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+
+    // 2. Invalid on_error
+    let resp = server
+        .admin
+        .post("/api/v1/decision-functions")
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "name": "bad-on-error",
+            "decision_fn": "function evaluate(ctx, config) { return { fire: true }; }",
+            "evaluate_context": "session",
+            "on_error": "panic",
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+
+    // 3. Empty decision_fn
+    let resp = server
+        .admin
+        .post("/api/v1/decision-functions")
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "name": "bad-empty-fn",
+            "decision_fn": "",
+            "evaluate_context": "session",
+            "on_error": "deny",
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+// ---------------------------------------------------------------------------
+// DF: Visibility-level decision function evaluation
+// ---------------------------------------------------------------------------
+
+/// column_deny with session df fire:false → column stays visible
+#[tokio::test]
+async fn df_column_deny_visibility_fire_false() {
+    let _pg = require_postgres!();
+    require_javy!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "df_vis1";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT, secret TEXT);
+             INSERT INTO {schema}.orders VALUES (1,'acme','classified'),(2,'globex','top-secret');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_df_vis1", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("alice_vis1", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    // Decision fn that returns fire:false → column_deny should NOT apply
+    let df_id = create_decision_fn(
+        &server,
+        "df-vis1-false",
+        "function evaluate(ctx, config) { return { fire: false }; }",
+        "session",
+        "deny",
+        None,
+    )
+    .await;
+
+    create_policy_with_decision_fn(
+        &server,
+        "deny-vis1",
+        "column_deny",
+        vec![json!({"schemas": [schema], "tables": ["orders"], "columns": ["secret"]})],
+        None,
+        ds_id,
+        None,
+        df_id,
+    )
+    .await;
+
+    let client = server
+        .connect_as("alice_vis1", support::TEST_PASS, "ds_df_vis1")
+        .await;
+    let rows = client
+        .simple_query(&format!(
+            "SELECT id, tenant, secret FROM {schema}.orders ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let data = extract_rows(&rows);
+    assert_eq!(
+        data.len(),
+        2,
+        "fire:false → column_deny skipped, query succeeds"
+    );
+    assert_eq!(
+        data[0][2], "classified",
+        "secret column should be visible when decision fn returns fire:false"
+    );
+}
+
+/// column_deny with session df fire:true → column hidden
+#[tokio::test]
+async fn df_column_deny_visibility_fire_true() {
+    let _pg = require_postgres!();
+    require_javy!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "df_vis2";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT, secret TEXT);
+             INSERT INTO {schema}.orders VALUES (1,'acme','classified');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_df_vis2", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("alice_vis2", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    // Decision fn that returns fire:true → column_deny SHOULD apply
+    let df_id = create_decision_fn(
+        &server,
+        "df-vis2-true",
+        "function evaluate(ctx, config) { return { fire: true }; }",
+        "session",
+        "deny",
+        None,
+    )
+    .await;
+
+    create_policy_with_decision_fn(
+        &server,
+        "deny-vis2",
+        "column_deny",
+        vec![json!({"schemas": [schema], "tables": ["orders"], "columns": ["secret"]})],
+        None,
+        ds_id,
+        None,
+        df_id,
+    )
+    .await;
+
+    let client = server
+        .connect_as("alice_vis2", support::TEST_PASS, "ds_df_vis2")
+        .await;
+    // Query only non-denied columns should work
+    let rows = client
+        .simple_query(&format!(
+            "SELECT id, tenant FROM {schema}.orders ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let data = extract_rows(&rows);
+    assert_eq!(data.len(), 1);
+
+    // Query the denied column should fail (column not visible in schema)
+    let err = client
+        .simple_query(&format!("SELECT secret FROM {schema}.orders"))
+        .await;
+    assert!(
+        err.is_err(),
+        "fire:true → column_deny applied, secret column should not be visible"
+    );
+}
+
+/// column_deny with query-context df → visibility skipped, enforcement deferred to query time
+#[tokio::test]
+async fn df_column_deny_query_ctx_skipped_at_visibility() {
+    let _pg = require_postgres!();
+    require_javy!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "df_vis3";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT, secret TEXT);
+             INSERT INTO {schema}.orders VALUES (1,'acme','classified');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_df_vis3", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("alice_vis3", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    // Decision fn with evaluate_context="query" and fire:false
+    // At visibility time, policy is skipped (deferred to query time).
+    // At query time, fire:false → column_deny not applied → column visible.
+    let df_id = create_decision_fn(
+        &server,
+        "df-vis3-query",
+        "function evaluate(ctx, config) { return { fire: false }; }",
+        "query",
+        "deny",
+        None,
+    )
+    .await;
+
+    create_policy_with_decision_fn(
+        &server,
+        "deny-vis3",
+        "column_deny",
+        vec![json!({"schemas": [schema], "tables": ["orders"], "columns": ["secret"]})],
+        None,
+        ds_id,
+        None,
+        df_id,
+    )
+    .await;
+
+    let client = server
+        .connect_as("alice_vis3", support::TEST_PASS, "ds_df_vis3")
+        .await;
+    // Column visible in schema (visibility skipped) and query (fire:false)
+    let rows = client
+        .simple_query(&format!(
+            "SELECT id, tenant, secret FROM {schema}.orders ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let data = extract_rows(&rows);
+    assert_eq!(
+        data.len(),
+        1,
+        "query-ctx df → visibility skipped, query fire:false → column visible"
+    );
+    assert_eq!(data[0][2], "classified");
+}
+
+// ---------------------------------------------------------------------------
+// DF: Reproducer for production scenario — column_deny + query-context DF
+// checking username. Mirrors the real policy "test-decision-function-policy"
+// with evaluate_context="query" and a username-based fire decision.
+// ---------------------------------------------------------------------------
+
+/// Reproduces the production scenario: column_deny with evaluate_context="query" DF
+/// that returns fire:true only for admin. At visibility time, evaluate_context="query"
+/// means the policy is deferred → columns stay visible. At query time, DF returns
+/// fire:false for non-admin → column_deny skipped → columns visible in results.
+#[tokio::test]
+async fn df_column_deny_query_ctx_username_check_deferred() {
+    let _pg = require_postgres!();
+    require_javy!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "df_vis_prod1";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.customers;
+             CREATE TABLE {schema}.customers (
+                 id INT, name TEXT, birth_date TEXT, avatar TEXT
+             );
+             INSERT INTO {schema}.customers VALUES
+                 (1,'Alice','1990-01-01','alice.png'),
+                 (2,'Bob','1985-06-15','bob.png');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_df_vis_prod1", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("regular_user", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    // Exact JS from production — evaluate_context="query", fires only for admin
+    let df_id = create_decision_fn(
+        &server,
+        "df-prod-username-check",
+        r#"function evaluate(ctx, config) {
+  if (ctx.session.user && ctx.session.user.username === 'admin') {
+    return { fire: true };
+  }
+  return { fire: false };
+}"#,
+        "query",
+        "deny",
+        None,
+    )
+    .await;
+
+    create_policy_with_decision_fn(
+        &server,
+        "deny-prod-cols",
+        "column_deny",
+        vec![json!({"schemas": [schema], "tables": ["*"], "columns": ["birth_date", "avatar"]})],
+        None,
+        ds_id,
+        None,
+        df_id,
+    )
+    .await;
+
+    // Non-admin user: visibility deferred (query ctx), query-time fire:false → columns visible
+    let client = server
+        .connect_as("regular_user", support::TEST_PASS, "ds_df_vis_prod1")
+        .await;
+
+    let rows = client
+        .simple_query(&format!(
+            "SELECT id, name, birth_date, avatar FROM {schema}.customers ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let data = extract_rows(&rows);
+    assert_eq!(data.len(), 2);
+    assert_eq!(data[0][2], "1990-01-01", "birth_date visible for non-admin");
+    assert_eq!(data[0][3], "alice.png", "avatar visible for non-admin");
+}
+
+/// Same scenario but with evaluate_context="session" — the correct fix.
+/// Column_deny DF evaluates at visibility time, returns fire:false for
+/// non-admin → columns stay visible.
+#[tokio::test]
+async fn df_column_deny_session_ctx_username_check_conditional() {
+    let _pg = require_postgres!();
+    require_javy!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "df_vis_prod2";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.customers;
+             CREATE TABLE {schema}.customers (
+                 id INT, name TEXT, birth_date TEXT, avatar TEXT
+             );
+             INSERT INTO {schema}.customers VALUES
+                 (1,'Alice','1990-01-01','alice.png'),
+                 (2,'Bob','1985-06-15','bob.png');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_df_vis_prod2", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _regular_id = server
+        .create_user("regular_user2", support::TEST_PASS, "acme", ds_id)
+        .await;
+    let _admin_id = server
+        .create_user("admin_user2", support::TEST_PASS, "acme", ds_id)
+        .await;
+
+    // Same JS but with evaluate_context="session" — the correct setting
+    let df_id = create_decision_fn(
+        &server,
+        "df-prod-session-check",
+        r#"function evaluate(ctx, config) {
+  if (ctx.session.user && ctx.session.user.username === 'admin_user2') {
+    return { fire: true };
+  }
+  return { fire: false };
+}"#,
+        "session", // Correct — username is session data
+        "deny",
+        None,
+    )
+    .await;
+
+    create_policy_with_decision_fn(
+        &server,
+        "deny-prod-cols2",
+        "column_deny",
+        vec![json!({"schemas": [schema], "tables": ["*"], "columns": ["birth_date", "avatar"]})],
+        None,
+        ds_id,
+        None,
+        df_id,
+    )
+    .await;
+
+    // Non-admin user: DF returns fire:false → column_deny skipped → columns visible
+    let client = server
+        .connect_as("regular_user2", support::TEST_PASS, "ds_df_vis_prod2")
+        .await;
+    let rows = client
+        .simple_query(&format!(
+            "SELECT id, name, birth_date, avatar FROM {schema}.customers ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let data = extract_rows(&rows);
+    assert_eq!(data.len(), 2, "non-admin sees all rows");
+    assert_eq!(data[0][2], "1990-01-01", "birth_date visible for non-admin");
+    assert_eq!(data[0][3], "alice.png", "avatar visible for non-admin");
+
+    // Admin user: DF returns fire:true → column_deny applied → columns hidden
+    let admin_client = server
+        .connect_as("admin_user2", support::TEST_PASS, "ds_df_vis_prod2")
+        .await;
+    let err = admin_client
+        .simple_query(&format!("SELECT birth_date FROM {schema}.customers"))
+        .await;
+    assert!(
+        err.is_err(),
+        "admin_user2 → fire:true → column_deny applied, birth_date hidden"
+    );
+
+    // Admin can still query non-denied columns
+    let rows = admin_client
+        .simple_query(&format!(
+            "SELECT id, name FROM {schema}.customers ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let data = extract_rows(&rows);
+    assert_eq!(data.len(), 2);
 }

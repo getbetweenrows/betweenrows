@@ -26,7 +26,7 @@ use uuid::Uuid;
 use super::QueryHook;
 use super::read_only::is_allowed_statement;
 use crate::engine::BetweenRowsPostgresDialect;
-use crate::entity::{data_source, discovered_schema, policy, query_audit_log};
+use crate::entity::{data_source, decision_function, discovered_schema, policy, query_audit_log};
 use crate::policy_match::{PolicyType, TargetEntry, expand_column_patterns};
 
 // ---------- system schema detection ----------
@@ -389,6 +389,18 @@ fn parse_mask_expr(
 // ---------- resolved policy data structures ----------
 
 #[derive(Clone)]
+struct ResolvedDecisionFunction {
+    #[allow(dead_code)]
+    id: Uuid,
+    decision_wasm: Option<Vec<u8>>,
+    decision_config: Option<serde_json::Value>,
+    evaluate_context: String,
+    on_error: String,
+    log_level: String,
+    is_enabled: bool,
+}
+
+#[derive(Clone)]
 struct ResolvedPolicy {
     id: Uuid,
     name: String,
@@ -398,6 +410,8 @@ struct ResolvedPolicy {
     targets: Vec<TargetEntry>,
     /// Parsed definition JSON (filter_expression or mask_expression). Null for non-expression types.
     definition: Option<serde_json::Value>,
+    /// Decision function (loaded from decision_function table via FK).
+    decision_function: Option<ResolvedDecisionFunction>,
 }
 
 struct SessionData {
@@ -408,6 +422,8 @@ struct SessionData {
     df_to_upstream: HashMap<String, String>,
     datasource_id: Uuid,
     datasource_name: String,
+    /// Role names for the current user (resolved via role_resolver).
+    roles: Vec<String>,
     loaded_at: std::time::Instant,
 }
 
@@ -418,14 +434,29 @@ const CACHE_TTL_SECS: u64 = 60;
 pub struct PolicyHook {
     db: DatabaseConnection,
     cache: Arc<RwLock<HashMap<(Uuid, String), SessionData>>>,
+    /// Shared wasmtime Engine for evaluating decision functions at query time.
+    engine: wasmtime::Engine,
+    /// Pre-compiled QuickJS engine plugin module (compiled once at startup).
+    plugin_module: wasmtime::Module,
 }
 
 impl PolicyHook {
-    pub fn new(db: DatabaseConnection) -> Arc<Self> {
-        Arc::new(Self {
+    pub fn new(
+        db: DatabaseConnection,
+    ) -> Result<Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut config = wasmtime::Config::new();
+        config.consume_fuel(true);
+        config.wasm_memory64(false);
+        let engine = wasmtime::Engine::new(&config)?;
+
+        let plugin_module = wasmtime::Module::new(&engine, crate::decision::wasm::PLUGIN_WASM)?;
+
+        Ok(Arc::new(Self {
             db,
             cache: Arc::new(RwLock::new(HashMap::new())),
-        })
+            engine,
+            plugin_module,
+        }))
     }
 
     pub async fn invalidate_datasource(&self, datasource_name: &str) {
@@ -548,6 +579,21 @@ impl PolicyHook {
             df_to_upstream.insert(alias, s.schema_name.clone());
         }
 
+        // Resolve role names for the user (for decision function context)
+        let role_ids = crate::role_resolver::resolve_user_roles(&self.db, user_id).await?;
+        let role_names: Vec<String> = if !role_ids.is_empty() {
+            use crate::entity::role;
+            role::Entity::find()
+                .filter(role::Column::Id.is_in(role_ids))
+                .all(&self.db)
+                .await?
+                .into_iter()
+                .map(|r| r.name)
+                .collect()
+        } else {
+            vec![]
+        };
+
         // Load policy assignments for this datasource+user (user-specific, role-based, or wildcard)
         let relevant_assignments =
             crate::role_resolver::resolve_effective_assignments(&self.db, user_id, ds.id).await?;
@@ -576,6 +622,7 @@ impl PolicyHook {
                 df_to_upstream,
                 datasource_id: ds.id,
                 datasource_name: ds.name.clone(),
+                roles: role_names,
                 loaded_at: std::time::Instant::now(),
             });
         }
@@ -586,6 +633,26 @@ impl PolicyHook {
             .filter(policy::Column::IsEnabled.eq(true))
             .all(&self.db)
             .await?;
+
+        // Batch-load decision functions referenced by these policies
+        let df_ids: Vec<Uuid> = policies
+            .iter()
+            .filter_map(|p| p.decision_function_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let df_map: HashMap<Uuid, decision_function::Model> = if !df_ids.is_empty() {
+            decision_function::Entity::find()
+                .filter(decision_function::Column::Id.is_in(df_ids))
+                .all(&self.db)
+                .await?
+                .into_iter()
+                .map(|df| (df.id, df))
+                .collect()
+        } else {
+            HashMap::new()
+        };
 
         let mut permit_policies = Vec::new();
         let mut deny_policies = Vec::new();
@@ -604,6 +671,25 @@ impl PolicyHook {
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok());
 
+            // Resolve decision function from FK
+            let decision_function = p.decision_function_id.and_then(|df_id| {
+                df_map.get(&df_id).map(|df| {
+                    let decision_config: Option<serde_json::Value> = df
+                        .decision_config
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str(s).ok());
+                    ResolvedDecisionFunction {
+                        id: df.id,
+                        decision_wasm: df.decision_wasm.clone(),
+                        decision_config,
+                        evaluate_context: df.evaluate_context.clone(),
+                        on_error: df.on_error.clone(),
+                        log_level: df.log_level.clone(),
+                        is_enabled: df.is_enabled,
+                    }
+                })
+            });
+
             let priority = policy_priority.get(&p.id).copied().unwrap_or(100);
             let resolved = ResolvedPolicy {
                 id: p.id,
@@ -613,6 +699,7 @@ impl PolicyHook {
                 priority,
                 targets,
                 definition,
+                decision_function,
             };
             if policy_type.is_deny() {
                 deny_policies.push(resolved);
@@ -631,6 +718,7 @@ impl PolicyHook {
             df_to_upstream,
             datasource_id: ds.id,
             datasource_name: ds.name.clone(),
+            roles: role_names,
             loaded_at: std::time::Instant::now(),
         })
     }
@@ -646,6 +734,7 @@ struct SessionDataClone {
     df_to_upstream: HashMap<String, String>,
     datasource_id: Uuid,
     datasource_name: String,
+    roles: Vec<String>,
 }
 
 fn clone_session_data(s: &SessionData) -> SessionDataRef {
@@ -656,6 +745,7 @@ fn clone_session_data(s: &SessionData) -> SessionDataRef {
         df_to_upstream: s.df_to_upstream.clone(),
         datasource_id: s.datasource_id,
         datasource_name: s.datasource_name.clone(),
+        roles: s.roles.clone(),
     })
 }
 
@@ -681,6 +771,94 @@ fn collect_tables_inner(plan: &LogicalPlan, tables: &mut Vec<(String, String)>) 
     }
     for input in plan.inputs() {
         collect_tables_inner(input, tables);
+    }
+}
+
+// ---------- query metadata extraction ----------
+
+/// Extract query metadata from a logical plan for decision function evaluation.
+fn extract_query_metadata(plan: &LogicalPlan) -> crate::decision::context::QueryMetadata {
+    let mut tables = Vec::new();
+    let mut join_count = 0usize;
+    let mut has_aggregation = false;
+    let mut has_subquery = false;
+    let mut has_where = false;
+    extract_metadata_inner(
+        plan,
+        &mut tables,
+        &mut join_count,
+        &mut has_aggregation,
+        &mut has_subquery,
+        &mut has_where,
+    );
+    tables.dedup();
+
+    // Columns from the top-level output schema
+    let columns: Vec<String> = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+
+    crate::decision::context::QueryMetadata {
+        tables,
+        columns,
+        join_count,
+        has_aggregation,
+        has_subquery,
+        has_where,
+        statement_type: "SELECT".to_string(),
+    }
+}
+
+fn extract_metadata_inner(
+    plan: &LogicalPlan,
+    tables: &mut Vec<String>,
+    join_count: &mut usize,
+    has_aggregation: &mut bool,
+    has_subquery: &mut bool,
+    has_where: &mut bool,
+) {
+    match plan {
+        LogicalPlan::TableScan(scan) => {
+            let schema = scan.table_name.schema().unwrap_or("");
+            let table = scan.table_name.table();
+            let is_system = SYSTEM_SCHEMAS.contains(&schema)
+                || table.starts_with("pg_")
+                || schema == "information_schema";
+            if !is_system {
+                let name = if schema.is_empty() {
+                    table.to_string()
+                } else {
+                    format!("{schema}.{table}")
+                };
+                tables.push(name);
+            }
+        }
+        LogicalPlan::Join(_) => {
+            *join_count += 1;
+        }
+        LogicalPlan::Aggregate(_) => {
+            *has_aggregation = true;
+        }
+        LogicalPlan::Filter(_) => {
+            *has_where = true;
+        }
+        LogicalPlan::SubqueryAlias(_) => {
+            *has_subquery = true;
+        }
+        _ => {}
+    }
+    for input in plan.inputs() {
+        extract_metadata_inner(
+            input,
+            tables,
+            join_count,
+            has_aggregation,
+            has_subquery,
+            has_where,
+        );
     }
 }
 
@@ -760,15 +938,164 @@ struct PolicyEffects {
     tables_with_permit: HashSet<(String, String)>,
     /// If set, a deny-type policy matched the query — must reject before executing.
     denied_by_policy: Option<String>,
+    /// Decision function evaluation results, keyed by policy ID, for audit logging.
+    decision_results: HashMap<Uuid, crate::decision::DecisionResult>,
+}
+
+/// Optional context for decision function evaluation at query time.
+pub struct DecisionEvalContext<'a> {
+    pub engine: &'a wasmtime::Engine,
+    pub plugin_module: &'a wasmtime::Module,
+    pub decision_ctx: serde_json::Value,
+}
+
+/// Evaluate a policy's decision function. Returns `true` if the policy should fire.
+///
+/// - No decision function → always fires.
+/// - `is_enabled = false` → always fires (gate disabled).
+/// - `decision_wasm` is None → always fires (not compiled yet).
+/// - Decision function returns `fire: true` → fires.
+/// - Decision function returns `fire: false` → skip.
+/// - Decision function error + `on_error = "deny"` → fires (fail-secure).
+/// - Decision function error + `on_error = "skip"` → skip (fail-open).
+/// - `evaluate_context = "query"` but no query context → fires (defensive fallback).
+async fn evaluate_decision_fn(
+    policy: &ResolvedPolicy,
+    decision_eval: Option<&DecisionEvalContext<'_>>,
+    decision_results: &mut HashMap<Uuid, crate::decision::DecisionResult>,
+) -> bool {
+    let df = match &policy.decision_function {
+        Some(df) => df,
+        None => return true, // No decision function → always fire
+    };
+
+    if !df.is_enabled {
+        return true; // Gate disabled → always fire
+    }
+
+    let wasm_bytes = match &df.decision_wasm {
+        Some(bytes) if !bytes.is_empty() => bytes,
+        _ => return true, // Not compiled yet → always fire
+    };
+
+    let eval_ctx = match decision_eval {
+        Some(ctx) => ctx,
+        None => return true, // No eval context available (tests) → always fire
+    };
+
+    // Defensive fallback: if evaluate_context is "query" but query data is missing,
+    // fire the policy (in practice, query context is always present at query time).
+    // Visibility-level evaluation is handled separately by evaluate_visibility_decision_fn().
+    if df.evaluate_context == "query" && eval_ctx.decision_ctx.get("query").is_none() {
+        return true;
+    }
+
+    let config = df
+        .decision_config
+        .as_ref()
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+
+    let fuel_limit = crate::decision::wasm::DEFAULT_FUEL_LIMIT;
+
+    // Clone engine + plugin (internally Arc'd, cheap) and wasm bytes for spawn_blocking
+    let engine = eval_ctx.engine.clone();
+    let plugin_module = eval_ctx.plugin_module.clone();
+    let wasm_owned = wasm_bytes.to_vec();
+    let ctx_clone = eval_ctx.decision_ctx.clone();
+    let log_level = df.log_level.clone();
+    let log_level_outer = log_level.clone();
+    let on_error = df.on_error.clone();
+    let policy_name = policy.name.clone();
+    let policy_id = policy.id;
+
+    let spawn_result = tokio::task::spawn_blocking(move || {
+        // Compile bytecode module (~1ms for 1-16 KB dynamic bytecode)
+        let bytecode_module = wasmtime::Module::new(&engine, &wasm_owned).map_err(|e| {
+            crate::decision::RuntimeError::ExecutionError(format!(
+                "WASM bytecode compilation failed: {e}"
+            ))
+        })?;
+
+        crate::decision::wasm::evaluate_wasm_sync(
+            &engine,
+            &plugin_module,
+            &bytecode_module,
+            &ctx_clone,
+            &config,
+            fuel_limit,
+            &log_level,
+        )
+    })
+    .await;
+
+    match spawn_result {
+        Ok(Ok(mut result)) => {
+            // Filter logs based on log_level
+            if log_level_outer == "error" {
+                // Keep only error-related logs (stderr), which in practice
+                // means we keep all captured logs since they come from stderr
+            } else if log_level_outer == "off" {
+                result.logs.clear();
+            }
+            let fire = result.fire;
+            decision_results.insert(policy_id, result);
+            fire
+        }
+        Ok(Err(e)) => {
+            tracing::error!(
+                policy = %policy_name,
+                error = %e,
+                "Decision function evaluation failed"
+            );
+            let fire = on_error == "deny";
+            decision_results.insert(
+                policy_id,
+                crate::decision::DecisionResult {
+                    fire,
+                    logs: vec![],
+                    fuel_consumed: 0,
+                    time_us: 0,
+                    error: Some(e.to_string()),
+                },
+            );
+            fire
+        }
+        Err(join_err) => {
+            tracing::error!(
+                policy = %policy_name,
+                error = %join_err,
+                "Decision function task panicked"
+            );
+            let fire = on_error == "deny";
+            decision_results.insert(
+                policy_id,
+                crate::decision::DecisionResult {
+                    fire,
+                    logs: vec![],
+                    fuel_consumed: 0,
+                    time_us: 0,
+                    error: Some(format!("Decision function task panicked: {join_err}")),
+                },
+            );
+            fire
+        }
+    }
 }
 
 impl PolicyEffects {
     /// Collect all policy effects from the session's policies.
-    fn collect(
+    ///
+    /// If `decision_eval` is provided, policies with decision functions will be evaluated
+    /// via WASM. If a decision function returns `fire: false`, the policy is skipped.
+    /// If `decision_eval` is None, policies with decision functions are treated as if they
+    /// always fire (backward-compatible behavior for tests).
+    async fn collect(
         session: &SessionDataClone,
         user_tables: &[(String, String)],
         user_vars: &UserVars,
         session_context: &SessionContext,
+        decision_eval: Option<&DecisionEvalContext<'_>>,
     ) -> Self {
         let mut effects = PolicyEffects {
             row_filters: HashMap::new(),
@@ -777,11 +1104,16 @@ impl PolicyEffects {
             column_masks: HashMap::new(),
             tables_with_permit: HashSet::new(),
             denied_by_policy: None,
+            decision_results: HashMap::new(),
         };
 
         // Check table_deny policies first (short-circuit on first match).
         'deny_check: for policy in &session.deny_policies {
             if policy.policy_type != PolicyType::TableDeny {
+                continue;
+            }
+            // Evaluate decision function if present
+            if !evaluate_decision_fn(policy, decision_eval, &mut effects.decision_results).await {
                 continue;
             }
             for (df_schema, table) in user_tables {
@@ -797,6 +1129,10 @@ impl PolicyEffects {
         // Collect column_deny patterns from deny policies (ColumnDeny).
         for policy in &session.deny_policies {
             if policy.policy_type != PolicyType::ColumnDeny {
+                continue;
+            }
+            // Evaluate decision function if present
+            if !evaluate_decision_fn(policy, decision_eval, &mut effects.decision_results).await {
                 continue;
             }
             for (df_schema, table) in user_tables {
@@ -817,6 +1153,11 @@ impl PolicyEffects {
 
         // Collect permit policy effects.
         for policy in &session.permit_policies {
+            // Evaluate decision function if present
+            if !evaluate_decision_fn(policy, decision_eval, &mut effects.decision_results).await {
+                continue;
+            }
+
             let mut policy_table_filters: HashMap<
                 (String, String),
                 datafusion::logical_expr::Expr,
@@ -1228,10 +1569,25 @@ async fn apply_policies(
     session_context: &SessionContext,
     logical_plan: LogicalPlan,
     user_vars: &UserVars,
-) -> Result<(LogicalPlan, bool), PolicyError> {
+    decision_eval: Option<&DecisionEvalContext<'_>>,
+) -> Result<
+    (
+        LogicalPlan,
+        bool,
+        HashMap<Uuid, crate::decision::DecisionResult>,
+    ),
+    PolicyError,
+> {
     let user_tables = collect_user_tables(&logical_plan);
 
-    let mut effects = PolicyEffects::collect(session, &user_tables, user_vars, session_context);
+    let mut effects = PolicyEffects::collect(
+        session,
+        &user_tables,
+        user_vars,
+        session_context,
+        decision_eval,
+    )
+    .await;
 
     effects.check_deny()?;
     effects.apply_access_mode(&session.access_mode, &user_tables);
@@ -1250,7 +1606,7 @@ async fn apply_policies(
     effects.column_masks.clear();
     let plan = effects.apply_projection_qualified(plan)?;
 
-    Ok((plan, had_effects))
+    Ok((plan, had_effects, effects.decision_results))
 }
 
 #[async_trait]
@@ -1312,13 +1668,14 @@ impl QueryHook for PolicyHook {
         let query_start = std::time::Instant::now();
         let original_query = statement.to_string();
 
-        // --- labeled block: returns (result, status, error_message, rewritten_query) ---
+        // --- labeled block: returns (result, status, error_message, rewritten_query, decision_results) ---
         // This single block captures all outcome paths so the audit write is in one place.
-        let (result, audit_status, audit_error, audit_rewritten): (
+        let (result, audit_status, audit_error, audit_rewritten, decision_results): (
             PgWireResult<Response>,
             &'static str,
             Option<String>,
             Option<String>,
+            HashMap<Uuid, crate::decision::DecisionResult>,
         ) = 'query: {
             // Build logical plan
             let df_stmt =
@@ -1333,33 +1690,64 @@ impl QueryHook for PolicyHook {
                         "error",
                         Some(msg),
                         None,
+                        HashMap::new(),
                     );
                 }
             };
 
-            // Apply all policy effects (deny check, row filters, column masks/denies).
-            let (final_plan, had_effects) =
-                match apply_policies(&session, session_context, logical_plan, &user_vars).await {
-                    Ok(result) => result,
-                    Err(e) => {
-                        tracing::error!(error = %e, "PolicyHook: policy error");
-                        let (status, msg) = match &e {
-                            PolicyError::DeniedByPolicy { policy_name } => {
-                                ("denied", format!("Access denied by policy '{policy_name}'"))
-                            }
-                            PolicyError::AllColumnsDenied { columns } => (
-                                "denied",
-                                format!(
-                                    "Column{} {} restricted by policy",
-                                    if columns.len() == 1 { "" } else { "s" },
-                                    columns.join(", ")
-                                ),
+            // Build decision evaluation context with session + query metadata.
+            let session_info = crate::decision::context::SessionInfo {
+                user_id,
+                username: username.clone(),
+                tenant: user_vars.tenant.clone(),
+                roles: session.roles.clone(),
+                datasource_name: session.datasource_name.clone(),
+                access_mode: session.access_mode.clone(),
+            };
+            let query_meta = extract_query_metadata(&logical_plan);
+            let decision_ctx =
+                crate::decision::context::build_query_context(&session_info, &query_meta);
+            let decision_eval = DecisionEvalContext {
+                engine: &self.engine,
+                plugin_module: &self.plugin_module,
+                decision_ctx,
+            };
+
+            let (final_plan, had_effects, decision_results) = match apply_policies(
+                &session,
+                session_context,
+                logical_plan,
+                &user_vars,
+                Some(&decision_eval),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!(error = %e, "PolicyHook: policy error");
+                    let (status, msg) = match &e {
+                        PolicyError::DeniedByPolicy { policy_name } => {
+                            ("denied", format!("Access denied by policy '{policy_name}'"))
+                        }
+                        PolicyError::AllColumnsDenied { columns } => (
+                            "denied",
+                            format!(
+                                "Column{} {} restricted by policy",
+                                if columns.len() == 1 { "" } else { "s" },
+                                columns.join(", ")
                             ),
-                            PolicyError::PlanTransformation(inner) => ("error", inner.to_string()),
-                        };
-                        break 'query (Err(e.into_pgwire_error()), status, Some(msg), None);
-                    }
-                };
+                        ),
+                        PolicyError::PlanTransformation(inner) => ("error", inner.to_string()),
+                    };
+                    break 'query (
+                        Err(e.into_pgwire_error()),
+                        status,
+                        Some(msg),
+                        None,
+                        HashMap::new(),
+                    );
+                }
+            };
 
             // Unparse the rewritten plan back to SQL when policy effects were applied.
             let rewritten_query = if had_effects {
@@ -1383,6 +1771,7 @@ impl QueryHook for PolicyHook {
                         "error",
                         Some(msg),
                         rewritten_query,
+                        decision_results,
                     );
                 }
             };
@@ -1393,26 +1782,52 @@ impl QueryHook for PolicyHook {
                 Err(e) => {
                     tracing::error!(error = %e, "PolicyHook: encoding error");
                     let msg = e.to_string();
-                    break 'query (Err(e), "error", Some(msg), rewritten_query);
+                    break 'query (
+                        Err(e),
+                        "error",
+                        Some(msg),
+                        rewritten_query,
+                        decision_results,
+                    );
                 }
             };
 
-            (Ok(response), "success", None, rewritten_query)
+            (
+                Ok(response),
+                "success",
+                None,
+                rewritten_query,
+                decision_results,
+            )
         };
 
         // Duration measured after the labeled block — covers planning + execution + encoding.
         let elapsed_ms = query_start.elapsed().as_millis() as i64;
 
         // Async audit log — runs on all paths (success, error, denied).
+        // Include both permit and deny policies, plus decision function results.
         let policies_applied: Vec<serde_json::Value> = session
             .permit_policies
             .iter()
+            .chain(session.deny_policies.iter())
             .map(|p| {
-                serde_json::json!({
+                let mut entry = serde_json::json!({
                     "policy_id": p.id.to_string(),
                     "version": p.version,
                     "name": p.name,
-                })
+                });
+                if let Some(dr) = decision_results.get(&p.id) {
+                    entry["decision"] = serde_json::json!({
+                        "result": {
+                            "fire": dr.fire,
+                            "fuel_consumed": dr.fuel_consumed,
+                            "time_us": dr.time_us,
+                        },
+                        "logs": dr.logs,
+                        "error": dr.error,
+                    });
+                }
+                entry
             })
             .collect();
 
@@ -1483,6 +1898,7 @@ mod tests {
             df_to_upstream,
             datasource_id: Uuid::nil(),
             datasource_name: "test_ds".to_string(),
+            roles: vec![],
         }
     }
 
@@ -1505,6 +1921,7 @@ mod tests {
                 columns: None,
             }],
             definition: Some(serde_json::json!({"filter_expression": filter})),
+            decision_function: None,
         }
     }
 
@@ -1528,6 +1945,7 @@ mod tests {
                 columns: Some(vec![column.to_string()]),
             }],
             definition: Some(serde_json::json!({"mask_expression": mask})),
+            decision_function: None,
         }
     }
 
@@ -1550,6 +1968,7 @@ mod tests {
                 columns: Some(columns.iter().map(|c| c.to_string()).collect()),
             }],
             definition: None,
+            decision_function: None,
         }
     }
 
@@ -1572,6 +1991,7 @@ mod tests {
                 columns: Some(columns.iter().map(|c| c.to_string()).collect()),
             }],
             definition: None,
+            decision_function: None,
         }
     }
 
@@ -1593,6 +2013,7 @@ mod tests {
                 columns: None,
             }],
             definition: None,
+            decision_function: None,
         }
     }
 
@@ -1808,9 +2229,10 @@ mod tests {
             vec![("id", DataType::Int32), ("status", DataType::Utf8)],
         );
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         assert_plan_contains(&result_plan, "Filter");
@@ -1838,9 +2260,10 @@ mod tests {
             ],
         );
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let display = plan_display(&result_plan);
@@ -1866,9 +2289,10 @@ mod tests {
             vec![("id", DataType::Int32), ("org", DataType::Utf8)],
         );
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         assert_plan_contains(&result_plan, "Filter");
@@ -1904,9 +2328,10 @@ mod tests {
             ],
         );
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         // ssn should be stripped from the projection
@@ -1935,7 +2360,7 @@ mod tests {
             vec![("id", DataType::Int32), ("name", DataType::Utf8)],
         );
 
-        let result = apply_policies(&session, &ctx, plan, &default_vars()).await;
+        let result = apply_policies(&session, &ctx, plan, &default_vars(), None).await;
         assert!(
             matches!(result, Err(PolicyError::AllColumnsDenied { .. })),
             "Expected AllColumnsDenied: {result:?}"
@@ -1954,7 +2379,7 @@ mod tests {
         let ctx = SessionContext::new();
         let plan = build_scan_plan("public.orders", vec![("id", DataType::Int32)]);
 
-        let result = apply_policies(&session, &ctx, plan, &default_vars()).await;
+        let result = apply_policies(&session, &ctx, plan, &default_vars(), None).await;
         assert!(
             matches!(result, Err(PolicyError::DeniedByPolicy { .. })),
             "Expected DeniedByPolicy: {result:?}"
@@ -1974,7 +2399,7 @@ mod tests {
         // Query is on "orders", deny is on "users" → should pass through
         let plan = build_scan_plan("public.orders", vec![("id", DataType::Int32)]);
 
-        let (_, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
+        let (_, had_effects, _) = apply_policies(&session, &ctx, plan, &default_vars(), None)
             .await
             .unwrap();
         assert!(!had_effects, "No effects expected when deny doesn't match");
@@ -1987,9 +2412,10 @@ mod tests {
         let ctx = SessionContext::new();
         let plan = build_scan_plan("public.orders", vec![("id", DataType::Int32)]);
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let display = plan_display(&result_plan);
@@ -2015,9 +2441,10 @@ mod tests {
         let ctx = SessionContext::new();
         let plan = build_scan_plan("public.orders", vec![("id", DataType::Int32)]);
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let display = plan_display(&result_plan);
@@ -2040,9 +2467,10 @@ mod tests {
         let ctx = SessionContext::new();
         let plan = build_scan_plan("any_schema.orders", vec![("id", DataType::Int32)]);
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         assert_plan_contains(&result_plan, "Filter");
@@ -2060,9 +2488,10 @@ mod tests {
         let ctx = SessionContext::new();
         let plan = build_scan_plan("public.anything", vec![("id", DataType::Int32)]);
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         assert_plan_contains(&result_plan, "Filter");
@@ -2086,9 +2515,10 @@ mod tests {
         // Plan uses "sales" alias, which resolves to upstream "public"
         let plan = build_scan_plan("sales.orders", vec![("id", DataType::Int32)]);
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         assert_plan_contains(&result_plan, "Filter");
@@ -2132,7 +2562,7 @@ mod tests {
             vec![("id", DataType::Int32), ("ssn", DataType::Utf8)],
         );
 
-        let (result_plan, _) = apply_policies(&session, &ctx, plan, &default_vars())
+        let (result_plan, _, _) = apply_policies(&session, &ctx, plan, &default_vars(), None)
             .await
             .unwrap();
 
@@ -2154,7 +2584,7 @@ mod tests {
         let ctx = SessionContext::new();
         let plan = build_scan_plan("public.orders", vec![("id", DataType::Int32)]);
 
-        let (_, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
+        let (_, had_effects, _) = apply_policies(&session, &ctx, plan, &default_vars(), None)
             .await
             .unwrap();
 
@@ -2249,9 +2679,10 @@ mod tests {
 
         let base_plan = ctx.sql("SELECT * FROM customers").await.unwrap();
         let plan = base_plan.logical_plan().clone();
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let batches = exec_plan(&ctx, result_plan).await;
@@ -2271,9 +2702,10 @@ mod tests {
 
         let base_plan = ctx.sql("SELECT * FROM customers").await.unwrap();
         let plan = base_plan.logical_plan().clone();
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let batches = exec_plan(&ctx, result_plan).await;
@@ -2299,7 +2731,7 @@ mod tests {
 
         let base_plan = ctx.sql("SELECT * FROM customers").await.unwrap();
         let plan = base_plan.logical_plan().clone();
-        let result = apply_policies(&session, &ctx, plan, &default_vars()).await;
+        let result = apply_policies(&session, &ctx, plan, &default_vars(), None).await;
 
         assert!(
             matches!(result, Err(PolicyError::DeniedByPolicy { .. })),
@@ -2315,9 +2747,10 @@ mod tests {
 
         let base_plan = ctx.sql("SELECT * FROM customers").await.unwrap();
         let plan = base_plan.logical_plan().clone();
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let batches = exec_plan(&ctx, result_plan).await;
@@ -2348,7 +2781,7 @@ mod tests {
 
         let base_plan = ctx.sql("SELECT * FROM customers").await.unwrap();
         let plan = base_plan.logical_plan().clone();
-        let (result_plan, _) = apply_policies(&session, &ctx, plan, &default_vars())
+        let (result_plan, _, _) = apply_policies(&session, &ctx, plan, &default_vars(), None)
             .await
             .unwrap();
 
@@ -2376,7 +2809,7 @@ mod tests {
 
         let base_plan = ctx.sql("SELECT * FROM customers").await.unwrap();
         let plan = base_plan.logical_plan().clone();
-        let (result_plan, _) = apply_policies(&session, &ctx, plan, &default_vars())
+        let (result_plan, _, _) = apply_policies(&session, &ctx, plan, &default_vars(), None)
             .await
             .unwrap();
 
@@ -2406,7 +2839,7 @@ mod tests {
 
         let base_plan = ctx.sql("SELECT * FROM customers").await.unwrap();
         let plan = base_plan.logical_plan().clone();
-        let (result_plan, _) = apply_policies(&session, &ctx, plan, &default_vars())
+        let (result_plan, _, _) = apply_policies(&session, &ctx, plan, &default_vars(), None)
             .await
             .unwrap();
 
@@ -2438,9 +2871,10 @@ mod tests {
 
         let base_plan = ctx.sql("SELECT * FROM customers").await.unwrap();
         let plan = base_plan.logical_plan().clone();
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let batches = exec_plan(&ctx, result_plan).await;
@@ -2479,9 +2913,10 @@ mod tests {
 
         let base_plan = ctx.sql("SELECT * FROM customers").await.unwrap();
         let plan = base_plan.logical_plan().clone();
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let batches = exec_plan(&ctx, result_plan).await;
@@ -2516,7 +2951,7 @@ mod tests {
 
         let base_plan = ctx.sql("SELECT * FROM customers").await.unwrap();
         let plan = base_plan.logical_plan().clone();
-        let result = apply_policies(&session, &ctx, plan, &default_vars()).await;
+        let result = apply_policies(&session, &ctx, plan, &default_vars(), None).await;
 
         assert!(
             matches!(result, Err(PolicyError::AllColumnsDenied { .. })),
@@ -2549,9 +2984,10 @@ mod tests {
 
         let base_plan = ctx.sql("SELECT * FROM customers").await.unwrap();
         let plan = base_plan.logical_plan().clone();
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let batches = exec_plan(&ctx, result_plan).await;
@@ -2587,9 +3023,10 @@ mod tests {
 
         let base_plan = ctx.sql("SELECT * FROM customers").await.unwrap();
         let plan = base_plan.logical_plan().clone();
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let batches = exec_plan(&ctx, result_plan).await;
@@ -2629,9 +3066,10 @@ mod tests {
             ],
         );
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let schema = result_plan.schema();
@@ -2666,7 +3104,7 @@ mod tests {
             vec![("id", DataType::Int32), ("name", DataType::Utf8)],
         );
 
-        let result = apply_policies(&session, &ctx, plan, &default_vars()).await;
+        let result = apply_policies(&session, &ctx, plan, &default_vars(), None).await;
         assert!(
             matches!(result, Err(PolicyError::AllColumnsDenied { .. })),
             "Expected AllColumnsDenied: {result:?}"
@@ -2701,9 +3139,10 @@ mod tests {
             vec![("id", DataType::Int32), ("secret_val", DataType::Utf8)],
         );
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let schema = result_plan.schema();
@@ -2784,9 +3223,10 @@ mod tests {
             ],
         );
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let schema = result_plan.schema();
@@ -2833,9 +3273,10 @@ mod tests {
             ],
         );
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
         assert!(had_effects);
         let schema = result_plan.schema();
         let col_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -2869,7 +3310,7 @@ mod tests {
 
         let user_tables = collect_user_tables(&plan);
         let vars = default_vars();
-        let effects = PolicyEffects::collect(&session, &user_tables, &vars, &ctx);
+        let effects = PolicyEffects::collect(&session, &user_tables, &vars, &ctx, None).await;
 
         // Pattern is stored as-is; expansion happens at injection time.
         let key = ("public".to_string(), "events".to_string());
@@ -2909,9 +3350,10 @@ mod tests {
             ],
         );
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let schema = result_plan.schema();
@@ -2945,9 +3387,10 @@ mod tests {
             vec![("id", DataType::Int32), ("name", DataType::Utf8)],
         );
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let display = plan_display(&result_plan);
@@ -2979,9 +3422,10 @@ mod tests {
             ],
         );
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let display = plan_display(&result_plan);
@@ -3021,9 +3465,10 @@ mod tests {
             vec![("id", DataType::Int32), ("ssn", DataType::Utf8)],
         );
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let display = plan_display(&result_plan);
@@ -3062,9 +3507,10 @@ mod tests {
             ],
         );
 
-        let (result_plan, had_effects) = apply_policies(&session, &ctx, plan, &default_vars())
-            .await
-            .unwrap();
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
 
         assert!(had_effects);
         let schema = result_plan.schema();
@@ -3077,5 +3523,720 @@ mod tests {
             col_names.contains(&"total"),
             "orders.total remains: {col_names:?}"
         );
+    }
+
+    // ---------- decision function tests ----------
+
+    fn javy_available() -> bool {
+        std::process::Command::new("javy")
+            .arg("--version")
+            .output()
+            .is_ok()
+    }
+
+    fn make_decision_function(
+        wasm_bytes: Vec<u8>,
+        config: Option<serde_json::Value>,
+        evaluate_context: &str,
+        on_error: &str,
+        log_level: &str,
+        is_enabled: bool,
+    ) -> ResolvedDecisionFunction {
+        ResolvedDecisionFunction {
+            id: Uuid::now_v7(),
+            decision_wasm: Some(wasm_bytes),
+            decision_config: config,
+            evaluate_context: evaluate_context.to_string(),
+            on_error: on_error.to_string(),
+            log_level: log_level.to_string(),
+            is_enabled,
+        }
+    }
+
+    /// Compile JS source to dynamic-mode WASM bytecode via javy CLI (blocking, for tests).
+    fn compile_js_sync(js_source: &str) -> Vec<u8> {
+        let tmp_dir = std::env::temp_dir();
+        let unique = Uuid::now_v7();
+        let input_path = tmp_dir.join(format!("br_test_{unique}.js"));
+        let output_path = tmp_dir.join(format!("br_test_{unique}.wasm"));
+        let plugin_path = crate::decision::wasm::plugin_file_path();
+
+        let wrapped = format!(
+            r#"var evaluate = (function() {{
+    "use strict";
+    {js_source}
+    if (typeof evaluate !== 'function') {{
+        throw new Error('Decision function must define an evaluate(ctx, config) function');
+    }}
+    return evaluate;
+}})();
+
+function __br_readStdin() {{
+    const chunks = [];
+    let total = 0;
+    while (true) {{
+        const buf = new Uint8Array(4096);
+        const n = Javy.IO.readSync(0, buf);
+        if (n === 0) break;
+        chunks.push(buf.subarray(0, n));
+        total += n;
+    }}
+    const all = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {{ all.set(c, off); off += c.length; }}
+    return all;
+}}
+
+const input = JSON.parse(new TextDecoder().decode(__br_readStdin()));
+const result = evaluate(input.ctx, input.config);
+if (typeof result !== 'object' || result === null || typeof result.fire !== 'boolean') {{
+    throw new Error('Decision function must return {{ fire: boolean }}');
+}}
+Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
+"#
+        );
+
+        std::fs::write(&input_path, &wrapped).unwrap();
+        let javy = crate::decision::wasm::javy_cli_path();
+        let output = std::process::Command::new(javy)
+            .arg("build")
+            .arg("-C")
+            .arg("dynamic")
+            .arg("-C")
+            .arg(format!("plugin={}", plugin_path.display()))
+            .arg("-o")
+            .arg(&output_path)
+            .arg(&input_path)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input_path);
+        assert!(
+            output.status.success(),
+            "javy build failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let wasm = std::fs::read(&output_path).unwrap();
+        let _ = std::fs::remove_file(&output_path);
+        wasm
+    }
+
+    fn make_wasm_engine() -> wasmtime::Engine {
+        let mut config = wasmtime::Config::new();
+        config.consume_fuel(true);
+        config.wasm_memory64(false);
+        wasmtime::Engine::new(&config).unwrap()
+    }
+
+    fn make_plugin_module(engine: &wasmtime::Engine) -> wasmtime::Module {
+        wasmtime::Module::new(engine, crate::decision::wasm::PLUGIN_WASM).unwrap()
+    }
+
+    #[tokio::test]
+    async fn decision_fn_fire_true_applies_policy() {
+        if !javy_available() {
+            eprintln!("Skipping: javy CLI not available");
+            return;
+        }
+
+        let wasm = compile_js_sync(r#"function evaluate(ctx, config) { return { fire: true }; }"#);
+        let df = make_decision_function(wasm, None, "session", "deny", "off", true);
+
+        let policy = ResolvedPolicy {
+            id: Uuid::now_v7(),
+            name: "filter_with_df_true".to_string(),
+            policy_type: PolicyType::RowFilter,
+            version: 1,
+            priority: 1,
+            targets: vec![TargetEntry {
+                schemas: vec!["public".to_string()],
+                tables: vec!["orders".to_string()],
+                columns: None,
+            }],
+            definition: Some(serde_json::json!({"filter_expression": "status = 'active'"})),
+            decision_function: Some(df),
+        };
+
+        let session = make_session(vec![policy], vec![], "open", HashMap::new());
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.orders",
+            vec![("id", DataType::Int32), ("status", DataType::Utf8)],
+        );
+
+        let engine = make_wasm_engine();
+        let plugin_module = make_plugin_module(&engine);
+        let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
+        let eval = DecisionEvalContext {
+            engine: &engine,
+            plugin_module: &plugin_module,
+            decision_ctx,
+        };
+
+        let (result_plan, had_effects, decision_results) =
+            apply_policies(&session, &ctx, plan, &default_vars(), Some(&eval))
+                .await
+                .unwrap();
+
+        assert!(had_effects, "Policy with fire:true should apply effects");
+        let display = plan_display(&result_plan);
+        assert!(
+            display.contains("Filter"),
+            "Row filter should be applied: {display}"
+        );
+        assert!(!decision_results.is_empty(), "Should have decision results");
+        let dr = decision_results.values().next().unwrap();
+        assert!(dr.fire);
+    }
+
+    #[tokio::test]
+    async fn decision_fn_fire_false_skips_policy() {
+        if !javy_available() {
+            eprintln!("Skipping: javy CLI not available");
+            return;
+        }
+
+        let wasm = compile_js_sync(r#"function evaluate(ctx, config) { return { fire: false }; }"#);
+        let df = make_decision_function(wasm, None, "session", "deny", "off", true);
+
+        let policy = ResolvedPolicy {
+            id: Uuid::now_v7(),
+            name: "filter_with_df_false".to_string(),
+            policy_type: PolicyType::RowFilter,
+            version: 1,
+            priority: 1,
+            targets: vec![TargetEntry {
+                schemas: vec!["public".to_string()],
+                tables: vec!["orders".to_string()],
+                columns: None,
+            }],
+            definition: Some(serde_json::json!({"filter_expression": "status = 'active'"})),
+            decision_function: Some(df),
+        };
+
+        let session = make_session(vec![policy], vec![], "open", HashMap::new());
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.orders",
+            vec![("id", DataType::Int32), ("status", DataType::Utf8)],
+        );
+
+        let engine = make_wasm_engine();
+        let plugin_module = make_plugin_module(&engine);
+        let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
+        let eval = DecisionEvalContext {
+            engine: &engine,
+            plugin_module: &plugin_module,
+            decision_ctx,
+        };
+
+        let (result_plan, had_effects, decision_results) =
+            apply_policies(&session, &ctx, plan, &default_vars(), Some(&eval))
+                .await
+                .unwrap();
+
+        assert!(
+            !had_effects,
+            "Policy with fire:false should not apply effects"
+        );
+        let display = plan_display(&result_plan);
+        assert!(
+            !display.contains("Filter"),
+            "No filter should be applied: {display}"
+        );
+        let dr = decision_results.values().next().unwrap();
+        assert!(!dr.fire);
+    }
+
+    #[tokio::test]
+    async fn no_decision_fn_always_fires() {
+        // Policy without decision function → effect always applied (backward compat)
+        let policy = make_row_filter_policy("no_df", 1, "public", "orders", "status = 'active'");
+        let session = make_session(vec![policy], vec![], "open", HashMap::new());
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.orders",
+            vec![("id", DataType::Int32), ("status", DataType::Utf8)],
+        );
+
+        // Pass None for decision_eval — backward compatibility
+        let (_, had_effects, _) = apply_policies(&session, &ctx, plan, &default_vars(), None)
+            .await
+            .unwrap();
+        assert!(had_effects, "Policy without decision fn should always fire");
+    }
+
+    #[tokio::test]
+    async fn decision_fn_disabled_always_fires() {
+        if !javy_available() {
+            eprintln!("Skipping: javy CLI not available");
+            return;
+        }
+
+        let wasm = compile_js_sync(r#"function evaluate(ctx, config) { return { fire: false }; }"#);
+        // is_enabled = false → function gate disabled, policy fires regardless
+        let df = make_decision_function(wasm, None, "session", "deny", "off", false);
+
+        let policy = ResolvedPolicy {
+            id: Uuid::now_v7(),
+            name: "disabled_df".to_string(),
+            policy_type: PolicyType::RowFilter,
+            version: 1,
+            priority: 1,
+            targets: vec![TargetEntry {
+                schemas: vec!["public".to_string()],
+                tables: vec!["orders".to_string()],
+                columns: None,
+            }],
+            definition: Some(serde_json::json!({"filter_expression": "status = 'active'"})),
+            decision_function: Some(df),
+        };
+
+        let session = make_session(vec![policy], vec![], "open", HashMap::new());
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.orders",
+            vec![("id", DataType::Int32), ("status", DataType::Utf8)],
+        );
+
+        let engine = make_wasm_engine();
+        let plugin_module = make_plugin_module(&engine);
+        let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
+        let eval = DecisionEvalContext {
+            engine: &engine,
+            plugin_module: &plugin_module,
+            decision_ctx,
+        };
+
+        let (_, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), Some(&eval))
+                .await
+                .unwrap();
+        assert!(
+            had_effects,
+            "Disabled decision fn should not gate the policy"
+        );
+    }
+
+    #[tokio::test]
+    async fn decision_fn_on_error_deny_fires() {
+        if !javy_available() {
+            eprintln!("Skipping: javy CLI not available");
+            return;
+        }
+
+        // Function that will throw a runtime error
+        let wasm =
+            compile_js_sync(r#"function evaluate(ctx, config) { throw new Error("boom"); }"#);
+        let df = make_decision_function(wasm, None, "session", "deny", "off", true);
+
+        let policy = ResolvedPolicy {
+            id: Uuid::now_v7(),
+            name: "error_deny".to_string(),
+            policy_type: PolicyType::RowFilter,
+            version: 1,
+            priority: 1,
+            targets: vec![TargetEntry {
+                schemas: vec!["public".to_string()],
+                tables: vec!["orders".to_string()],
+                columns: None,
+            }],
+            definition: Some(serde_json::json!({"filter_expression": "status = 'active'"})),
+            decision_function: Some(df),
+        };
+
+        let session = make_session(vec![policy], vec![], "open", HashMap::new());
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.orders",
+            vec![("id", DataType::Int32), ("status", DataType::Utf8)],
+        );
+
+        let engine = make_wasm_engine();
+        let plugin_module = make_plugin_module(&engine);
+        let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
+        let eval = DecisionEvalContext {
+            engine: &engine,
+            plugin_module: &plugin_module,
+            decision_ctx,
+        };
+
+        let (_, had_effects, decision_results) =
+            apply_policies(&session, &ctx, plan, &default_vars(), Some(&eval))
+                .await
+                .unwrap();
+        assert!(had_effects, "on_error=deny should fire the policy");
+        let dr = decision_results.values().next().unwrap();
+        assert!(dr.fire, "on_error=deny: fire should be true");
+        assert!(dr.error.is_some(), "Should have error message");
+    }
+
+    #[tokio::test]
+    async fn decision_fn_on_error_skip_does_not_fire() {
+        if !javy_available() {
+            eprintln!("Skipping: javy CLI not available");
+            return;
+        }
+
+        let wasm =
+            compile_js_sync(r#"function evaluate(ctx, config) { throw new Error("boom"); }"#);
+        let df = make_decision_function(wasm, None, "session", "skip", "off", true);
+
+        let policy = ResolvedPolicy {
+            id: Uuid::now_v7(),
+            name: "error_skip".to_string(),
+            policy_type: PolicyType::RowFilter,
+            version: 1,
+            priority: 1,
+            targets: vec![TargetEntry {
+                schemas: vec!["public".to_string()],
+                tables: vec!["orders".to_string()],
+                columns: None,
+            }],
+            definition: Some(serde_json::json!({"filter_expression": "status = 'active'"})),
+            decision_function: Some(df),
+        };
+
+        let session = make_session(vec![policy], vec![], "open", HashMap::new());
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.orders",
+            vec![("id", DataType::Int32), ("status", DataType::Utf8)],
+        );
+
+        let engine = make_wasm_engine();
+        let plugin_module = make_plugin_module(&engine);
+        let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
+        let eval = DecisionEvalContext {
+            engine: &engine,
+            plugin_module: &plugin_module,
+            decision_ctx,
+        };
+
+        let (_, had_effects, decision_results) =
+            apply_policies(&session, &ctx, plan, &default_vars(), Some(&eval))
+                .await
+                .unwrap();
+        assert!(!had_effects, "on_error=skip should not fire the policy");
+        let dr = decision_results.values().next().unwrap();
+        assert!(!dr.fire, "on_error=skip: fire should be false");
+        assert!(dr.error.is_some(), "Should have error message");
+    }
+
+    #[tokio::test]
+    async fn decision_fn_query_context_available() {
+        if !javy_available() {
+            eprintln!("Skipping: javy CLI not available");
+            return;
+        }
+
+        // Function that checks query context is present
+        let wasm = compile_js_sync(
+            r#"function evaluate(ctx, config) {
+                return {
+                    fire: ctx.query !== undefined
+                        && ctx.query.tables.length > 0
+                        && typeof ctx.query.join_count === 'number'
+                };
+            }"#,
+        );
+        let df = make_decision_function(wasm, None, "query", "deny", "off", true);
+
+        let policy = ResolvedPolicy {
+            id: Uuid::now_v7(),
+            name: "query_ctx_check".to_string(),
+            policy_type: PolicyType::RowFilter,
+            version: 1,
+            priority: 1,
+            targets: vec![TargetEntry {
+                schemas: vec!["public".to_string()],
+                tables: vec!["orders".to_string()],
+                columns: None,
+            }],
+            definition: Some(serde_json::json!({"filter_expression": "status = 'active'"})),
+            decision_function: Some(df),
+        };
+
+        let session = make_session(vec![policy], vec![], "open", HashMap::new());
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.orders",
+            vec![("id", DataType::Int32), ("status", DataType::Utf8)],
+        );
+
+        let engine = make_wasm_engine();
+        let plugin_module = make_plugin_module(&engine);
+        // Build query context (has query.tables, query.join_count, etc.)
+        let decision_ctx = crate::decision::context::build_query_context(
+            &crate::decision::context::SessionInfo {
+                user_id: Uuid::nil(),
+                username: "alice".to_string(),
+                tenant: "acme".to_string(),
+                roles: vec!["analyst".to_string()],
+                datasource_name: "test_ds".to_string(),
+                access_mode: "open".to_string(),
+            },
+            &crate::decision::context::QueryMetadata {
+                tables: vec!["public.orders".to_string()],
+                columns: vec!["id".to_string(), "status".to_string()],
+                join_count: 0,
+                has_aggregation: false,
+                has_subquery: false,
+                has_where: false,
+                statement_type: "SELECT".to_string(),
+            },
+        );
+        let eval = DecisionEvalContext {
+            engine: &engine,
+            plugin_module: &plugin_module,
+            decision_ctx,
+        };
+
+        let (_, had_effects, decision_results) =
+            apply_policies(&session, &ctx, plan, &default_vars(), Some(&eval))
+                .await
+                .unwrap();
+        assert!(
+            had_effects,
+            "Query-mode fn should fire when query context is available"
+        );
+        let dr = decision_results.values().next().unwrap();
+        assert!(
+            dr.fire,
+            "Function should see query context and return fire:true"
+        );
+    }
+
+    #[tokio::test]
+    async fn decision_fn_session_context_no_query() {
+        if !javy_available() {
+            eprintln!("Skipping: javy CLI not available");
+            return;
+        }
+
+        // Session-mode function checks that query is NOT present
+        let wasm = compile_js_sync(
+            r#"function evaluate(ctx, config) {
+                return { fire: ctx.session !== undefined && ctx.session.user.username === 'alice' };
+            }"#,
+        );
+        let df = make_decision_function(wasm, None, "session", "deny", "off", true);
+
+        let policy = ResolvedPolicy {
+            id: Uuid::now_v7(),
+            name: "session_ctx_check".to_string(),
+            policy_type: PolicyType::RowFilter,
+            version: 1,
+            priority: 1,
+            targets: vec![TargetEntry {
+                schemas: vec!["public".to_string()],
+                tables: vec!["orders".to_string()],
+                columns: None,
+            }],
+            definition: Some(serde_json::json!({"filter_expression": "status = 'active'"})),
+            decision_function: Some(df),
+        };
+
+        let session = make_session(vec![policy], vec![], "open", HashMap::new());
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.orders",
+            vec![("id", DataType::Int32), ("status", DataType::Utf8)],
+        );
+
+        let engine = make_wasm_engine();
+        let plugin_module = make_plugin_module(&engine);
+        // Build session-only context (no query field)
+        let decision_ctx = crate::decision::context::build_session_context(
+            &crate::decision::context::SessionInfo {
+                user_id: Uuid::nil(),
+                username: "alice".to_string(),
+                tenant: "acme".to_string(),
+                roles: vec![],
+                datasource_name: "test_ds".to_string(),
+                access_mode: "open".to_string(),
+            },
+        );
+        let eval = DecisionEvalContext {
+            engine: &engine,
+            plugin_module: &plugin_module,
+            decision_ctx,
+        };
+
+        let (_, had_effects, decision_results) =
+            apply_policies(&session, &ctx, plan, &default_vars(), Some(&eval))
+                .await
+                .unwrap();
+        assert!(
+            had_effects,
+            "Session-mode fn should fire with session context"
+        );
+        let dr = decision_results.values().next().unwrap();
+        assert!(dr.fire);
+    }
+
+    #[tokio::test]
+    async fn decision_fn_with_config() {
+        if !javy_available() {
+            eprintln!("Skipping: javy CLI not available");
+            return;
+        }
+
+        let wasm = compile_js_sync(
+            r#"function evaluate(ctx, config) {
+                return { fire: config.threshold <= 10 };
+            }"#,
+        );
+        let df = make_decision_function(
+            wasm,
+            Some(serde_json::json!({"threshold": 5})),
+            "session",
+            "deny",
+            "off",
+            true,
+        );
+
+        let policy = ResolvedPolicy {
+            id: Uuid::now_v7(),
+            name: "config_test".to_string(),
+            policy_type: PolicyType::RowFilter,
+            version: 1,
+            priority: 1,
+            targets: vec![TargetEntry {
+                schemas: vec!["public".to_string()],
+                tables: vec!["orders".to_string()],
+                columns: None,
+            }],
+            definition: Some(serde_json::json!({"filter_expression": "status = 'active'"})),
+            decision_function: Some(df),
+        };
+
+        let session = make_session(vec![policy], vec![], "open", HashMap::new());
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.orders",
+            vec![("id", DataType::Int32), ("status", DataType::Utf8)],
+        );
+
+        let engine = make_wasm_engine();
+        let plugin_module = make_plugin_module(&engine);
+        let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
+        let eval = DecisionEvalContext {
+            engine: &engine,
+            plugin_module: &plugin_module,
+            decision_ctx,
+        };
+
+        let (_, had_effects, decision_results) =
+            apply_policies(&session, &ctx, plan, &default_vars(), Some(&eval))
+                .await
+                .unwrap();
+        assert!(had_effects, "Config threshold=5 <= 10, should fire");
+        let dr = decision_results.values().next().unwrap();
+        assert!(dr.fire);
+    }
+
+    #[tokio::test]
+    async fn decision_fn_on_deny_policy() {
+        if !javy_available() {
+            eprintln!("Skipping: javy CLI not available");
+            return;
+        }
+
+        // Decision fn on a table_deny policy returning fire:false → deny skipped
+        let wasm = compile_js_sync(r#"function evaluate(ctx, config) { return { fire: false }; }"#);
+        let df = make_decision_function(wasm, None, "session", "deny", "off", true);
+
+        let policy = ResolvedPolicy {
+            id: Uuid::now_v7(),
+            name: "conditional_deny".to_string(),
+            policy_type: PolicyType::TableDeny,
+            version: 1,
+            priority: 1,
+            targets: vec![TargetEntry {
+                schemas: vec!["public".to_string()],
+                tables: vec!["orders".to_string()],
+                columns: None,
+            }],
+            definition: None,
+            decision_function: Some(df),
+        };
+
+        let session = make_session(vec![], vec![policy], "open", HashMap::new());
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.orders",
+            vec![("id", DataType::Int32), ("status", DataType::Utf8)],
+        );
+
+        let engine = make_wasm_engine();
+        let plugin_module = make_plugin_module(&engine);
+        let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
+        let eval = DecisionEvalContext {
+            engine: &engine,
+            plugin_module: &plugin_module,
+            decision_ctx,
+        };
+
+        // Should NOT be denied because decision fn returns fire:false
+        let result = apply_policies(&session, &ctx, plan, &default_vars(), Some(&eval)).await;
+        assert!(result.is_ok(), "table_deny with fire:false should not deny");
+    }
+
+    #[tokio::test]
+    async fn decision_results_populated() {
+        if !javy_available() {
+            eprintln!("Skipping: javy CLI not available");
+            return;
+        }
+
+        let wasm = compile_js_sync(r#"function evaluate(ctx, config) { return { fire: true }; }"#);
+        let df = make_decision_function(wasm, None, "session", "deny", "off", true);
+
+        let policy_id = Uuid::now_v7();
+        let policy = ResolvedPolicy {
+            id: policy_id,
+            name: "results_check".to_string(),
+            policy_type: PolicyType::RowFilter,
+            version: 1,
+            priority: 1,
+            targets: vec![TargetEntry {
+                schemas: vec!["public".to_string()],
+                tables: vec!["orders".to_string()],
+                columns: None,
+            }],
+            definition: Some(serde_json::json!({"filter_expression": "status = 'active'"})),
+            decision_function: Some(df),
+        };
+
+        let session = make_session(vec![policy], vec![], "open", HashMap::new());
+        let ctx = SessionContext::new();
+        let plan = build_scan_plan(
+            "public.orders",
+            vec![("id", DataType::Int32), ("status", DataType::Utf8)],
+        );
+
+        let engine = make_wasm_engine();
+        let plugin_module = make_plugin_module(&engine);
+        let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
+        let eval = DecisionEvalContext {
+            engine: &engine,
+            plugin_module: &plugin_module,
+            decision_ctx,
+        };
+
+        let (_, _, decision_results) =
+            apply_policies(&session, &ctx, plan, &default_vars(), Some(&eval))
+                .await
+                .unwrap();
+
+        assert!(
+            decision_results.contains_key(&policy_id),
+            "decision_results should contain the policy ID"
+        );
+        let dr = &decision_results[&policy_id];
+        assert!(dr.fire);
+        assert!(dr.fuel_consumed > 0, "Should have consumed some fuel");
+        assert!(dr.time_us > 0, "Should have nonzero execution time");
+        assert!(dr.error.is_none());
     }
 }

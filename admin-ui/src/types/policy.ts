@@ -1,3 +1,5 @@
+import type { DecisionFunctionSummary } from './decisionFunction'
+
 export type PolicyType = 'row_filter' | 'column_mask' | 'column_allow' | 'column_deny' | 'table_deny'
 
 export type AssignmentScope = 'all' | 'user' | 'role'
@@ -32,6 +34,8 @@ export interface PolicyResponse {
   definition: Record<string, string> | null
   is_enabled: boolean
   version: number
+  decision_function_id?: string | null
+  decision_function?: DecisionFunctionSummary | null
   assignment_count: number
   created_by: string
   updated_by: string
@@ -47,6 +51,7 @@ export interface CreatePolicyPayload {
   is_enabled: boolean
   targets: TargetEntry[]
   definition?: Record<string, string> | null
+  decision_function_id?: string | null
 }
 
 export interface UpdatePolicyPayload {
@@ -56,6 +61,7 @@ export interface UpdatePolicyPayload {
   is_enabled?: boolean
   targets?: TargetEntry[]
   definition?: Record<string, string> | null
+  decision_function_id?: string | null
   version: number
 }
 

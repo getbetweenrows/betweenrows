@@ -5,6 +5,7 @@
 pub mod admin;
 pub mod auth;
 pub mod crypto;
+pub mod decision;
 pub mod discovery;
 pub mod engine;
 pub mod entity;

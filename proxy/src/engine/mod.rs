@@ -24,7 +24,10 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as AsyncRwLock;
 use uuid::Uuid;
 
-use crate::entity::{data_source, discovered_column, discovered_schema, discovered_table, policy};
+use crate::entity::{
+    data_source, decision_function, discovered_column, discovered_schema, discovered_table, policy,
+    proxy_user, role,
+};
 
 // ---------- custom dialect for JSON pushdown ----------
 
@@ -782,15 +785,28 @@ pub struct EngineCache {
     /// Shared LazyPool per datasource. Survives catalog invalidation so
     /// re-discovery after catalog changes reuses the existing upstream connection pool.
     pools: AsyncRwLock<HashMap<String, Arc<LazyPool>>>,
+    /// Shared wasmtime Engine for evaluating decision functions at visibility time.
+    wasm_engine: wasmtime::Engine,
+    /// Pre-compiled QuickJS engine plugin module (compiled once at startup).
+    plugin_module: wasmtime::Module,
 }
 
 impl EngineCache {
     pub fn new(db: DatabaseConnection, master_key: [u8; 32]) -> Arc<Self> {
+        let mut config = wasmtime::Config::new();
+        config.consume_fuel(true);
+        config.wasm_memory64(false);
+        let wasm_engine = wasmtime::Engine::new(&config).expect("Failed to create wasmtime engine");
+        let plugin_module = wasmtime::Module::new(&wasm_engine, crate::decision::wasm::PLUGIN_WASM)
+            .expect("Failed to compile QuickJS plugin");
+
         Arc::new(Self {
             db,
             master_key,
             catalogs: AsyncRwLock::new(HashMap::new()),
             pools: AsyncRwLock::new(HashMap::new()),
+            wasm_engine,
+            plugin_module,
         })
     }
 
@@ -946,6 +962,84 @@ impl EngineCache {
         p
     }
 
+    /// Evaluate a decision function at visibility time (session context only).
+    ///
+    /// Returns `true` if the policy should fire (apply its effect), `false` to skip.
+    /// - `is_enabled = false` → `true` (gate disabled, apply unconditionally)
+    /// - `evaluate_context = "query"` → `false` (skip at visibility; policy deferred to query time)
+    /// - `decision_wasm` is None or empty → `true` (not compiled yet, apply unconditionally)
+    /// - `evaluate_context = "session"` → evaluate WASM and return `fire` result
+    async fn evaluate_visibility_decision_fn(
+        &self,
+        df: &decision_function::Model,
+        session_ctx: &serde_json::Value,
+    ) -> bool {
+        if !df.is_enabled {
+            return true; // Gate disabled → apply unconditionally
+        }
+
+        if df.evaluate_context == "query" {
+            return false; // Deferred to query time — skip visibility effect
+        }
+
+        let wasm_bytes = match &df.decision_wasm {
+            Some(bytes) if !bytes.is_empty() => bytes.clone(),
+            _ => return true, // Not compiled yet → apply unconditionally
+        };
+
+        let config: serde_json::Value = df
+            .decision_config
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(serde_json::json!({}));
+
+        let fuel_limit = crate::decision::wasm::DEFAULT_FUEL_LIMIT;
+        let engine = self.wasm_engine.clone();
+        let plugin_module = self.plugin_module.clone();
+        let ctx_clone = session_ctx.clone();
+        let log_level = df.log_level.clone();
+        let on_error = df.on_error.clone();
+        let df_name = df.name.clone();
+
+        let spawn_result = tokio::task::spawn_blocking(move || {
+            let bytecode_module = wasmtime::Module::new(&engine, &wasm_bytes).map_err(|e| {
+                crate::decision::RuntimeError::ExecutionError(format!(
+                    "WASM bytecode compilation failed: {e}"
+                ))
+            })?;
+            crate::decision::wasm::evaluate_wasm_sync(
+                &engine,
+                &plugin_module,
+                &bytecode_module,
+                &ctx_clone,
+                &config,
+                fuel_limit,
+                &log_level,
+            )
+        })
+        .await;
+
+        match spawn_result {
+            Ok(Ok(result)) => result.fire,
+            Ok(Err(e)) => {
+                tracing::error!(
+                    decision_function = %df_name,
+                    error = %e,
+                    "Visibility decision function evaluation failed"
+                );
+                on_error == "deny"
+            }
+            Err(join_err) => {
+                tracing::error!(
+                    decision_function = %df_name,
+                    error = %join_err,
+                    "Visibility decision function task panicked"
+                );
+                on_error == "deny"
+            }
+        }
+    }
+
     /// Compute what tables and columns a user can see, given their policy assignments.
     async fn compute_user_visibility(
         &self,
@@ -997,6 +1091,79 @@ impl EngineCache {
             .await
             .map_err(|e| EngineError(format!("DB error loading policies: {e}")))?;
 
+        // Batch-load decision functions referenced by visibility-affecting policies
+        let df_ids: Vec<Uuid> = policies
+            .iter()
+            .filter(|p| {
+                p.policy_type
+                    .parse::<PolicyType>()
+                    .map(|pt| pt.affects_visibility())
+                    .unwrap_or(false)
+            })
+            .filter_map(|p| p.decision_function_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let df_map: HashMap<Uuid, decision_function::Model> = if !df_ids.is_empty() {
+            decision_function::Entity::find()
+                .filter(decision_function::Column::Id.is_in(df_ids))
+                .all(&self.db)
+                .await
+                .map_err(|e| EngineError(format!("DB error loading decision functions: {e}")))?
+                .into_iter()
+                .map(|df| (df.id, df))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+
+        // Build session context for decision function evaluation (only if needed)
+        let session_ctx = if !df_map.is_empty() {
+            let user = proxy_user::Entity::find_by_id(user_id)
+                .one(&self.db)
+                .await
+                .map_err(|e| EngineError(format!("DB error loading user: {e}")))?
+                .ok_or_else(|| EngineError(format!("User {user_id} not found")))?;
+
+            let role_ids = crate::role_resolver::resolve_user_roles(&self.db, user_id)
+                .await
+                .map_err(|e| EngineError(format!("DB error resolving roles: {e}")))?;
+            let role_names: Vec<String> = if !role_ids.is_empty() {
+                role::Entity::find()
+                    .filter(role::Column::Id.is_in(role_ids))
+                    .all(&self.db)
+                    .await
+                    .map_err(|e| EngineError(format!("DB error loading roles: {e}")))?
+                    .into_iter()
+                    .map(|r| r.name)
+                    .collect()
+            } else {
+                vec![]
+            };
+
+            // Resolve datasource name from catalog (catalog stores it)
+            let ds = data_source::Entity::find_by_id(catalog.datasource_id)
+                .one(&self.db)
+                .await
+                .map_err(|e| EngineError(format!("DB error loading datasource: {e}")))?
+                .ok_or_else(|| EngineError("Datasource not found".to_string()))?;
+
+            let session_info = crate::decision::context::SessionInfo {
+                user_id,
+                username: user.username,
+                tenant: user.tenant,
+                roles: role_names,
+                datasource_name: ds.name,
+                access_mode: catalog.access_mode.clone(),
+            };
+            Some(crate::decision::context::build_session_context(
+                &session_info,
+            ))
+        } else {
+            None
+        };
+
         let mut visible_tables: HashSet<(String, String)> = HashSet::new();
         let mut denied_columns: HashSet<(String, String, String)> = HashSet::new();
         let mut denied_schemas: HashSet<String> = HashSet::new();
@@ -1009,6 +1176,17 @@ impl EngineCache {
                 Ok(pt) => pt,
                 Err(_) => continue,
             };
+
+            // Evaluate decision function for visibility-affecting policies
+            if policy_type.affects_visibility()
+                && let Some(df_id) = p.decision_function_id
+                && let Some(df) = df_map.get(&df_id)
+                && let Some(ctx) = &session_ctx
+                && !self.evaluate_visibility_decision_fn(df, ctx).await
+            {
+                continue; // Decision function says skip this policy
+            }
+
             let targets: Vec<TargetEntry> = serde_json::from_str(&p.targets).unwrap_or_default();
 
             match policy_type {
@@ -2129,6 +2307,7 @@ mod tests {
             definition: sea_orm::Set(None),
             is_enabled: sea_orm::Set(is_enabled),
             version: sea_orm::Set(1),
+            decision_function_id: sea_orm::Set(None),
             created_by: sea_orm::Set(user_id),
             updated_by: sea_orm::Set(user_id),
             created_at: sea_orm::Set(now),
@@ -2633,6 +2812,7 @@ mod tests {
             definition: sea_orm::Set(None),
             is_enabled: sea_orm::Set(true),
             version: sea_orm::Set(1),
+            decision_function_id: sea_orm::Set(None),
             created_by: sea_orm::Set(user_id),
             updated_by: sea_orm::Set(user_id),
             created_at: sea_orm::Set(now),

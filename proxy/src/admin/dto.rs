@@ -1,9 +1,20 @@
 use chrono::NaiveDateTime;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use crate::entity::proxy_user;
 use crate::policy_match::{PolicyType, TargetEntry};
+
+/// Deserialize `Option<Option<serde_json::Value>>` from JSON.
+fn deserialize_optional_nullable_value<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<serde_json::Value>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt: Option<Option<serde_json::Value>> = Option::deserialize(deserializer)?;
+    Ok(opt)
+}
 
 // ---------- user requests ----------
 
@@ -408,6 +419,123 @@ pub fn validate_targets(policy_type: PolicyType, targets: &[TargetEntry]) -> Res
     Ok(())
 }
 
+// ---------- decision function requests ----------
+
+#[derive(Debug, Deserialize)]
+pub struct ListDecisionFunctionsQuery {
+    pub page: Option<u64>,
+    pub page_size: Option<u64>,
+    pub search: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateDecisionFunctionRequest {
+    pub name: String,
+    pub description: Option<String>,
+    #[serde(default = "default_language")]
+    pub language: String,
+    pub decision_fn: String,
+    pub decision_config: Option<serde_json::Value>,
+    pub evaluate_context: String,
+    #[serde(default = "default_on_error")]
+    pub on_error: String,
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+}
+
+fn default_language() -> String {
+    "javascript".to_string()
+}
+fn default_on_error() -> String {
+    "deny".to_string()
+}
+fn default_log_level() -> String {
+    "off".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateDecisionFunctionRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub language: Option<String>,
+    pub decision_fn: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_nullable_value")]
+    pub decision_config: Option<Option<serde_json::Value>>,
+    pub evaluate_context: Option<String>,
+    pub on_error: Option<String>,
+    pub log_level: Option<String>,
+    pub is_enabled: Option<bool>,
+    /// Optimistic concurrency
+    pub version: i32,
+}
+
+/// Validate decision function fields.
+pub fn validate_decision_function_fields(
+    language: &str,
+    decision_fn: &str,
+    evaluate_context: &str,
+    on_error: &str,
+    log_level: &str,
+) -> Result<(), String> {
+    if language != "javascript" {
+        return Err(format!(
+            "language must be 'javascript' (got '{language}'). Other languages are not yet supported."
+        ));
+    }
+    if decision_fn.trim().is_empty() {
+        return Err("decision_fn must not be empty".to_string());
+    }
+    if !matches!(evaluate_context, "session" | "query") {
+        return Err(format!(
+            "evaluate_context must be 'session' or 'query', got '{evaluate_context}'"
+        ));
+    }
+    if !matches!(on_error, "deny" | "skip") {
+        return Err(format!(
+            "on_error must be 'deny' or 'skip', got '{on_error}'"
+        ));
+    }
+    if !matches!(log_level, "off" | "error" | "info") {
+        return Err(format!(
+            "log_level must be 'off', 'error', or 'info', got '{log_level}'"
+        ));
+    }
+    Ok(())
+}
+
+// ---------- decision function responses ----------
+
+#[derive(Debug, Serialize)]
+pub struct DecisionFunctionResponse {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub language: String,
+    pub decision_fn: String,
+    pub decision_config: Option<serde_json::Value>,
+    pub evaluate_context: String,
+    pub on_error: String,
+    pub log_level: String,
+    pub is_enabled: bool,
+    pub version: i32,
+    pub policy_count: usize,
+    pub created_by: uuid::Uuid,
+    pub updated_by: uuid::Uuid,
+    pub created_at: chrono::NaiveDateTime,
+    pub updated_at: chrono::NaiveDateTime,
+}
+
+/// Summary embedded in PolicyResponse.
+#[derive(Debug, Serialize, Clone)]
+pub struct DecisionFunctionSummary {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub is_enabled: bool,
+    pub evaluate_context: String,
+}
+
+// ---------- policy requests ----------
+
 #[derive(Debug, Deserialize)]
 pub struct CreatePolicyRequest {
     pub name: String,
@@ -417,6 +545,8 @@ pub struct CreatePolicyRequest {
     pub is_enabled: bool,
     pub targets: Vec<TargetEntry>,
     pub definition: Option<serde_json::Value>,
+    /// Optional FK to an existing decision_function.
+    pub decision_function_id: Option<uuid::Uuid>,
 }
 
 fn default_true() -> bool {
@@ -431,8 +561,25 @@ pub struct UpdatePolicyRequest {
     pub is_enabled: Option<bool>,
     pub targets: Option<Vec<TargetEntry>>,
     pub definition: Option<serde_json::Value>,
+    /// 3-state nullable: absent=no change, null=detach, uuid=attach.
+    #[serde(default, deserialize_with = "deserialize_optional_nullable_uuid")]
+    pub decision_function_id: Option<Option<uuid::Uuid>>,
     /// Optimistic concurrency: client must send the current version
     pub version: i32,
+}
+
+/// Deserialize `Option<Option<Uuid>>` from JSON:
+/// - absent → `None` (no change)
+/// - `null` → `Some(None)` (detach)
+/// - `"uuid"` → `Some(Some(uuid))` (attach)
+fn deserialize_optional_nullable_uuid<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<uuid::Uuid>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt: Option<Option<uuid::Uuid>> = Option::deserialize(deserializer)?;
+    Ok(opt)
 }
 
 #[derive(Debug, Deserialize)]
@@ -470,6 +617,10 @@ pub struct PolicyResponse {
     pub definition: Option<serde_json::Value>,
     pub is_enabled: bool,
     pub version: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_function_id: Option<uuid::Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_function: Option<DecisionFunctionSummary>,
     pub assignment_count: usize,
     pub created_by: uuid::Uuid,
     pub updated_by: uuid::Uuid,
@@ -525,6 +676,28 @@ pub struct AuditLogResponse {
     pub created_at: chrono::NaiveDateTime,
     pub status: String,
     pub error_message: Option<String>,
+}
+
+// ---------- decision function test ----------
+
+#[derive(Debug, Deserialize)]
+pub struct TestDecisionFnRequest {
+    /// JS function source code to test.
+    pub decision_fn: String,
+    /// Mock context JSON (the `ctx` parameter passed to the function).
+    pub context: serde_json::Value,
+    /// Config JSON (the `config` parameter passed to the function).
+    #[serde(default)]
+    pub config: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TestDecisionFnResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<crate::decision::DecisionResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 // ---------- discovery job responses ----------

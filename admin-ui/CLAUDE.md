@@ -23,6 +23,8 @@ React 19, Vite 6, Tailwind 4, TanStack Query 5, react-router-dom 7, Vitest 3, @t
 - `src/pages/AdminAuditPage.tsx` — Centralized admin audit log with filters (resource type, actor, date range)
 - `src/types/policy.ts` — TypeScript interfaces for policies, assignments (`PolicyType`, `AssignmentScope`, `TargetEntry`)
 - `src/types/role.ts` — TypeScript interfaces for roles, members, audit entries
+- `src/types/decisionFunction.ts` — TypeScript interfaces for decision functions (`DecisionFunction`, `DecisionFunctionCreate`, `DecisionFunctionUpdate`)
+- `src/api/decisionFunctions.ts` — API client functions for decision function CRUD (`listDecisionFunctions`, `getDecisionFunction`, `createDecisionFunction`, `updateDecisionFunction`, `deleteDecisionFunction`)
 - `src/test/test-utils.tsx` — `renderWithProviders` (QueryClient + AuthProvider + MemoryRouter)
 - `src/test/factories.ts` — `makeUser`, `makeDataSource`, `makeDataSourceType`, `makeDiscoveredSchema/Table/Column`
 

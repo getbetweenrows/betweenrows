@@ -48,6 +48,7 @@ export function PolicyCreatePage() {
             : values.policy_type === 'column_mask'
               ? { mask_expression: values.mask_expression }
               : null,
+        decision_function_id: values.decision_function_id,
       })
       try {
         await assignPolicy(selectedDatasourceId, {

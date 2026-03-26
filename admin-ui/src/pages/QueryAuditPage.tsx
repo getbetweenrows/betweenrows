@@ -279,6 +279,24 @@ export function QueryAuditPage() {
                                     <span className="font-medium">{p.name}</span>
                                     <span className="text-gray-400 ml-2">v{p.version}</span>
                                     <span className="text-gray-400 ml-2 font-mono">{p.policy_id}</span>
+                                    {p.decision && (
+                                      <span className="ml-2">
+                                        <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-xs font-mono ${p.decision.result?.fire ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-700'}`}>
+                                          {p.decision.result?.fire ? 'fired' : 'skipped'}
+                                        </span>
+                                        <span className="text-gray-400 ml-1">{p.decision.fuel_consumed ?? p.decision.result?.fuel_consumed} fuel</span>
+                                        <span className="text-gray-400 ml-1">{p.decision.time_us ?? p.decision.result?.time_us}us</span>
+                                        {p.decision.error && (
+                                          <span className="text-red-500 ml-1">{p.decision.error}</span>
+                                        )}
+                                        {(p.decision.logs?.length ?? 0) > 0 && (
+                                          <details className="inline ml-2">
+                                            <summary className="text-blue-600 cursor-pointer">logs ({p.decision.logs!.length})</summary>
+                                            <pre className="text-xs font-mono text-gray-600 bg-gray-100 rounded p-1 mt-1">{p.decision.logs!.join('\n')}</pre>
+                                          </details>
+                                        )}
+                                      </span>
+                                    )}
                                   </li>
                                 ))}
                               </ul>

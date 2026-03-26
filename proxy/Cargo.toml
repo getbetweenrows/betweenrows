@@ -43,6 +43,9 @@ rand_core = { version = "0.6", features = ["std"] }
 aes-gcm = "0.10"
 base64 = "0.22"
 
+# WASM runtime for decision functions
+wasmtime = "31"
+
 # TCP socket options (keepalive)
 socket2 = { version = "0.5", features = ["all"] }
 

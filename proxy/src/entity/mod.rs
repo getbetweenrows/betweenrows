@@ -1,6 +1,7 @@
 pub mod admin_audit_log;
 pub mod data_source;
 pub mod data_source_access;
+pub mod decision_function;
 pub mod discovered_column;
 pub mod discovered_schema;
 pub mod discovered_table;

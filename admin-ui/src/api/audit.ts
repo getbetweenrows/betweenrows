@@ -9,7 +9,18 @@ export interface AuditLogEntry {
   datasource_name: string
   original_query: string
   rewritten_query: string | null
-  policies_applied: Array<{ policy_id: string; version: number; name: string }>
+  policies_applied: Array<{
+    policy_id: string
+    version: number
+    name: string
+    decision?: {
+      result?: { fire: boolean; fuel_consumed?: number; time_us?: number }
+      logs?: string[]
+      fuel_consumed?: number
+      time_us?: number
+      error?: string | null
+    }
+  }>
   execution_time_ms: number | null
   client_ip: string | null
   client_info: string | null

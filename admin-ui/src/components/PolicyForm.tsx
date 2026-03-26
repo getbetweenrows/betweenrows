@@ -1,5 +1,7 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import type { PolicyResponse, PolicyType, TargetEntry } from '../types/policy'
+import type { EvaluateContext, OnErrorBehavior, LogLevel, DecisionFunctionResponse } from '../types/decisionFunction'
+import { testDecisionFn, createDecisionFunction, updateDecisionFunction } from '../api/decisionFunctions'
 import { validatePolicyName } from '../utils/nameValidation'
 
 const POLICY_TYPES: { value: PolicyType; label: string }[] = [
@@ -36,10 +38,13 @@ export interface PolicyFormValues {
   targets: TargetEntry[]
   filter_expression: string
   mask_expression: string
+  decision_function_id?: string | null
 }
 
 interface PolicyFormProps {
   initial?: PolicyResponse
+  initialDecisionFunction?: DecisionFunctionResponse | null
+  decisionFnLoading?: boolean
   onSubmit: (values: PolicyFormValues) => Promise<void>
   submitLabel: string
   isSubmitting: boolean
@@ -227,7 +232,7 @@ function TargetCard({
 
 // --- Main PolicyForm component ---
 
-export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error, catalogHints }: PolicyFormProps) {
+export function PolicyForm({ initial, initialDecisionFunction, decisionFnLoading, onSubmit, submitLabel, isSubmitting, error, catalogHints }: PolicyFormProps) {
   const [name, setName] = useState(initial?.name ?? '')
   const [nameError, setNameError] = useState<string | null>(null)
   const [description, setDescription] = useState(initial?.description ?? '')
@@ -252,6 +257,75 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
   const [maskExpression, setMaskExpression] = useState(
     initial?.definition?.mask_expression ?? '',
   )
+
+  // Decision function state
+  const [showDecisionFn, setShowDecisionFn] = useState(!!initialDecisionFunction || !!initial?.decision_function_id)
+  const [decisionFnId, setDecisionFnId] = useState<string | null>(initial?.decision_function_id ?? null)
+  const [decisionFnName, setDecisionFnName] = useState(initialDecisionFunction?.name ?? '')
+  const [decisionFnDescription, setDecisionFnDescription] = useState(initialDecisionFunction?.description ?? '')
+  const [decisionFn, setDecisionFn] = useState(initialDecisionFunction?.decision_fn ?? '')
+  const [decisionConfigStr, setDecisionConfigStr] = useState(
+    initialDecisionFunction?.decision_config ? JSON.stringify(initialDecisionFunction.decision_config, null, 2) : '{}',
+  )
+  const [evaluateContext, setEvaluateContext] = useState<EvaluateContext>(
+    initialDecisionFunction?.evaluate_context ?? 'session',
+  )
+  const [onError, setOnError] = useState<OnErrorBehavior>(initialDecisionFunction?.on_error ?? 'deny')
+  const [logLevel, setLogLevel] = useState<LogLevel>(initialDecisionFunction?.log_level ?? 'off')
+  const [decisionFnIsEnabled, setDecisionFnIsEnabled] = useState(initialDecisionFunction?.is_enabled ?? true)
+  const [decisionFnVersion, setDecisionFnVersion] = useState(initialDecisionFunction?.version ?? 0)
+  const [decisionFnError, setDecisionFnError] = useState<string | null>(null)
+  const [decisionFnSaving, setDecisionFnSaving] = useState(false)
+
+  // Sync decision function state when it loads asynchronously
+  useEffect(() => {
+    if (!initialDecisionFunction) return
+    setDecisionFnId(initialDecisionFunction.id)
+    setDecisionFnName(initialDecisionFunction.name)
+    setDecisionFnDescription(initialDecisionFunction.description ?? '')
+    setDecisionFn(initialDecisionFunction.decision_fn)
+    setDecisionConfigStr(
+      initialDecisionFunction.decision_config
+        ? JSON.stringify(initialDecisionFunction.decision_config, null, 2)
+        : '{}',
+    )
+    setEvaluateContext(initialDecisionFunction.evaluate_context)
+    setOnError(initialDecisionFunction.on_error)
+    setLogLevel(initialDecisionFunction.log_level)
+    setDecisionFnIsEnabled(initialDecisionFunction.is_enabled)
+    setDecisionFnVersion(initialDecisionFunction.version)
+    setShowDecisionFn(true)
+  }, [initialDecisionFunction])
+
+  // Test panel state
+  const [testContextStr, setTestContextStr] = useState(
+    JSON.stringify(
+      {
+        session: {
+          user: { id: '00000000-0000-0000-0000-000000000000', username: 'testuser', tenant: 'default', roles: ['analyst'] },
+          time: { hour: 14, day_of_week: 'Monday' },
+          datasource: { name: 'my_ds', access_mode: 'policy_required' },
+        },
+        ...(initialDecisionFunction?.evaluate_context === 'query'
+          ? {
+              query: {
+                tables: ['orders'],
+                columns: ['id', 'amount'],
+                join_count: 0,
+                has_aggregation: false,
+                has_subquery: false,
+                has_where: true,
+                statement_type: 'SELECT',
+              },
+            }
+          : {}),
+      },
+      null,
+      2,
+    ),
+  )
+  const [testResult, setTestResult] = useState<string | null>(null)
+  const [isTesting, setIsTesting] = useState(false)
 
   const needsColumns = policyType === 'column_mask' || policyType === 'column_allow' || policyType === 'column_deny'
   const needsFilter = policyType === 'row_filter'
@@ -380,12 +454,78 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
     })
   }
 
+  async function handleSaveDecisionFunction() {
+    setDecisionFnSaving(true)
+    setDecisionFnError(null)
+    try {
+      let config: Record<string, unknown> = {}
+      try { config = JSON.parse(decisionConfigStr) } catch { /* keep empty */ }
+
+      if (decisionFnId) {
+        // Update existing
+        const updated = await updateDecisionFunction(decisionFnId, {
+          name: decisionFnName || undefined,
+          description: decisionFnDescription || undefined,
+          decision_fn: decisionFn,
+          decision_config: config,
+          evaluate_context: evaluateContext,
+          on_error: onError,
+          log_level: logLevel,
+          is_enabled: decisionFnIsEnabled,
+          version: decisionFnVersion,
+        })
+        setDecisionFnVersion(updated.version)
+        setDecisionFnId(updated.id)
+      } else {
+        // Create new
+        const created = await createDecisionFunction({
+          name: decisionFnName || `${name} (decision)`,
+          description: decisionFnDescription || undefined,
+          decision_fn: decisionFn,
+          decision_config: config,
+          evaluate_context: evaluateContext,
+          on_error: onError,
+          log_level: logLevel,
+        })
+        setDecisionFnId(created.id)
+        setDecisionFnVersion(created.version)
+        if (!decisionFnName) setDecisionFnName(created.name)
+      }
+    } catch (err) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Failed to save decision function'
+      setDecisionFnError(msg)
+    } finally {
+      setDecisionFnSaving(false)
+    }
+  }
+
+  function handleDetachDecisionFunction() {
+    setDecisionFnId(null)
+    setShowDecisionFn(false)
+  }
+
+  async function handleTestDecisionFn() {
+    setIsTesting(true)
+    setTestResult(null)
+    try {
+      const context = JSON.parse(testContextStr)
+      const config = JSON.parse(decisionConfigStr)
+      const result = await testDecisionFn({ decision_fn: decisionFn, context, config })
+      setTestResult(JSON.stringify(result, null, 2))
+    } catch (err) {
+      setTestResult(`Error: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setIsTesting(false)
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     const nErr = validatePolicyName(name)
     setNameError(nErr)
     if (nErr) return
-    await onSubmit({
+
+    const values: PolicyFormValues = {
       name,
       description,
       policy_type: policyType,
@@ -393,7 +533,10 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
       targets: buildTargets(),
       filter_expression: filterExpression,
       mask_expression: maskExpression,
-    })
+      decision_function_id: decisionFnId,
+    }
+
+    await onSubmit(values)
   }
 
   return (
@@ -541,6 +684,212 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
           </p>
         </div>
       )}
+
+      {/* Decision Function (Optional) */}
+      <div className="border border-gray-200 rounded-lg overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setShowDecisionFn((v) => !v)}
+          className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors"
+        >
+          <span className="text-sm font-semibold text-gray-900">
+            Decision Function{' '}
+            <span className="text-gray-400 font-normal">
+              {decisionFnId ? `(${initial?.decision_function?.name ?? 'attached'})` : '(Optional)'}
+            </span>
+          </span>
+          <span className="text-gray-400 text-xs">{showDecisionFn ? 'Collapse' : 'Expand'}</span>
+        </button>
+
+        {showDecisionFn && decisionFnLoading && (
+          <div className="p-4 flex items-center gap-2 text-sm text-gray-400">
+            <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+            Loading decision function…
+          </div>
+        )}
+        {showDecisionFn && !decisionFnLoading && (
+          <div className="p-4 space-y-4">
+            <p className="text-xs text-gray-500">
+              A JavaScript function that gates whether this policy fires. If the function returns{' '}
+              <code className="bg-gray-100 px-1 rounded">{'{ fire: false }'}</code>, the policy is skipped.
+              Decision functions are saved as separate entities and can be shared across policies.
+            </p>
+
+            {/* Function name */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Function Name</label>
+              <input
+                type="text"
+                value={decisionFnName}
+                onChange={(e) => setDecisionFnName(e.target.value)}
+                placeholder={`${name || 'policy'} (decision)`}
+                className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Evaluate Context</label>
+                <select
+                  value={evaluateContext}
+                  onChange={(e) => setEvaluateContext(e.target.value as EvaluateContext)}
+                  className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  <option value="session">Session (user/time context)</option>
+                  <option value="query">Query (full context)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">On Error</label>
+                <select
+                  value={onError}
+                  onChange={(e) => setOnError(e.target.value as OnErrorBehavior)}
+                  className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  <option value="deny">Deny (fail-secure)</option>
+                  <option value="skip">Skip (fail-open)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Log Level</label>
+                <select
+                  value={logLevel}
+                  onChange={(e) => setLogLevel(e.target.value as LogLevel)}
+                  className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  <option value="off">Off</option>
+                  <option value="error">Error only</option>
+                  <option value="info">Info (console.log + errors)</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setDecisionFnIsEnabled((v) => !v)}
+                className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors focus:outline-none ${
+                  decisionFnIsEnabled ? 'bg-blue-600' : 'bg-gray-300'
+                }`}
+              >
+                <span
+                  className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                    decisionFnIsEnabled ? 'translate-x-3.5' : 'translate-x-0.5'
+                  }`}
+                />
+              </button>
+              <span className="text-xs text-gray-600">
+                {decisionFnIsEnabled ? 'Function enabled (gates policy)' : 'Function paused (policy always fires)'}
+              </span>
+            </div>
+
+            {/* Code Editor */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Function Source</label>
+              <textarea
+                value={decisionFn}
+                onChange={(e) => setDecisionFn(e.target.value)}
+                rows={12}
+                placeholder={`function evaluate(ctx, config) {\n  // ctx.session.user: { id, username, tenant, roles }\n  // ctx.session.time: { hour, day_of_week }\n  // ctx.session.datasource: { name, access_mode }\n${evaluateContext === 'query' ? '  // ctx.query: { tables, columns, join_count, has_aggregation, has_subquery, has_where, statement_type }\n' : ''}\n  return { fire: true };\n}`}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 bg-gray-900 text-green-300"
+                spellCheck={false}
+              />
+            </div>
+
+            {/* Config Editor */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Config JSON</label>
+              <textarea
+                value={decisionConfigStr}
+                onChange={(e) => setDecisionConfigStr(e.target.value)}
+                rows={3}
+                placeholder='{ "max_joins": 3 }'
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                spellCheck={false}
+              />
+              <p className="text-xs text-gray-400 mt-1">
+                Parameters passed as the second argument to your function. Use this instead of hardcoding values in JavaScript — makes it easy to change thresholds per environment.
+              </p>
+            </div>
+
+            {/* Reference Panel */}
+            <div className="bg-blue-50 border border-blue-100 rounded-lg px-4 py-3">
+              <h4 className="text-xs font-semibold text-blue-800 mb-2">Available Context</h4>
+              <div className="text-xs text-blue-700 font-mono space-y-0.5">
+                <p>ctx.session.user.id, .username, .tenant, .roles[]</p>
+                <p>ctx.session.time.hour, .day_of_week</p>
+                <p>ctx.session.datasource.name, .access_mode</p>
+                {evaluateContext === 'query' && (
+                  <p className="text-blue-900 font-semibold">
+                    ctx.query.tables[], .columns[], .join_count, .has_aggregation, .has_subquery, .has_where, .statement_type
+                  </p>
+                )}
+                {evaluateContext === 'session' && (
+                  <p className="text-blue-400 italic">ctx.query — not available in session mode</p>
+                )}
+              </div>
+            </div>
+
+            {/* Test Panel */}
+            <div className="border border-gray-200 rounded-lg p-3 space-y-3">
+              <h4 className="text-xs font-semibold text-gray-700">Test</h4>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Mock Context</label>
+                <textarea
+                  value={testContextStr}
+                  onChange={(e) => setTestContextStr(e.target.value)}
+                  rows={6}
+                  className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  spellCheck={false}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={handleTestDecisionFn}
+                disabled={isTesting || !decisionFn.trim()}
+                className="bg-green-600 hover:bg-green-700 text-white text-xs font-medium rounded px-3 py-1.5 transition-colors disabled:opacity-50"
+              >
+                {isTesting ? 'Running…' : 'Run Test'}
+              </button>
+              {testResult && (
+                <pre className="bg-gray-900 text-green-300 rounded p-3 text-xs font-mono overflow-x-auto whitespace-pre-wrap max-h-48 overflow-y-auto">
+                  {testResult}
+                </pre>
+              )}
+            </div>
+
+            {/* Save / Detach actions */}
+            <div className="flex items-center gap-3 pt-2 border-t border-gray-100">
+              <button
+                type="button"
+                onClick={handleSaveDecisionFunction}
+                disabled={decisionFnSaving || !decisionFn.trim()}
+                className="bg-purple-600 hover:bg-purple-700 text-white text-xs font-medium rounded px-3 py-1.5 transition-colors disabled:opacity-50"
+              >
+                {decisionFnSaving ? 'Saving…' : decisionFnId ? 'Update Function' : 'Create Function'}
+              </button>
+              {decisionFnId && (
+                <button
+                  type="button"
+                  onClick={handleDetachDecisionFunction}
+                  className="text-xs text-red-500 hover:text-red-700"
+                >
+                  Detach Function
+                </button>
+              )}
+              {decisionFnError && (
+                <span className="text-xs text-red-600">{decisionFnError}</span>
+              )}
+              {decisionFnId && !decisionFnError && (
+                <span className="text-xs text-green-600">Attached</span>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
 
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg px-4 py-3">

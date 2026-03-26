@@ -135,6 +135,27 @@ macro_rules! require_postgres {
     };
 }
 
+/// Returns true if `javy` CLI is on PATH.
+#[allow(dead_code)]
+pub fn javy_available() -> bool {
+    std::process::Command::new("javy")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Skip the current test if javy CLI is not available.
+#[macro_export]
+macro_rules! require_javy {
+    () => {
+        if !support::javy_available() {
+            eprintln!("Skipping test: javy CLI not available");
+            return;
+        }
+    };
+}
+
 // ---------------------------------------------------------------------------
 // ProxyTestServer — per-test infrastructure
 // ---------------------------------------------------------------------------
@@ -169,7 +190,7 @@ impl ProxyTestServer {
 
         // 3. Engine cache + policy hook
         let engine_cache = EngineCache::new(db.clone(), MASTER_KEY);
-        let policy_hook = PolicyHook::new(db.clone());
+        let policy_hook = PolicyHook::new(db.clone()).unwrap();
 
         // 4. ProxyHandler
         let handler = Arc::new(ProxyHandler::new(
@@ -476,6 +497,7 @@ impl ProxyTestServer {
     }
 
     /// Create a policy (with is_enabled control) and assign it to a datasource.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_and_assign_policy_enabled(
         &self,
         name: &str,
@@ -588,7 +610,7 @@ impl ProxyTestServer {
     }
 
     /// Shortcut: create a column_mask policy.
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     pub async fn create_column_mask(
         &self,
         name: &str,

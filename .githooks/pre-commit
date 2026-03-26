@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Clean up orphaned test containers from previous interrupted runs
+orphans=$(docker ps -q --filter "label=com.betweenrows.test" 2>/dev/null || true)
+if [ -n "$orphans" ]; then
+    echo "→ cleaning up orphaned test containers"
+    docker rm -f $orphans >/dev/null 2>&1 || true
+fi
+
 echo "→ cargo fmt --check"
 cargo fmt --check
 

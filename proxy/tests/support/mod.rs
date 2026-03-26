@@ -65,6 +65,9 @@ pub struct SharedPostgres {
     pub url: String,
     pub host: String,
     pub port: u16,
+    /// Keeps the container alive. Dropped on normal process exit → container stops.
+    /// For abnormal exits (SIGKILL), the container label lets us find and clean orphans.
+    _container: testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
 }
 
 static SHARED_PG: OnceLock<Option<SharedPostgres>> = OnceLock::new();
@@ -87,10 +90,15 @@ pub fn shared_postgres() -> Option<&'static SharedPostgres> {
                     }
                 };
                 rt.block_on(async {
+                    use testcontainers::core::ImageExt;
                     use testcontainers::runners::AsyncRunner;
                     use testcontainers_modules::postgres::Postgres;
 
-                    let container = match Postgres::default().start().await {
+                    let container = match Postgres::default()
+                        .with_label("com.betweenrows.test", "true")
+                        .start()
+                        .await
+                    {
                         Ok(c) => c,
                         Err(e) => {
                             eprintln!("testcontainers: could not start Postgres: {e}");
@@ -110,8 +118,9 @@ pub fn shared_postgres() -> Option<&'static SharedPostgres> {
                         url: format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres"),
                         host: "127.0.0.1".to_string(),
                         port,
+                        _container: container,
                     }));
-                    // Keep container alive until the test process exits.
+                    // Keep the runtime alive so the container's async drop works on process exit.
                     std::future::pending::<()>().await;
                 });
             });

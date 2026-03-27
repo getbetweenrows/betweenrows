@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-03-26
+
+### Added
+- **Decision functions** — custom JavaScript functions that control when policies fire, evaluated in a sandboxed WASM runtime
+  - Two evaluation contexts: `session` (evaluated once at connect) and `query` (evaluated per query)
+  - Configurable error handling: `skip` (policy doesn't fire) or `deny` (query blocked)
+  - Console log capture with configurable log levels
+  - CRUD API with test endpoint for dry-running functions against mock contexts
+  - Integrated into visibility-level evaluation: `column_deny` and `table_deny` policies respect decision function results at connect time
+- **Decision function admin UI** — modal for creating/editing decision functions with CodeMirror editors
+  - JavaScript and JSON editors with `ctx.*`/`config.*` autocomplete
+  - Templates for common patterns in create mode
+  - Test panel with client-side pre-check and server-side WASM execution
+  - Fire/skip/error result badges, shared function warning, optimistic concurrency
+  - PolicyForm integration: toggle-based attachment (create new / select existing / edit / detach)
+
+### Fixed
+- **Stale decision function reference dead-end** — detaching a deleted function now correctly reveals create/select buttons instead of leaving the user stuck
+- **Testcontainers leak** — label containers and clean up orphans to prevent Docker resource exhaustion during test runs
+
 ## [0.6.0] - 2026-03-23
 
 ### Added

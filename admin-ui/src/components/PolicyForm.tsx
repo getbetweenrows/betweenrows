@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import type { PolicyResponse, PolicyType, TargetEntry } from '../types/policy'
-import type { EvaluateContext, OnErrorBehavior, LogLevel, DecisionFunctionResponse } from '../types/decisionFunction'
-import { testDecisionFn, createDecisionFunction, updateDecisionFunction } from '../api/decisionFunctions'
+import type { DecisionFunctionResponse, DecisionFunctionSummary } from '../types/decisionFunction'
+import { listDecisionFunctions, getDecisionFunction } from '../api/decisionFunctions'
 import { validatePolicyName } from '../utils/nameValidation'
+import { DecisionFunctionModal } from './DecisionFunctionModal'
 
 const POLICY_TYPES: { value: PolicyType; label: string }[] = [
   { value: 'row_filter', label: 'Row Filter' },
@@ -43,8 +44,6 @@ export interface PolicyFormValues {
 
 interface PolicyFormProps {
   initial?: PolicyResponse
-  initialDecisionFunction?: DecisionFunctionResponse | null
-  decisionFnLoading?: boolean
   onSubmit: (values: PolicyFormValues) => Promise<void>
   submitLabel: string
   isSubmitting: boolean
@@ -230,9 +229,20 @@ function TargetCard({
   )
 }
 
+// --- Section header helper ---
+
+function SectionHeader({ title, subtitle }: { title: string; subtitle: string }) {
+  return (
+    <div className="flex items-baseline gap-2 mb-3">
+      <h3 className="text-sm font-semibold text-gray-900">{title}</h3>
+      <span className="text-xs text-gray-400">&middot; {subtitle}</span>
+    </div>
+  )
+}
+
 // --- Main PolicyForm component ---
 
-export function PolicyForm({ initial, initialDecisionFunction, decisionFnLoading, onSubmit, submitLabel, isSubmitting, error, catalogHints }: PolicyFormProps) {
+export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error, catalogHints }: PolicyFormProps) {
   const [name, setName] = useState(initial?.name ?? '')
   const [nameError, setNameError] = useState<string | null>(null)
   const [description, setDescription] = useState(initial?.description ?? '')
@@ -258,74 +268,24 @@ export function PolicyForm({ initial, initialDecisionFunction, decisionFnLoading
     initial?.definition?.mask_expression ?? '',
   )
 
-  // Decision function state
-  const [showDecisionFn, setShowDecisionFn] = useState(!!initialDecisionFunction || !!initial?.decision_function_id)
-  const [decisionFnId, setDecisionFnId] = useState<string | null>(initial?.decision_function_id ?? null)
-  const [decisionFnName, setDecisionFnName] = useState(initialDecisionFunction?.name ?? '')
-  const [decisionFnDescription, setDecisionFnDescription] = useState(initialDecisionFunction?.description ?? '')
-  const [decisionFn, setDecisionFn] = useState(initialDecisionFunction?.decision_fn ?? '')
-  const [decisionConfigStr, setDecisionConfigStr] = useState(
-    initialDecisionFunction?.decision_config ? JSON.stringify(initialDecisionFunction.decision_config, null, 2) : '{}',
-  )
-  const [evaluateContext, setEvaluateContext] = useState<EvaluateContext>(
-    initialDecisionFunction?.evaluate_context ?? 'session',
-  )
-  const [onError, setOnError] = useState<OnErrorBehavior>(initialDecisionFunction?.on_error ?? 'deny')
-  const [logLevel, setLogLevel] = useState<LogLevel>(initialDecisionFunction?.log_level ?? 'off')
-  const [decisionFnIsEnabled, setDecisionFnIsEnabled] = useState(initialDecisionFunction?.is_enabled ?? true)
-  const [decisionFnVersion, setDecisionFnVersion] = useState(initialDecisionFunction?.version ?? 0)
-  const [decisionFnError, setDecisionFnError] = useState<string | null>(null)
-  const [decisionFnSaving, setDecisionFnSaving] = useState(false)
+  // Decision function state.
+  // attachedFnSummary holds lightweight display info (name, enabled, context).
+  // Seeded from initial.decision_function (embedded in policy response).
+  // Updated when the user saves via modal or selects an existing function.
+  // The modal fetches the full DecisionFunctionResponse itself when opened for editing.
+  const initialSummary: DecisionFunctionSummary | null = initial?.decision_function ?? null
+  const [useDecisionFn, setUseDecisionFn] = useState(!!initial?.decision_function_id)
+  const [attachedFnSummary, setAttachedFnSummary] = useState<DecisionFunctionSummary | null>(initialSummary)
+  const [attachedFnDescription, setAttachedFnDescription] = useState<string | null>(null)
+  const [attachedFnId, setAttachedFnId] = useState<string | null>(initial?.decision_function_id ?? null)
+  const [attachedFnError, setAttachedFnError] = useState<string | null>(null)
+  const [modalOpen, setModalOpen] = useState(false)
+  const [modalInitialId, setModalInitialId] = useState<string | null>(null)
 
-  // Sync decision function state when it loads asynchronously
-  useEffect(() => {
-    if (!initialDecisionFunction) return
-    setDecisionFnId(initialDecisionFunction.id)
-    setDecisionFnName(initialDecisionFunction.name)
-    setDecisionFnDescription(initialDecisionFunction.description ?? '')
-    setDecisionFn(initialDecisionFunction.decision_fn)
-    setDecisionConfigStr(
-      initialDecisionFunction.decision_config
-        ? JSON.stringify(initialDecisionFunction.decision_config, null, 2)
-        : '{}',
-    )
-    setEvaluateContext(initialDecisionFunction.evaluate_context)
-    setOnError(initialDecisionFunction.on_error)
-    setLogLevel(initialDecisionFunction.log_level)
-    setDecisionFnIsEnabled(initialDecisionFunction.is_enabled)
-    setDecisionFnVersion(initialDecisionFunction.version)
-    setShowDecisionFn(true)
-  }, [initialDecisionFunction])
-
-  // Test panel state
-  const [testContextStr, setTestContextStr] = useState(
-    JSON.stringify(
-      {
-        session: {
-          user: { id: '00000000-0000-0000-0000-000000000000', username: 'testuser', tenant: 'default', roles: ['analyst'] },
-          time: { hour: 14, day_of_week: 'Monday' },
-          datasource: { name: 'my_ds', access_mode: 'policy_required' },
-        },
-        ...(initialDecisionFunction?.evaluate_context === 'query'
-          ? {
-              query: {
-                tables: ['orders'],
-                columns: ['id', 'amount'],
-                join_count: 0,
-                has_aggregation: false,
-                has_subquery: false,
-                has_where: true,
-                statement_type: 'SELECT',
-              },
-            }
-          : {}),
-      },
-      null,
-      2,
-    ),
-  )
-  const [testResult, setTestResult] = useState<string | null>(null)
-  const [isTesting, setIsTesting] = useState(false)
+  // Select existing state
+  const [showSelectExisting, setShowSelectExisting] = useState(false)
+  const [existingFunctions, setExistingFunctions] = useState<DecisionFunctionResponse[]>([])
+  const [loadingExisting, setLoadingExisting] = useState(false)
 
   const needsColumns = policyType === 'column_mask' || policyType === 'column_allow' || policyType === 'column_deny'
   const needsFilter = policyType === 'row_filter'
@@ -454,68 +414,64 @@ export function PolicyForm({ initial, initialDecisionFunction, decisionFnLoading
     })
   }
 
-  async function handleSaveDecisionFunction() {
-    setDecisionFnSaving(true)
-    setDecisionFnError(null)
-    try {
-      let config: Record<string, unknown> = {}
-      try { config = JSON.parse(decisionConfigStr) } catch { /* keep empty */ }
-
-      if (decisionFnId) {
-        // Update existing
-        const updated = await updateDecisionFunction(decisionFnId, {
-          name: decisionFnName || undefined,
-          description: decisionFnDescription || undefined,
-          decision_fn: decisionFn,
-          decision_config: config,
-          evaluate_context: evaluateContext,
-          on_error: onError,
-          log_level: logLevel,
-          is_enabled: decisionFnIsEnabled,
-          version: decisionFnVersion,
-        })
-        setDecisionFnVersion(updated.version)
-        setDecisionFnId(updated.id)
-      } else {
-        // Create new
-        const created = await createDecisionFunction({
-          name: decisionFnName || `${name} (decision)`,
-          description: decisionFnDescription || undefined,
-          decision_fn: decisionFn,
-          decision_config: config,
-          evaluate_context: evaluateContext,
-          on_error: onError,
-          log_level: logLevel,
-        })
-        setDecisionFnId(created.id)
-        setDecisionFnVersion(created.version)
-        if (!decisionFnName) setDecisionFnName(created.name)
-      }
-    } catch (err) {
-      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Failed to save decision function'
-      setDecisionFnError(msg)
-    } finally {
-      setDecisionFnSaving(false)
+  // Decision function handlers
+  function handleToggleDecisionFn(on: boolean) {
+    setUseDecisionFn(on)
+    if (!on) {
+      setAttachedFnError(null)
+      setShowSelectExisting(false)
     }
   }
 
-  function handleDetachDecisionFunction() {
-    setDecisionFnId(null)
-    setShowDecisionFn(false)
+  function handleDetach() {
+    setAttachedFnSummary(null)
+    setAttachedFnDescription(null)
+    setAttachedFnId(null)
+    setAttachedFnError(null)
+    // Keep toggle ON so user can re-attach
   }
 
-  async function handleTestDecisionFn() {
-    setIsTesting(true)
-    setTestResult(null)
+  function handleOpenCreateModal() {
+    setModalInitialId(null)
+    setModalOpen(true)
+  }
+
+  function handleOpenEditModal() {
+    setModalInitialId(attachedFnId)
+    setModalOpen(true)
+  }
+
+  function handleModalSaved(fn: DecisionFunctionResponse) {
+    setAttachedFnSummary({ id: fn.id, name: fn.name, is_enabled: fn.is_enabled, evaluate_context: fn.evaluate_context })
+    setAttachedFnDescription(fn.description ?? null)
+    setAttachedFnId(fn.id)
+    setAttachedFnError(null)
+    setModalOpen(false)
+  }
+
+  async function handleShowSelectExisting() {
+    setShowSelectExisting(true)
+    setLoadingExisting(true)
     try {
-      const context = JSON.parse(testContextStr)
-      const config = JSON.parse(decisionConfigStr)
-      const result = await testDecisionFn({ decision_fn: decisionFn, context, config })
-      setTestResult(JSON.stringify(result, null, 2))
-    } catch (err) {
-      setTestResult(`Error: ${err instanceof Error ? err.message : String(err)}`)
+      const fns = await listDecisionFunctions()
+      setExistingFunctions(fns)
+    } catch {
+      setExistingFunctions([])
     } finally {
-      setIsTesting(false)
+      setLoadingExisting(false)
+    }
+  }
+
+  async function handleSelectExisting(fnId: string) {
+    try {
+      const fn = await getDecisionFunction(fnId)
+      setAttachedFnSummary({ id: fn.id, name: fn.name, is_enabled: fn.is_enabled, evaluate_context: fn.evaluate_context })
+      setAttachedFnDescription(fn.description ?? null)
+      setAttachedFnId(fn.id)
+      setAttachedFnError(null)
+      setShowSelectExisting(false)
+    } catch {
+      setAttachedFnError('Failed to load selected function')
     }
   }
 
@@ -533,87 +489,139 @@ export function PolicyForm({ initial, initialDecisionFunction, decisionFnLoading
       targets: buildTargets(),
       filter_expression: filterExpression,
       mask_expression: maskExpression,
-      decision_function_id: decisionFnId,
+      decision_function_id: useDecisionFn && attachedFnId ? attachedFnId : null,
     }
 
     await onSubmit(values)
   }
 
+  // Stale ref: policy has a decision_function_id but the server didn't return a summary
+  // (the referenced function was deleted from DB). Auto-clears when user detaches.
+  const isStaleRef = !!initial?.decision_function_id && !initial?.decision_function && attachedFnId === initial?.decision_function_id
+
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
-      {/* Basic info */}
-      <div className="grid grid-cols-2 gap-4">
-        <div className="col-span-2">
-          <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => { setName(e.target.value); setNameError(null) }}
-            onBlur={() => setNameError(validatePolicyName(name))}
-            required
-            placeholder="e.g. tenant-isolation"
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-          {nameError ? (
-            <p className="text-xs text-red-600 mt-1">{nameError}</p>
-          ) : (
-            <p className="text-xs text-gray-400 mt-1">1–100 chars · no leading/trailing spaces · letters, digits, spaces, <code>_ - . : ( ) ' "</code></p>
-          )}
-        </div>
-
-        <div className="col-span-2">
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Description <span className="text-gray-400 font-normal">(optional)</span>
-          </label>
-          <input
-            type="text"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="Brief description of what this policy does"
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Policy Type</label>
-          <select
-            value={policyType}
-            onChange={(e) => setPolicyType(e.target.value as PolicyType)}
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            {POLICY_TYPES.map((t) => (
-              <option key={t.value} value={t.value}>
-                {t.label}
-              </option>
-            ))}
-          </select>
-          {isDeny && (
-            <p className="text-xs text-amber-600 mt-1">Deny policies short-circuit or strip columns.</p>
-          )}
-        </div>
-
-        <div className="flex items-center gap-3 pt-6">
-          <button
-            type="button"
-            onClick={() => setIsEnabled((v) => !v)}
-            className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none ${
-              isEnabled ? 'bg-blue-600' : 'bg-gray-300'
-            }`}
-          >
-            <span
-              className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-                isEnabled ? 'translate-x-4.5' : 'translate-x-0.5'
-              }`}
+      {/* Section 1: Policy */}
+      <div>
+        <SectionHeader title="Policy" subtitle="name and status" />
+        <div className="grid grid-cols-2 gap-4">
+          <div className="col-span-2">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => { setName(e.target.value); setNameError(null) }}
+              onBlur={() => setNameError(validatePolicyName(name))}
+              required
+              placeholder="e.g. tenant-isolation"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
-          </button>
-          <span className="text-sm text-gray-700">{isEnabled ? 'Enabled' : 'Disabled'}</span>
+            {nameError ? (
+              <p className="text-xs text-red-600 mt-1">{nameError}</p>
+            ) : (
+              <p className="text-xs text-gray-400 mt-1">1–100 chars · no leading/trailing spaces · letters, digits, spaces, <code>_ - . : ( ) ' "</code></p>
+            )}
+          </div>
+
+          <div className="col-span-2">
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Description <span className="text-gray-400 font-normal">(optional)</span>
+            </label>
+            <input
+              type="text"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Brief description of what this policy does"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+
+          <div className="flex items-center gap-3 pt-2">
+            <button
+              type="button"
+              onClick={() => setIsEnabled((v) => !v)}
+              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none ${
+                isEnabled ? 'bg-blue-600' : 'bg-gray-300'
+              }`}
+            >
+              <span
+                className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                  isEnabled ? 'translate-x-4.5' : 'translate-x-0.5'
+                }`}
+              />
+            </button>
+            <span className="text-sm text-gray-700">{isEnabled ? 'Enabled' : 'Disabled'}</span>
+          </div>
         </div>
       </div>
 
-      {/* Targets */}
+      {/* Section 2: Effect — what this policy does */}
+      <div>
+        <SectionHeader title="Effect" subtitle="what this policy does" />
+
+        <div className="grid grid-cols-2 gap-4 mb-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Policy Type</label>
+            <select
+              value={policyType}
+              onChange={(e) => setPolicyType(e.target.value as PolicyType)}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              {POLICY_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+            {isDeny && (
+              <p className="text-xs text-amber-600 mt-1">Deny policies short-circuit or strip columns.</p>
+            )}
+          </div>
+        </div>
+
+        {/* Definition — conditional on policy type */}
+        {needsFilter && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Filter Expression</label>
+            <input
+              type="text"
+              value={filterExpression}
+              onChange={(e) => setFilterExpression(e.target.value)}
+              placeholder="organization_id = {user.tenant}"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              Use <code className="bg-gray-100 px-1 rounded">{'{user.tenant}'}</code>,{' '}
+              <code className="bg-gray-100 px-1 rounded">{'{user.username}'}</code>, or{' '}
+              <code className="bg-gray-100 px-1 rounded">{'{user.id}'}</code> as placeholders.
+            </p>
+          </div>
+        )}
+
+        {needsMask && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Mask Expression</label>
+            <input
+              type="text"
+              value={maskExpression}
+              onChange={(e) => setMaskExpression(e.target.value)}
+              placeholder="CONCAT('***-**-', RIGHT(ssn, 4))"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              SQL expression to replace the column value. Reference the column by name.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* Section 3: Targets — where it applies */}
       <div>
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-semibold text-gray-900">Targets</h3>
+          <div className="flex items-baseline gap-2">
+            <h3 className="text-sm font-semibold text-gray-900">Targets</h3>
+            <span className="text-xs text-gray-400">&middot; where it applies</span>
+          </div>
           <button
             type="button"
             onClick={addTarget}
@@ -650,245 +658,143 @@ export function PolicyForm({ initial, initialDecisionFunction, decisionFnLoading
         )}
       </div>
 
-      {/* Definition — conditional on policy type */}
-      {needsFilter && (
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Filter Expression</label>
-          <input
-            type="text"
-            value={filterExpression}
-            onChange={(e) => setFilterExpression(e.target.value)}
-            placeholder="organization_id = {user.tenant}"
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-          <p className="text-xs text-gray-400 mt-1">
-            Use <code className="bg-gray-100 px-1 rounded">{'{user.tenant}'}</code>,{' '}
-            <code className="bg-gray-100 px-1 rounded">{'{user.username}'}</code>, or{' '}
-            <code className="bg-gray-100 px-1 rounded">{'{user.id}'}</code> as placeholders.
-          </p>
-        </div>
-      )}
+      {/* Section 4: Decision Function — when it fires (optional) */}
+      <div>
+        <SectionHeader title="Decision Function" subtitle="when it fires (optional)" />
 
-      {needsMask && (
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Mask Expression</label>
-          <input
-            type="text"
-            value={maskExpression}
-            onChange={(e) => setMaskExpression(e.target.value)}
-            placeholder="CONCAT('***-**-', RIGHT(ssn, 4))"
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-          <p className="text-xs text-gray-400 mt-1">
-            SQL expression to replace the column value. Reference the column by name.
-          </p>
-        </div>
-      )}
-
-      {/* Decision Function (Optional) */}
-      <div className="border border-gray-200 rounded-lg overflow-hidden">
-        <button
-          type="button"
-          onClick={() => setShowDecisionFn((v) => !v)}
-          className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors"
-        >
-          <span className="text-sm font-semibold text-gray-900">
-            Decision Function{' '}
-            <span className="text-gray-400 font-normal">
-              {decisionFnId ? `(${initial?.decision_function?.name ?? 'attached'})` : '(Optional)'}
-            </span>
-          </span>
-          <span className="text-gray-400 text-xs">{showDecisionFn ? 'Collapse' : 'Expand'}</span>
-        </button>
-
-        {showDecisionFn && decisionFnLoading && (
-          <div className="p-4 flex items-center gap-2 text-sm text-gray-400">
-            <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-            </svg>
-            Loading decision function…
-          </div>
-        )}
-        {showDecisionFn && !decisionFnLoading && (
-          <div className="p-4 space-y-4">
-            <p className="text-xs text-gray-500">
-              A JavaScript function that gates whether this policy fires. If the function returns{' '}
-              <code className="bg-gray-100 px-1 rounded">{'{ fire: false }'}</code>, the policy is skipped.
-              Decision functions are saved as separate entities and can be shared across policies.
-            </p>
-
-            {/* Function name */}
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Function Name</label>
-              <input
-                type="text"
-                value={decisionFnName}
-                onChange={(e) => setDecisionFnName(e.target.value)}
-                placeholder={`${name || 'policy'} (decision)`}
-                className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-              />
-            </div>
-
-            <div className="grid grid-cols-3 gap-4">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Evaluate Context</label>
-                <select
-                  value={evaluateContext}
-                  onChange={(e) => setEvaluateContext(e.target.value as EvaluateContext)}
-                  className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                >
-                  <option value="session">Session (user/time context)</option>
-                  <option value="query">Query (full context)</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">On Error</label>
-                <select
-                  value={onError}
-                  onChange={(e) => setOnError(e.target.value as OnErrorBehavior)}
-                  className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                >
-                  <option value="deny">Deny (fail-secure)</option>
-                  <option value="skip">Skip (fail-open)</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Log Level</label>
-                <select
-                  value={logLevel}
-                  onChange={(e) => setLogLevel(e.target.value as LogLevel)}
-                  className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                >
-                  <option value="off">Off</option>
-                  <option value="error">Error only</option>
-                  <option value="info">Info (console.log + errors)</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setDecisionFnIsEnabled((v) => !v)}
-                className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors focus:outline-none ${
-                  decisionFnIsEnabled ? 'bg-blue-600' : 'bg-gray-300'
+        <div className="border border-gray-200 rounded-lg p-4">
+          {/* Toggle */}
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => handleToggleDecisionFn(!useDecisionFn)}
+              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none ${
+                useDecisionFn ? 'bg-blue-600' : 'bg-gray-300'
+              }`}
+              aria-label="Use decision function"
+            >
+              <span
+                className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                  useDecisionFn ? 'translate-x-4.5' : 'translate-x-0.5'
                 }`}
-              >
-                <span
-                  className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
-                    decisionFnIsEnabled ? 'translate-x-3.5' : 'translate-x-0.5'
-                  }`}
-                />
-              </button>
-              <span className="text-xs text-gray-600">
-                {decisionFnIsEnabled ? 'Function enabled (gates policy)' : 'Function paused (policy always fires)'}
-              </span>
-            </div>
-
-            {/* Code Editor */}
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Function Source</label>
-              <textarea
-                value={decisionFn}
-                onChange={(e) => setDecisionFn(e.target.value)}
-                rows={12}
-                placeholder={`function evaluate(ctx, config) {\n  // ctx.session.user: { id, username, tenant, roles }\n  // ctx.session.time: { hour, day_of_week }\n  // ctx.session.datasource: { name, access_mode }\n${evaluateContext === 'query' ? '  // ctx.query: { tables, columns, join_count, has_aggregation, has_subquery, has_where, statement_type }\n' : ''}\n  return { fire: true };\n}`}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 bg-gray-900 text-green-300"
-                spellCheck={false}
               />
-            </div>
+            </button>
+            <span className="text-sm text-gray-700">Use decision function</span>
+          </div>
 
-            {/* Config Editor */}
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Config JSON</label>
-              <textarea
-                value={decisionConfigStr}
-                onChange={(e) => setDecisionConfigStr(e.target.value)}
-                rows={3}
-                placeholder='{ "max_joins": 3 }'
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                spellCheck={false}
-              />
-              <p className="text-xs text-gray-400 mt-1">
-                Parameters passed as the second argument to your function. Use this instead of hardcoding values in JavaScript — makes it easy to change thresholds per environment.
-              </p>
-            </div>
+          {/* Toggle OFF */}
+          {!useDecisionFn && (
+            <p className="text-xs text-gray-400 mt-2">
+              Policy always fires. No custom logic evaluated.
+            </p>
+          )}
 
-            {/* Reference Panel */}
-            <div className="bg-blue-50 border border-blue-100 rounded-lg px-4 py-3">
-              <h4 className="text-xs font-semibold text-blue-800 mb-2">Available Context</h4>
-              <div className="text-xs text-blue-700 font-mono space-y-0.5">
-                <p>ctx.session.user.id, .username, .tenant, .roles[]</p>
-                <p>ctx.session.time.hour, .day_of_week</p>
-                <p>ctx.session.datasource.name, .access_mode</p>
-                {evaluateContext === 'query' && (
-                  <p className="text-blue-900 font-semibold">
-                    ctx.query.tables[], .columns[], .join_count, .has_aggregation, .has_subquery, .has_where, .statement_type
-                  </p>
-                )}
-                {evaluateContext === 'session' && (
-                  <p className="text-blue-400 italic">ctx.query — not available in session mode</p>
-                )}
-              </div>
-            </div>
-
-            {/* Test Panel */}
-            <div className="border border-gray-200 rounded-lg p-3 space-y-3">
-              <h4 className="text-xs font-semibold text-gray-700">Test</h4>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Mock Context</label>
-                <textarea
-                  value={testContextStr}
-                  onChange={(e) => setTestContextStr(e.target.value)}
-                  rows={6}
-                  className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  spellCheck={false}
-                />
-              </div>
+          {/* Toggle ON, stale reference */}
+          {useDecisionFn && isStaleRef && (
+            <div className="mt-3 bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-lg px-4 py-3 flex items-center justify-between">
+              <span>Function not found — detach and create a new one.</span>
               <button
                 type="button"
-                onClick={handleTestDecisionFn}
-                disabled={isTesting || !decisionFn.trim()}
-                className="bg-green-600 hover:bg-green-700 text-white text-xs font-medium rounded px-3 py-1.5 transition-colors disabled:opacity-50"
+                onClick={handleDetach}
+                className="text-xs text-red-600 hover:text-red-800 font-medium ml-3"
               >
-                {isTesting ? 'Running…' : 'Run Test'}
+                Detach
               </button>
-              {testResult && (
-                <pre className="bg-gray-900 text-green-300 rounded p-3 text-xs font-mono overflow-x-auto whitespace-pre-wrap max-h-48 overflow-y-auto">
-                  {testResult}
-                </pre>
-              )}
             </div>
+          )}
 
-            {/* Save / Detach actions */}
-            <div className="flex items-center gap-3 pt-2 border-t border-gray-100">
+          {/* Toggle ON, no function attached */}
+          {useDecisionFn && !attachedFnSummary && !isStaleRef && (
+            <div className="mt-3 flex items-center gap-3">
               <button
                 type="button"
-                onClick={handleSaveDecisionFunction}
-                disabled={decisionFnSaving || !decisionFn.trim()}
-                className="bg-purple-600 hover:bg-purple-700 text-white text-xs font-medium rounded px-3 py-1.5 transition-colors disabled:opacity-50"
+                onClick={handleOpenCreateModal}
+                className="text-sm text-blue-600 hover:text-blue-800 font-medium"
               >
-                {decisionFnSaving ? 'Saving…' : decisionFnId ? 'Update Function' : 'Create Function'}
+                + Create New
               </button>
-              {decisionFnId && (
+              {!showSelectExisting ? (
                 <button
                   type="button"
-                  onClick={handleDetachDecisionFunction}
-                  className="text-xs text-red-500 hover:text-red-700"
+                  onClick={handleShowSelectExisting}
+                  className="text-sm text-blue-600 hover:text-blue-800 font-medium"
                 >
-                  Detach Function
+                  Select Existing
                 </button>
+              ) : (
+                <div className="flex items-center gap-2">
+                  {loadingExisting ? (
+                    <span className="text-xs text-gray-400">Loading…</span>
+                  ) : existingFunctions.length === 0 ? (
+                    <span className="text-xs text-gray-400">No functions available</span>
+                  ) : (
+                    <select
+                      onChange={(e) => { if (e.target.value) handleSelectExisting(e.target.value) }}
+                      defaultValue=""
+                      className="border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      <option value="" disabled>Pick a function…</option>
+                      {existingFunctions.map((fn) => (
+                        <option key={fn.id} value={fn.id}>{fn.name}</option>
+                      ))}
+                    </select>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setShowSelectExisting(false)}
+                    className="text-xs text-gray-400 hover:text-gray-600"
+                  >
+                    Cancel
+                  </button>
+                </div>
               )}
-              {decisionFnError && (
-                <span className="text-xs text-red-600">{decisionFnError}</span>
-              )}
-              {decisionFnId && !decisionFnError && (
-                <span className="text-xs text-green-600">Attached</span>
+              {attachedFnError && (
+                <span className="text-xs text-red-600">{attachedFnError}</span>
               )}
             </div>
-          </div>
-        )}
+          )}
+
+          {/* Toggle ON, function attached — compact widget */}
+          {useDecisionFn && attachedFnSummary && (
+            <div className="mt-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <span className="text-sm font-mono text-gray-900">
+                    <span className="text-gray-400">ƒ</span> {attachedFnSummary.name}
+                  </span>
+                  <span className="text-xs text-gray-500">
+                    {attachedFnSummary.is_enabled ? (
+                      <span className="text-green-600">Enabled</span>
+                    ) : (
+                      <span className="text-gray-400">Disabled</span>
+                    )}
+                    {' · '}
+                    {attachedFnSummary.evaluate_context === 'query' ? 'Query' : 'Session'}
+                  </span>
+                </div>
+              </div>
+              {attachedFnDescription && (
+                <p className="text-xs text-gray-500 mt-1">{attachedFnDescription}</p>
+              )}
+              <div className="flex items-center gap-3 mt-2">
+                <button
+                  type="button"
+                  onClick={handleOpenEditModal}
+                  className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDetach}
+                  className="text-xs text-red-500 hover:text-red-700"
+                >
+                  Detach
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {error && (
@@ -904,6 +810,15 @@ export function PolicyForm({ initial, initialDecisionFunction, decisionFnLoading
       >
         {isSubmitting ? 'Saving…' : submitLabel}
       </button>
+
+      {/* Decision Function Modal */}
+      <DecisionFunctionModal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        onSaved={handleModalSaved}
+        initialId={modalInitialId}
+        policyName={name}
+      />
     </form>
   )
 }

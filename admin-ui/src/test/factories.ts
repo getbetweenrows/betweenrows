@@ -1,6 +1,7 @@
 import type { User, LoginResponse, PaginatedResponse } from '../types/user'
 import type { DataSource, DataSourceType, FieldDef } from '../types/datasource'
 import type { PolicyResponse, PolicyAssignmentResponse } from '../types/policy'
+import type { DecisionFunctionResponse } from '../types/decisionFunction'
 import type {
   CatalogResponse,
   DiscoveredSchemaResponse,
@@ -136,6 +137,28 @@ export function makePolicyAssignment(
     assignment_scope: 'all',
     priority: 100,
     created_at: '2024-01-01T00:00:00Z',
+    ...overrides,
+  }
+}
+
+export function makeDecisionFunction(overrides: Partial<DecisionFunctionResponse> = {}): DecisionFunctionResponse {
+  return {
+    id: id(),
+    name: `decision_fn_${counter}`,
+    description: null,
+    language: 'javascript',
+    decision_fn: 'function evaluate(ctx) { return { fire: true }; }',
+    decision_config: null,
+    evaluate_context: 'session',
+    on_error: 'deny',
+    log_level: 'off',
+    is_enabled: true,
+    version: 1,
+    policy_count: 1,
+    created_by: 'user-1',
+    updated_by: 'user-1',
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
     ...overrides,
   }
 }

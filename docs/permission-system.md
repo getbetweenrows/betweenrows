@@ -322,6 +322,58 @@ Evaluation is capped at **1,000,000 WASM instructions** per invocation. Exceedin
 
 Decision function results are included in the `policies_applied` JSON field of each `query_audit_log` row. Each entry records `fire`, `fuel_consumed`, `time_us`, `error` (if any), and `logs` (if log_level is not `"off"`). This gives a complete trace of which policies fired and why.
 
+### Scope filtering: targets vs decision functions
+
+Targets and decision functions both control when a policy fires, but they answer different questions and operate at different layers:
+
+| | Targets (declarative) | Decision Functions (programmatic) |
+|---|---|---|
+| **Question answered** | *Where* does this policy apply? | *When* does this policy fire? |
+| **Defined by** | Schema/table/column name patterns | JavaScript logic over session + query context |
+| **Evaluated at** | Plan time — the proxy checks if the query touches a matched table/column | Connect time (visibility) and/or query time (enforcement) |
+| **Cost** | Zero runtime cost — pattern matching during plan rewrite | ~1ms WASM execution per evaluation |
+| **Expressiveness** | Glob patterns on names only (`"public"`, `"raw_*"`, `"*"`) | Arbitrary logic: roles, time, query shape, config parameters |
+| **Visibility impact** | Always — targets determine which tables/columns the policy can affect | Conditional — `fire: false` skips the policy, potentially leaving columns/tables visible |
+
+**When to use targets alone (no decision function):**
+
+- The policy applies to a fixed set of tables or columns by name — e.g., `column_deny` on `ssn`, `row_filter` on `public.orders`.
+- The policy should always fire when the user queries the matched objects. No conditional logic needed.
+- You want zero WASM overhead.
+
+**When to add a decision function:**
+
+- The policy should fire conditionally based on *who* is querying (roles, tenant), *when* (time of day, day of week), or *what* the query looks like (number of joins, aggregation, specific tables).
+- You need logic that targets can't express — e.g., "only mask SSN for users who are not in the `compliance` role" or "only apply this row filter during business hours."
+- You want to reuse the same conditional logic across multiple policies (decision functions are standalone entities, shareable via `decision_function_id`).
+
+**How they compose:**
+
+Targets are evaluated first. If the query does not touch any table/column matched by the policy's targets, the policy is skipped entirely — the decision function is never called. If targets match, the decision function (if attached) is evaluated next. Both must pass for the policy to fire.
+
+```
+Query arrives
+  → Does this query touch a target? (declarative, pattern-based)
+     No  → policy skipped (no WASM cost)
+     Yes → Is a decision function attached?
+            No  → policy fires
+            Yes → Evaluate function: fire?
+                   true  → policy fires
+                   false → policy skipped
+```
+
+This layered design means targets act as a cheap pre-filter: they narrow the scope to the relevant tables/columns, and the decision function provides fine-grained conditional logic only when the pre-filter matches. You should always set targets as specifically as possible, even when a decision function is attached, to avoid unnecessary WASM evaluation.
+
+**Example — business-hours masking:**
+
+Goal: mask the `salary` column in `hr.employees` only outside business hours.
+
+- **Targets**: `schemas: ["hr"], tables: ["employees"], columns: ["salary"]` — narrow scope to exactly the right column.
+- **Decision function**: `function evaluate(ctx) { const h = ctx.session.time.hour; return { fire: h < 9 || h >= 17 }; }` — mask fires only outside 9-5.
+- **Result**: Queries to other tables skip instantly (targets don't match). Queries to `hr.employees.salary` during business hours skip (decision function returns `fire: false`). Queries outside business hours fire the mask.
+
+Without the decision function, the mask would apply 24/7. Without the targets, the decision function would run on every query to every table — wasting WASM cycles on irrelevant queries.
+
 ## Known limitations
 
 ### `table_deny` uses the upstream (source) schema name, not the alias

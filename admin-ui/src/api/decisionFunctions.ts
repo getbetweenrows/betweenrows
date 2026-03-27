@@ -7,6 +7,13 @@ import type {
   TestDecisionFnResponse,
 } from '../types/decisionFunction'
 
+export async function listDecisionFunctions(): Promise<DecisionFunctionResponse[]> {
+  const { data } = await client.get<{ data: DecisionFunctionResponse[] }>('/decision-functions', {
+    params: { page_size: 200 },
+  })
+  return data.data
+}
+
 export async function createDecisionFunction(
   payload: CreateDecisionFunctionPayload,
 ): Promise<DecisionFunctionResponse> {

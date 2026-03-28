@@ -441,15 +441,13 @@ pub async fn delete_decision_function(
 
 pub async fn test_decision_fn(
     AdminClaims(_): AdminClaims,
+    State(state): State<AdminState>,
     Json(body): Json<TestDecisionFnRequest>,
 ) -> Result<Json<TestDecisionFnResponse>, ApiErr> {
     use crate::decision::DecisionRuntime;
-    use crate::decision::wasm::WasmDecisionRuntime;
 
-    let runtime = WasmDecisionRuntime::new()
-        .map_err(|e| ApiErr::internal(format!("Failed to initialize WASM runtime: {e}")))?;
-
-    let result = runtime
+    let result = state
+        .wasm_runtime
         .validate(&body.decision_fn, &body.context, &body.config)
         .await
         .map_err(|e| ApiErr::internal(format!("Decision function test failed: {e}")))?;
@@ -464,16 +462,12 @@ pub async fn test_decision_fn(
 // ---------- compile helper ----------
 
 async fn compile_js(js_source: &str) -> Result<Vec<u8>, ApiErr> {
-    use crate::decision::DecisionRuntime;
-    use crate::decision::wasm::WasmDecisionRuntime;
-
-    let runtime = WasmDecisionRuntime::new()
-        .map_err(|e| ApiErr::internal(format!("Failed to initialize WASM runtime: {e}")))?;
-
-    runtime.compile("compile", js_source).await.map_err(|e| {
-        ApiErr::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("JS compilation failed: {e}"),
-        )
-    })
+    crate::decision::wasm::compile_with_javy(js_source)
+        .await
+        .map_err(|e| {
+            ApiErr::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("JS compilation failed: {e}"),
+            )
+        })
 }

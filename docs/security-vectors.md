@@ -1,6 +1,6 @@
-# Permission System — Security Tests
+# Security Vectors
 
-This document lists attack vectors and corresponding integration tests for the permission system.
+Attack vectors and corresponding integration tests for the permission system. Each vector describes a potential bypass or information leak, the defense mechanism, and the test that verifies it.
 
 ## Test environment
 
@@ -723,4 +723,122 @@ Additional fixes:
 
 **Test**: `df_column_deny_query_ctx_skipped_at_visibility` — column_deny + query df fire:false → column visible (visibility skipped, query-time fire:false). `df_column_deny_query_ctx_username_check_deferred` — column_deny + query df that fires only for admin → non-admin sees columns.
 
+---
+
+### 59. Predicate probing on masked/denied columns
+
+**Vector**: A user cannot see `ssn` values (masked or denied), but can use `WHERE ssn = '...'` to test whether a specific SSN exists. By observing whether rows are returned, the attacker enumerates values without seeing the raw column. Variants include: bare `WHERE`, `EXISTS (SELECT 1 FROM ... WHERE ssn = ...)`, and `JOIN ... ON c.ssn = v.probe_ssn` with user-supplied VALUES.
+
+**Examples**:
+- `SELECT id FROM customers WHERE ssn = '123-45-6789';` — returns row if SSN exists
+- `SELECT COUNT(*) FROM orders o WHERE EXISTS (SELECT 1 FROM customers c WHERE c.ssn = '123-45-6789' AND c.id = o.customer_id);` — correlated subquery probing
+- `SELECT c.id FROM customers c JOIN (VALUES ('123-45-6789')) AS v(ssn) ON c.ssn = v.ssn;` — VALUES-clause join probing
+
+**Defense**: For `column_deny`, denied column references in WHERE/JOIN/EXISTS should be blocked or rewritten to FALSE. For `column_mask`, the raw column is still accessible in predicates by design (the mask only affects projection output) — document this as an accepted trade-off.
+
+**Test**: TBD — needs decision on mitigation strategy. See also: vectors 5 (mask bypass via expressions), 11 (column_deny strips columns).
+
+---
+
+### 60. Aggregate inference on masked/denied columns
+
+**Vector**: Aggregate functions leak statistical properties even when column values are masked. `COUNT(DISTINCT ssn)` reveals cardinality. `MIN(salary)` / `MAX(salary)` reveals range. Combined with `GROUP BY`, small groups deanonymize individuals (if a department has COUNT=1, then MIN=MAX=actual value).
+
+**Example**: `SELECT department, COUNT(DISTINCT ssn), MIN(salary), MAX(salary) FROM employees GROUP BY department;`
+
+**Defense**: For `column_mask`, masks are applied at TableScan level, so aggregates operate on masked values (safe for hash-based masks, but partial masks like last-4 digits are still revealing in bulk). For `column_deny`, the column is stripped from the schema and aggregates should fail with "column not found." No additional defense needed for deny; for mask, this is an accepted trade-off — admins should use `column_deny` for high-sensitivity columns where even aggregate properties must be hidden.
+
+**Test**: TBD — verify that `COUNT(DISTINCT masked_col)` operates on masked values, not raw. Verify `MIN/MAX(denied_col)` fails with column-not-found.
+
+---
+
+### 61. EXPLAIN plan metadata leakage
+
+**Vector**: `EXPLAIN SELECT * FROM customers;` may reveal injected filter expressions (e.g., `Filter: organization_id = 'acme'`), table names hidden by `table_deny`, or column names hidden by `column_deny`. The query plan is a side channel for policy structure.
+
+**Example**: `EXPLAIN ANALYZE SELECT * FROM secret_table;` — plan output shows `TableScan: secret_table, filter: organization_id = 'tenant-123'`.
+
+**Defense**: Options: (a) Strip/redact EXPLAIN output. (b) Block EXPLAIN for non-admin users. (c) Return sanitized plan showing user's logical query, not the rewritten physical plan. Current status: not mitigated — needs investigation into what DataFusion's EXPLAIN exposes.
+
+**Test**: TBD — run EXPLAIN with active row_filter and column_deny policies, inspect output for leaked filter expressions and hidden column/table names.
+
+---
+
+### 62. HAVING clause references raw masked column values
+
+**Vector**: `HAVING MIN(salary) > 100000` references the raw column for group filtering even when `salary` is masked in SELECT. Combined with small groups, this deanonymizes individuals.
+
+**Example**: `SELECT department FROM employees GROUP BY department HAVING MAX(salary) > 200000;` — reveals which departments contain high earners.
+
+**Defense**: For `column_mask`, the mask is applied at TableScan level via projection replacement. The HAVING clause should reference the masked alias, not the raw column. Verify that DataFusion's plan rewrite propagates the mask through the aggregation. For `column_deny`, the column should be absent from the schema entirely, so HAVING references fail.
+
+**Test**: TBD — verify HAVING on a masked column uses masked values (or fails). Verify HAVING on a denied column fails with column-not-found.
+
+---
+
+### 63. String aggregation collects bulk masked values
+
+**Vector**: `SELECT STRING_AGG(ssn, ',') FROM customers;` — for `column_mask` with partial masking (last-4 digits), this collects all last-4 digits in one string. Combined with names (`STRING_AGG(CONCAT(RIGHT(ssn, 4), ':', name), '; ')`), this may be enough to identify individuals.
+
+**Defense**: For `column_deny`, column is stripped — aggregate receives NULL (safe). For `column_mask`, aggregation operates on masked values as designed. Bulk collection of masked values is an inherent trade-off of masking vs denying. Rate limiting (future CX-11/CX-12) is the appropriate mitigation.
+
+**Test**: TBD — verify `STRING_AGG(denied_col, ',')` returns NULL/empty. Verify `STRING_AGG(masked_col, ',')` operates on masked values.
+
+---
+
+### 64. CASE expression bypass of column_deny
+
+**Vector**: `SELECT CASE WHEN ssn IS NOT NULL THEN 'has_ssn' ELSE 'no_ssn' END FROM customers;` — if `ssn` is denied, the CASE expression references it indirectly. The user learns which rows have SSN values without seeing the values. More aggressive: `CASE WHEN ssn LIKE '123%' THEN 'match' ELSE 'no' END` — equivalent to a WHERE probe embedded in SELECT.
+
+**Defense**: The deny engine must trace column references through all expression types (CASE, COALESCE, function arguments). If `ssn` is denied, any expression referencing `ssn` must also be denied or rewritten. Current implementation strips denied columns from the top-level Projection — verify that CASE expressions referencing denied columns are caught.
+
+**Test**: TBD — create column_deny on `ssn`. Run `SELECT CASE WHEN ssn IS NOT NULL THEN 'yes' ELSE 'no' END FROM customers;`. Verify the query either fails or the CASE is rewritten to not reference `ssn`.
+
+---
+
+### 65. Window function ordering leaks masked column ranking
+
+**Vector**: `SELECT id, ROW_NUMBER() OVER (ORDER BY salary) FROM employees;` — even if `salary` is masked in the projection, the ROW_NUMBER ordering reveals relative ranking. Combined with known values, this deanonymizes.
+
+**Defense**: Mask is applied at TableScan level, so the ORDER BY in the window function should use the masked value (not raw). Verify this is the case. If the window function's ORDER BY uses the pre-mask column reference, the ordering leaks information.
+
+**Test**: TBD — verify `ROW_NUMBER() OVER (ORDER BY masked_col)` uses masked values for ordering.
+
+---
+
+### 66. Timing side channel on denied tables
+
+**Vector**: `table_deny` might return a different response time than querying a genuinely non-existent table, allowing an attacker to distinguish "exists but denied" from "doesn't exist."
+
+**Defense**: Current implementation returns the same "not found" error for both (good — vector 26 covers this). Ensure response timing is also indistinguishable. No early-exit optimizations that create measurable timing differences.
+
+**Test**: Covered by vector 26 for error message equivalence. Timing equivalence is difficult to test automatically — document as a design principle.
+
+---
+
+## ABAC (User Attributes) — Vectors 67–68
+
+### 67. Attribute-based built-in field override
+
+**Vector**: Admin defines a user attribute named `tenant` and sets it to `evil` on a user, hoping to override `{user.tenant}` in row filter expressions and gain access to another tenant's data.
+
+**Defense**: Two layers of protection:
+1. **API validation**: `validate_attribute_definition` rejects reserved key names (`tenant`, `username`, `id`, `user_id`) for `entity_type = "user"`. The attribute definition cannot be created.
+2. **Runtime priority**: `UserVars::get()` uses a `match` statement where built-in fields are checked first. Even if a `tenant` attribute somehow existed in the JSON column (bypassing the API), `{user.tenant}` would resolve to the built-in tenant value, not the attribute.
+
+**Test**:
+- **API layer**: `abac_builtin_field_override_security` — API rejects `tenant` as attribute key with 422.
+- **Runtime layer**: `test_user_vars_builtin_priority_over_attributes` — `UserVars::get()` returns builtin value even when conflicting attribute exists. `test_filter_expr_builtin_overrides_attribute` — filter expression substitutes builtin tenant, not the attribute override.
+
+---
+
+### 68. Unsupported mask/filter expression syntax fails silently
+
+**Vector**: Admin creates a policy with a mask expression using SQL syntax not supported by the custom expression parser (e.g., `EXTRACT`, `SUBSTRING`, correlated subquery). The expression parse fails silently at query time — the mask is not applied and raw PII is returned.
+
+**Bug**: `parse_mask_expr` errors were logged but swallowed in `PolicyEffects::collect()`. The mask was not inserted into `column_masks`, so the raw column value passed through.
+
+**Defense**: `validate_expression()` is called at policy create/update time (inside `validate_definition()`). It dry-run parses the expression with dummy user variables. If the syntax is unsupported, the API returns 422 immediately — the policy is not saved. At query time, the swallowing behavior remains as a defensive fallback, but in practice only validated expressions reach query time.
+
+**Test**: Unit tests in `dto.rs` can verify that unsupported syntax (e.g., `EXTRACT(HOUR FROM col)`) is rejected at save time. Integration test `abac_column_mask_case_when` verifies that CASE WHEN (a previously unsupported syntax, now added) works end-to-end.
 

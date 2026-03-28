@@ -19,6 +19,8 @@ import { RolesListPage } from './pages/RolesListPage'
 import { RoleCreatePage } from './pages/RoleCreatePage'
 import { RoleEditPage } from './pages/RoleEditPage'
 import { AdminAuditPage } from './pages/AdminAuditPage'
+import { AttributeDefinitionsPage } from './pages/AttributeDefinitionsPage'
+import { AttributeDefinitionCreatePage, AttributeDefinitionEditPage } from './pages/AttributeDefinitionEditPage'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -49,6 +51,9 @@ export function App() {
                 <Route path="roles" element={<RolesListPage />} />
                 <Route path="roles/create" element={<RoleCreatePage />} />
                 <Route path="roles/:id" element={<RoleEditPage />} />
+                <Route path="attributes" element={<AttributeDefinitionsPage />} />
+                <Route path="attributes/create" element={<AttributeDefinitionCreatePage />} />
+                <Route path="attributes/:id/edit" element={<AttributeDefinitionEditPage />} />
                 <Route path="policies" element={<PoliciesListPage />} />
                 <Route path="policies/create" element={<PolicyCreatePage />} />
                 <Route path="policies/:id/edit" element={<PolicyEditPage />} />

@@ -69,6 +69,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Database::connect(&database_url).await?;
     Migrator::up(&db, None).await?;
 
+    // Recompile any decision functions that have JS source but no WASM bytecode
+    // (e.g. after migration). This only shells out to the javy CLI — it does not
+    // require the WasmDecisionRuntime created later in serve().
     recompile_decision_functions(&db).await;
 
     tracing::info!("database initialized");
@@ -186,11 +189,16 @@ async fn serve(
             .await?;
     }
 
+    // ── WASM runtime (single shared instance for all decision function evaluation) ──
+    let wasm_runtime = Arc::new(
+        proxy::decision::wasm::WasmDecisionRuntime::new().expect("Failed to create WASM runtime"),
+    );
+
     // ── Engine cache ──────────────────────────────────────────────────────────
-    let engine_cache = EngineCache::new(db.clone(), master_key);
+    let engine_cache = EngineCache::new(db.clone(), master_key, wasm_runtime.clone());
 
     // ── Policy hook (shared between admin API and proxy handler) ──────────────
-    let policy_hook = PolicyHook::new(db.clone()).expect("Failed to create WASM engine");
+    let policy_hook = PolicyHook::new(db.clone(), wasm_runtime.clone());
 
     // ── Admin REST API ────────────────────────────────────────────────────────
     let jwt_secret = std::env::var("BR_ADMIN_JWT_SECRET").unwrap_or_else(|_| {
@@ -230,6 +238,7 @@ async fn serve(
         )),
         policy_hook: Some(policy_hook.clone()),
         proxy_handler: Some(handler.clone()),
+        wasm_runtime: wasm_runtime.clone(),
     };
 
     let admin_listener = TcpListener::bind(&admin_bind_addr).await?;

@@ -111,7 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Admin UI — Policy Assignments** — assign/remove policies per datasource with optional user scope and priority
 - **Admin UI — Query Audit** — paginated audit log with original query, rewritten query, and applied policy snapshots
 - **Demo e-commerce schema** — `scripts/demo_ecommerce/` with schema, seed script, and example policies
-- **Docs** — `docs/permission-system.md` (user guide) and `docs/permission-security-tests.md` (security test plan)
+- **Docs** — `docs/permission-system.md` (user guide) and `docs/security-vectors.md` (security test plan)
 
 ### Changed
 - **Arrow encoding** — migrated to `arrow-pg`; handler simplified; removed `arrow_conversion` and `sql_rewrite` modules

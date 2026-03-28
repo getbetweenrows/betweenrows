@@ -1,4 +1,5 @@
 pub mod admin_audit_log;
+pub mod attribute_definition;
 pub mod data_source;
 pub mod data_source_access;
 pub mod decision_function;

@@ -10,10 +10,14 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
-use crate::{auth::Auth, entity::proxy_user};
+use crate::{
+    auth::Auth,
+    entity::{attribute_definition, proxy_user},
+};
 
 use super::{
     AdminState, ApiErr,
+    admin_audit::{AuditAction, AuditedTxn},
     dto::{
         ChangePasswordRequest, CreateUserRequest, ListUsersQuery, PaginatedResponse,
         UpdateUserRequest, UserResponse, validate_username,
@@ -90,7 +94,7 @@ fn validate_password(password: &str) -> Result<(), ApiErr> {
 }
 
 pub async fn create_user(
-    AdminClaims(_): AdminClaims,
+    AdminClaims(claims): AdminClaims,
     State(state): State<AdminState>,
     Json(body): Json<CreateUserRequest>,
 ) -> Result<(StatusCode, Json<UserResponse>), ApiErr> {
@@ -100,20 +104,26 @@ pub async fn create_user(
     let password_hash = Auth::hash_password(&body.password).map_err(ApiErr::internal)?;
 
     let now = Utc::now().naive_utc();
+    let id = Uuid::now_v7();
+
+    let mut txn = AuditedTxn::begin(&state.db)
+        .await
+        .map_err(ApiErr::internal)?;
+
     let model = proxy_user::ActiveModel {
-        id: Set(Uuid::now_v7()),
-        username: Set(body.username),
+        id: Set(id),
+        username: Set(body.username.clone()),
         password_hash: Set(password_hash),
-        tenant: Set(body.tenant),
+        tenant: Set(body.tenant.clone()),
         is_admin: Set(body.is_admin),
         is_active: Set(true),
-        email: Set(body.email),
-        display_name: Set(body.display_name),
+        email: Set(body.email.clone()),
+        display_name: Set(body.display_name.clone()),
         created_at: Set(now),
         updated_at: Set(now),
         ..Default::default()
     }
-    .insert(&state.db)
+    .insert(&*txn)
     .await
     .map_err(|e| {
         let msg = e.to_string();
@@ -123,6 +133,21 @@ pub async fn create_user(
             ApiErr::internal(e)
         }
     })?;
+
+    txn.audit(
+        "proxy_user",
+        id,
+        AuditAction::Create,
+        claims.sub,
+        serde_json::json!({
+            "after": {
+                "username": model.username,
+                "tenant": model.tenant,
+                "is_admin": model.is_admin,
+            }
+        }),
+    );
+    txn.commit().await.map_err(ApiErr::internal)?;
 
     Ok((StatusCode::CREATED, Json(UserResponse::from(model))))
 }
@@ -165,7 +190,20 @@ pub async fn update_user(
         }
     }
 
+    // Capture before-state for audit
+    let before_snapshot = serde_json::json!({
+        "tenant": user.tenant,
+        "is_admin": user.is_admin,
+        "is_active": user.is_active,
+        "email": user.email,
+        "display_name": user.display_name,
+        "attributes": user.attributes,
+    });
+
     let mut active: proxy_user::ActiveModel = user.into();
+
+    let tenant_changed = body.tenant.is_some();
+    let is_active_changed = body.is_active.is_some();
 
     if let Some(tenant) = body.tenant {
         active.tenant = Set(tenant);
@@ -182,9 +220,91 @@ pub async fn update_user(
     if let Some(display_name) = body.display_name {
         active.display_name = Set(Some(display_name));
     }
+
+    // Handle attributes (full-replace semantics)
+    let mut attributes_changed = false;
+    if let Some(ref attrs) = body.attributes {
+        // Validate against attribute definitions
+        if !attrs.is_empty() {
+            let defs = attribute_definition::Entity::find()
+                .filter(attribute_definition::Column::EntityType.eq("user"))
+                .all(&state.db)
+                .await
+                .map_err(ApiErr::internal)?;
+
+            let defs_by_key = attribute_definition::definitions_by_key(&defs);
+
+            for (key, value) in attrs {
+                let def = defs_by_key.get(key.as_str()).ok_or_else(|| {
+                    ApiErr::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("Unknown attribute key '{key}'. Define it first via attribute definitions."),
+                    )
+                })?;
+
+                attribute_definition::validate_value(value, &def.value_type).map_err(|e| {
+                    ApiErr::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("Invalid value for attribute '{key}': {e}"),
+                    )
+                })?;
+
+                if let Some(ref av_json) = def.allowed_values {
+                    let allowed = attribute_definition::parse_allowed_values(av_json);
+                    if !allowed.is_empty() && !allowed.contains(value) {
+                        return Err(ApiErr::new(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            format!(
+                                "Value '{value}' for attribute '{key}' is not in allowed values: {:?}",
+                                allowed
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        let attrs_json = serde_json::to_string(attrs).map_err(ApiErr::internal)?;
+        active.attributes = Set(attrs_json);
+        attributes_changed = true;
+    }
+
     active.updated_at = Set(Utc::now().naive_utc());
 
-    let updated = active.update(&state.db).await.map_err(ApiErr::internal)?;
+    let mut txn = AuditedTxn::begin(&state.db)
+        .await
+        .map_err(ApiErr::internal)?;
+
+    let updated = active.update(&*txn).await.map_err(ApiErr::internal)?;
+
+    txn.audit(
+        "proxy_user",
+        id,
+        AuditAction::Update,
+        claims.sub,
+        serde_json::json!({
+            "before": before_snapshot,
+            "after": {
+                "tenant": updated.tenant,
+                "is_admin": updated.is_admin,
+                "is_active": updated.is_active,
+                "email": updated.email,
+                "display_name": updated.display_name,
+                "attributes": updated.attributes,
+            }
+        }),
+    );
+    txn.commit().await.map_err(ApiErr::internal)?;
+
+    // Cache invalidation after commit
+    if attributes_changed || tenant_changed || is_active_changed {
+        if let Some(hook) = &state.policy_hook {
+            hook.invalidate_user(id).await;
+        }
+        if let Some(ph) = &state.proxy_handler {
+            ph.rebuild_contexts_for_user(id);
+        }
+    }
 
     Ok(Json(UserResponse::from(updated)))
 }
@@ -243,8 +363,28 @@ pub async fn delete_user(
         return Err(ApiErr::conflict("Cannot delete your own account"));
     }
 
+    let mut txn = AuditedTxn::begin(&state.db)
+        .await
+        .map_err(ApiErr::internal)?;
+
+    txn.audit(
+        "proxy_user",
+        id,
+        AuditAction::Delete,
+        claims.sub,
+        serde_json::json!({
+            "before": {
+                "username": user.username,
+                "tenant": user.tenant,
+                "is_admin": user.is_admin,
+            }
+        }),
+    );
+
     let active: proxy_user::ActiveModel = user.into();
-    active.delete(&state.db).await.map_err(ApiErr::internal)?;
+    active.delete(&*txn).await.map_err(ApiErr::internal)?;
+
+    txn.commit().await.map_err(ApiErr::internal)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -266,12 +406,19 @@ mod tests {
     use chrono::Utc;
     use migration::MigratorTrait as _;
     use sea_orm::{ActiveModelTrait, Database, DatabaseConnection, Set};
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
     use tokio::sync::Mutex;
     use tower::ServiceExt;
     use uuid::Uuid;
 
     const JWT_SECRET: &str = "test-jwt-secret-key-32-chars-pad";
+
+    fn shared_wasm_runtime() -> Arc<crate::decision::wasm::WasmDecisionRuntime> {
+        static RUNTIME: OnceLock<Arc<crate::decision::wasm::WasmDecisionRuntime>> = OnceLock::new();
+        RUNTIME
+            .get_or_init(|| Arc::new(crate::decision::wasm::WasmDecisionRuntime::new().unwrap()))
+            .clone()
+    }
 
     async fn setup_db() -> DatabaseConnection {
         let db = Database::connect("sqlite::memory:").await.unwrap();
@@ -280,7 +427,8 @@ mod tests {
     }
 
     fn make_state(db: DatabaseConnection) -> AdminState {
-        let engine_cache = EngineCache::new(db.clone(), [0u8; 32]);
+        let wasm_runtime = shared_wasm_runtime();
+        let engine_cache = EngineCache::new(db.clone(), [0u8; 32], wasm_runtime.clone());
         AdminState {
             auth: Arc::new(Auth::new(db.clone())),
             db,
@@ -291,6 +439,7 @@ mod tests {
             job_store: Arc::new(Mutex::new(discovery_job::JobStore::new())),
             policy_hook: None,
             proxy_handler: None,
+            wasm_runtime,
         }
     }
 

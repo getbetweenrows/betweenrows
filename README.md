@@ -150,7 +150,7 @@ betweenrows/
 ├── migration/src/                    SeaORM migrations (41 total)
 ├── docs/                             User-facing documentation
 │   ├── permission-system.md          Policy system user guide
-│   ├── permission-security-tests.md  Security test plan
+│   ├── security-vectors.md           Security attack vectors & test plan
 │   ├── permission-stories.md         Detailed permission use cases
 │   └── roadmap.md                    Project roadmap and backlog
 ├── scripts/demo_ecommerce/           Demo schema + seed data
@@ -333,7 +333,7 @@ QueryProxy enforces a two-layer access control model:
 
 **Data plane** — controlled by two independent mechanisms:
 1. *Connection access* — `data_source_access` entries. A user can connect to a datasource via direct assignment, role membership (including inherited roles), or all-user scope. Being an admin does **not** automatically grant data plane access.
-2. *Query policy* — `PolicyHook` applies row filters, column masks, and column access controls per-query based on assigned policies (direct, role-based, or all-scoped). If the datasource `access_mode` is `"policy_required"`, tables with no matching permit policy return empty results.
+2. *Query policy* — `PolicyHook` applies row filters, column masks, and column access controls per-query based on assigned policies (direct, role-based, or all-scoped). If the datasource `access_mode` is `"policy_required"`, tables with no matching permit policy return empty results. Policies can reference built-in identity fields (`{user.tenant}`, `{user.username}`, `{user.id}`) and custom user attributes (`{user.KEY}`) for attribute-based access control (ABAC). Optional decision functions (JavaScript/WASM) provide programmable policy gates.
 
 See `docs/permission-system.md` for the full policy system user guide.
 
@@ -454,6 +454,29 @@ All policy endpoints require admin (`is_admin = true`).
 | GET | `/datasources/{id}/policies` | List policy assignments for datasource |
 | POST | `/datasources/{id}/policies` | Assign policy to datasource (scope: user/role/all) |
 | DELETE | `/datasources/{id}/policies/{assignment_id}` | Remove assignment |
+
+### Decision Functions
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/decision-functions` | List decision functions (paginated) |
+| POST | `/decision-functions` | Create decision function |
+| GET | `/decision-functions/{id}` | Get decision function |
+| PUT | `/decision-functions/{id}` | Update decision function (optimistic concurrency) |
+| DELETE | `/decision-functions/{id}` | Delete decision function |
+| POST | `/decision-functions/{id}/test` | Test decision function with sample context |
+
+### Attribute Definitions
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/attribute-definitions` | List definitions (`?entity_type=user` filter, paginated) |
+| POST | `/attribute-definitions` | Create attribute definition |
+| GET | `/attribute-definitions/{id}` | Get definition |
+| PUT | `/attribute-definitions/{id}` | Update definition |
+| DELETE | `/attribute-definitions/{id}` | Delete definition (`?force=true` to cascade-remove from entities) |
+
+User attributes are set via `PUT /users/{id}` with an `attributes` field (full-replace semantics, validated against definitions). Attributes are available as `{user.KEY}` template variables in policy expressions and as `ctx.session.user.attributes` in decision functions.
 
 ### Audit Log
 

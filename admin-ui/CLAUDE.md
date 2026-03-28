@@ -27,6 +27,11 @@ React 19, Vite 7, Tailwind 4, TanStack Query 5, react-router-dom 7, Vitest 4, @t
 - `src/types/role.ts` — TypeScript interfaces for roles, members, audit entries
 - `src/types/decisionFunction.ts` — TypeScript interfaces (`DecisionFunctionResponse`, `DecisionFunctionSummary`, `CreateDecisionFunctionPayload`, `UpdateDecisionFunctionPayload`, `TestDecisionFnPayload`, `TestDecisionFnResponse`, `EvaluateContext`, `OnErrorBehavior`, `LogLevel`)
 - `src/api/decisionFunctions.ts` — API client: `listDecisionFunctions`, `getDecisionFunction`, `createDecisionFunction`, `updateDecisionFunction`, `deleteDecisionFunction`, `testDecisionFn`
+- `src/api/attributeDefinitions.ts` — API client: `listAttributeDefinitions`, `getAttributeDefinition`, `createAttributeDefinition`, `updateAttributeDefinition`, `deleteAttributeDefinition`
+- `src/types/attributeDefinition.ts` — TypeScript interfaces (`AttributeDefinition`, `CreateAttributeDefinitionPayload`, `UpdateAttributeDefinitionPayload`, `ValueType`, `EntityType`)
+- `src/pages/AttributeDefinitionsPage.tsx` — List attribute definitions with entity type filter, force-delete support
+- `src/pages/AttributeDefinitionEditPage.tsx` — Create/edit attribute definitions (exports `AttributeDefinitionCreatePage` and `AttributeDefinitionEditPage`)
+- `src/components/UserAttributeEditor.tsx` — Inline editor for user attributes on UserEditPage. Loads attribute definitions to show type-appropriate inputs (text, number, boolean toggle, enum dropdown). Shows `{user.KEY}` syntax hint per attribute.
 - `src/test/test-utils.tsx` — `renderWithProviders` (QueryClient + AuthProvider + MemoryRouter)
 - `src/test/factories.ts` — `makeUser`, `makeDataSource`, `makeDataSourceType`, `makeDiscoveredSchema/Table/Column`, `makeDecisionFunction`, `makePolicy`, `makePolicyAssignment`
 

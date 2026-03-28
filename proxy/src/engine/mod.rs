@@ -785,28 +785,22 @@ pub struct EngineCache {
     /// Shared LazyPool per datasource. Survives catalog invalidation so
     /// re-discovery after catalog changes reuses the existing upstream connection pool.
     pools: AsyncRwLock<HashMap<String, Arc<LazyPool>>>,
-    /// Shared wasmtime Engine for evaluating decision functions at visibility time.
-    wasm_engine: wasmtime::Engine,
-    /// Pre-compiled QuickJS engine plugin module (compiled once at startup).
-    plugin_module: wasmtime::Module,
+    /// Shared WASM runtime for evaluating decision functions at visibility time.
+    wasm_runtime: Arc<crate::decision::wasm::WasmDecisionRuntime>,
 }
 
 impl EngineCache {
-    pub fn new(db: DatabaseConnection, master_key: [u8; 32]) -> Arc<Self> {
-        let mut config = wasmtime::Config::new();
-        config.consume_fuel(true);
-        config.wasm_memory64(false);
-        let wasm_engine = wasmtime::Engine::new(&config).expect("Failed to create wasmtime engine");
-        let plugin_module = wasmtime::Module::new(&wasm_engine, crate::decision::wasm::PLUGIN_WASM)
-            .expect("Failed to compile QuickJS plugin");
-
+    pub fn new(
+        db: DatabaseConnection,
+        master_key: [u8; 32],
+        wasm_runtime: Arc<crate::decision::wasm::WasmDecisionRuntime>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             db,
             master_key,
             catalogs: AsyncRwLock::new(HashMap::new()),
             pools: AsyncRwLock::new(HashMap::new()),
-            wasm_engine,
-            plugin_module,
+            wasm_runtime,
         })
     }
 
@@ -994,46 +988,22 @@ impl EngineCache {
             .unwrap_or(serde_json::json!({}));
 
         let fuel_limit = crate::decision::wasm::DEFAULT_FUEL_LIMIT;
-        let engine = self.wasm_engine.clone();
-        let plugin_module = self.plugin_module.clone();
-        let ctx_clone = session_ctx.clone();
         let log_level = df.log_level.clone();
         let on_error = df.on_error.clone();
         let df_name = df.name.clone();
 
-        let spawn_result = tokio::task::spawn_blocking(move || {
-            let bytecode_module = wasmtime::Module::new(&engine, &wasm_bytes).map_err(|e| {
-                crate::decision::RuntimeError::ExecutionError(format!(
-                    "WASM bytecode compilation failed: {e}"
-                ))
-            })?;
-            crate::decision::wasm::evaluate_wasm_sync(
-                &engine,
-                &plugin_module,
-                &bytecode_module,
-                &ctx_clone,
-                &config,
-                fuel_limit,
-                &log_level,
-            )
-        })
-        .await;
+        let spawn_result = self
+            .wasm_runtime
+            .evaluate_bytes(&wasm_bytes, session_ctx, &config, fuel_limit, &log_level)
+            .await;
 
         match spawn_result {
-            Ok(Ok(result)) => result.fire,
-            Ok(Err(e)) => {
+            Ok(result) => result.fire,
+            Err(e) => {
                 tracing::error!(
                     decision_function = %df_name,
                     error = %e,
                     "Visibility decision function evaluation failed"
-                );
-                on_error == "deny"
-            }
-            Err(join_err) => {
-                tracing::error!(
-                    decision_function = %df_name,
-                    error = %join_err,
-                    "Visibility decision function task panicked"
                 );
                 on_error == "deny"
             }
@@ -1149,6 +1119,10 @@ impl EngineCache {
                 .map_err(|e| EngineError(format!("DB error loading datasource: {e}")))?
                 .ok_or_else(|| EngineError("Datasource not found".to_string()))?;
 
+            // Build typed attributes for decision function context
+            let raw_attrs = crate::entity::proxy_user::parse_attributes(&user.attributes);
+            let typed_attrs = build_typed_json_attributes(&self.db, &raw_attrs).await;
+
             let session_info = crate::decision::context::SessionInfo {
                 user_id,
                 username: user.username,
@@ -1156,6 +1130,7 @@ impl EngineCache {
                 roles: role_names,
                 datasource_name: ds.name,
                 access_mode: catalog.access_mode.clone(),
+                attributes: typed_attrs,
             };
             Some(crate::decision::context::build_session_context(
                 &session_info,
@@ -1524,6 +1499,51 @@ impl EngineCache {
     }
 }
 
+/// Build typed JSON attributes from raw string values and attribute definitions.
+/// Used for building the decision function context at visibility time.
+async fn build_typed_json_attributes(
+    db: &sea_orm::DatabaseConnection,
+    raw_attrs: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    use crate::entity::attribute_definition;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    if raw_attrs.is_empty() {
+        return std::collections::HashMap::new();
+    }
+
+    let keys: Vec<String> = raw_attrs.keys().cloned().collect();
+    let defs = attribute_definition::Entity::find()
+        .filter(attribute_definition::Column::EntityType.eq("user"))
+        .filter(attribute_definition::Column::Key.is_in(keys))
+        .all(db)
+        .await
+        .unwrap_or_default();
+
+    let def_map: std::collections::HashMap<&str, &str> = defs
+        .iter()
+        .map(|d| (d.key.as_str(), d.value_type.as_str()))
+        .collect();
+
+    let mut result = std::collections::HashMap::new();
+    for (key, value) in raw_attrs {
+        let value_type = def_map.get(key.as_str()).unwrap_or(&"string");
+        let json_val = match *value_type {
+            "integer" => value
+                .parse::<i64>()
+                .map(|n| serde_json::json!(n))
+                .unwrap_or_else(|_| serde_json::json!(value)),
+            "boolean" => value
+                .parse::<bool>()
+                .map(|b| serde_json::json!(b))
+                .unwrap_or_else(|_| serde_json::json!(value)),
+            _ => serde_json::json!(value),
+        };
+        result.insert(key.clone(), json_val);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1531,6 +1551,14 @@ mod tests {
     use datafusion::datasource::TableProvider;
     use datafusion::error::Result as DFResult;
     use std::any::Any;
+    use std::sync::OnceLock;
+
+    fn shared_wasm_runtime() -> Arc<crate::decision::wasm::WasmDecisionRuntime> {
+        static RUNTIME: OnceLock<Arc<crate::decision::wasm::WasmDecisionRuntime>> = OnceLock::new();
+        RUNTIME
+            .get_or_init(|| Arc::new(crate::decision::wasm::WasmDecisionRuntime::new().unwrap()))
+            .clone()
+    }
 
     /// Mock CatalogProvider for testing
     #[derive(Debug)]
@@ -2225,6 +2253,7 @@ mod tests {
             last_login_at: sea_orm::Set(None),
             created_at: sea_orm::Set(now),
             updated_at: sea_orm::Set(now),
+            attributes: sea_orm::Set("{}".to_string()),
         }
         .insert(db)
         .await
@@ -2344,7 +2373,7 @@ mod tests {
         insert_test_datasource(&db, ds_id).await;
         insert_policy_with_column_deny(&db, ds_id, user_id, false, "deny").await;
 
-        let cache = EngineCache::new(db, [0u8; 32]);
+        let cache = EngineCache::new(db, [0u8; 32], shared_wasm_runtime());
         let catalog = make_catalog(ds_id, "open");
         let vis = cache
             .compute_user_visibility(user_id, &catalog)
@@ -2373,7 +2402,7 @@ mod tests {
         insert_test_datasource(&db, ds_id).await;
         insert_policy_with_column_deny(&db, ds_id, user_id, true, "deny").await;
 
-        let cache = EngineCache::new(db, [0u8; 32]);
+        let cache = EngineCache::new(db, [0u8; 32], shared_wasm_runtime());
         let catalog = make_catalog(ds_id, "open");
         let vis = cache
             .compute_user_visibility(user_id, &catalog)
@@ -2426,7 +2455,7 @@ mod tests {
         )
         .await;
 
-        let cache = EngineCache::new(db, [0u8; 32]);
+        let cache = EngineCache::new(db, [0u8; 32], shared_wasm_runtime());
         let catalog = make_catalog(ds_id, "open");
         let vis = cache
             .compute_user_visibility(user_id, &catalog)
@@ -2475,7 +2504,7 @@ mod tests {
         )
         .await;
 
-        let cache = EngineCache::new(db, [0u8; 32]);
+        let cache = EngineCache::new(db, [0u8; 32], shared_wasm_runtime());
         let catalog = make_catalog(ds_id, "open");
         let vis = cache
             .compute_user_visibility(user_id, &catalog)
@@ -2531,7 +2560,7 @@ mod tests {
         )
         .await;
 
-        let cache = EngineCache::new(db, [0u8; 32]);
+        let cache = EngineCache::new(db, [0u8; 32], shared_wasm_runtime());
         let catalog = make_catalog(ds_id, "open");
         let vis = cache
             .compute_user_visibility(user_id, &catalog)
@@ -2586,7 +2615,7 @@ mod tests {
         )
         .await;
 
-        let cache = EngineCache::new(db, [0u8; 32]);
+        let cache = EngineCache::new(db, [0u8; 32], shared_wasm_runtime());
         let catalog = make_catalog(ds_id, "open");
         let vis = cache
             .compute_user_visibility(user_id, &catalog)
@@ -2633,7 +2662,7 @@ mod tests {
         )
         .await;
 
-        let cache = EngineCache::new(db, [0u8; 32]);
+        let cache = EngineCache::new(db, [0u8; 32], shared_wasm_runtime());
         let catalog = make_catalog(ds_id, "open");
         let vis = cache
             .compute_user_visibility(user_id, &catalog)
@@ -2672,7 +2701,7 @@ mod tests {
         )
         .await;
 
-        let cache = EngineCache::new(db, [0u8; 32]);
+        let cache = EngineCache::new(db, [0u8; 32], shared_wasm_runtime());
         let catalog = make_catalog(ds_id, "open");
         let vis = cache
             .compute_user_visibility(user_id, &catalog)
@@ -2740,7 +2769,7 @@ mod tests {
             access_mode: "open".to_string(),
         };
 
-        let cache = EngineCache::new(db, [0u8; 32]);
+        let cache = EngineCache::new(db, [0u8; 32], shared_wasm_runtime());
         let vis = cache
             .compute_user_visibility(user_id, &catalog)
             .await
@@ -2883,7 +2912,7 @@ mod tests {
         insert_datasource_with_access_mode(&db, ds_id, "policy_required").await;
         insert_permit_policy_column_access_all(&db, ds_id, user_id).await;
 
-        let cache = EngineCache::new(db, [0u8; 32]);
+        let cache = EngineCache::new(db, [0u8; 32], shared_wasm_runtime());
         let catalog = make_aliased_catalog(ds_id, "policy_required");
         let vis = cache
             .compute_user_visibility(user_id, &catalog)

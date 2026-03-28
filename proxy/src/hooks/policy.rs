@@ -71,61 +71,168 @@ pub fn is_system_only_statement(statement: &Statement) -> bool {
 
 // ---------- user variables ----------
 
+/// A user attribute with its value and type (from attribute_definition).
+#[derive(Clone, Debug)]
+pub struct TypedAttribute {
+    pub value: String,
+    pub value_type: String, // "string", "integer", "boolean"
+}
+
 #[derive(Clone)]
 struct UserVars {
     tenant: String,
     username: String,
     user_id: String,
+    attributes: HashMap<String, TypedAttribute>,
 }
 
 impl UserVars {
     fn get(&self, key: &str) -> Option<&str> {
         match key {
+            // Built-in fields take priority — prevents attribute override attacks
             "user.tenant" => Some(&self.tenant),
             "user.username" => Some(&self.username),
             "user.id" => Some(&self.user_id),
-            _ => None,
+            _ => {
+                let attr_key = key.strip_prefix("user.")?;
+                self.attributes.get(attr_key).map(|a| a.value.as_str())
+            }
+        }
+    }
+
+    fn get_type(&self, key: &str) -> &str {
+        match key {
+            "user.tenant" | "user.username" | "user.id" => "string",
+            _ => {
+                if let Some(attr_key) = key.strip_prefix("user.") {
+                    self.attributes
+                        .get(attr_key)
+                        .map(|a| a.value_type.as_str())
+                        .unwrap_or("string")
+                } else {
+                    "string"
+                }
+            }
         }
     }
 }
 
+/// Regex for `{user.KEY}` patterns. Compiled once.
+fn user_var_regex() -> &'static regex::Regex {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"\{user\.(\w+)\}").unwrap())
+}
+
+/// Variable mapping entry carrying both value and type for typed literal production.
+struct VarMapping {
+    placeholder: String,
+    value: String,
+    value_type: String,
+}
+
 /// Replace `{user.X}` placeholders with safe identifier placeholders.
-/// Returns the mangled expression and mappings (placeholder_lowercase → actual_value).
-fn mangle_vars(template: &str, vars: &UserVars) -> (String, Vec<(String, String)>) {
+/// Returns the mangled expression and typed mappings.
+fn mangle_vars(template: &str, vars: &UserVars) -> (String, Vec<VarMapping>) {
     let mut result = template.to_string();
     let mut mappings = Vec::new();
 
+    // Built-in keys first (stable placeholders)
     for key in ["user.tenant", "user.username", "user.id"] {
         let placeholder = format!("__br_{}__", key.replace('.', "_"));
         let needle = format!("{{{}}}", key);
         if result.contains(&needle) {
             let value = vars.get(key).unwrap_or("").to_string();
             result = result.replace(&needle, &placeholder);
-            mappings.push((placeholder.to_lowercase(), value));
+            mappings.push(VarMapping {
+                placeholder: placeholder.to_lowercase(),
+                value,
+                value_type: "string".to_string(),
+            });
         }
+    }
+
+    // Dynamic attribute keys: scan for remaining {user.WORD} patterns
+    let re = user_var_regex();
+    let captures: Vec<(String, String)> = re
+        .captures_iter(&result)
+        .map(|cap| (cap[0].to_string(), cap[1].to_string()))
+        .collect();
+    for (needle, attr_key) in captures {
+        let full_key = format!("user.{}", attr_key);
+        let placeholder = format!("__br_user_{}__", attr_key);
+        let value = vars.get(&full_key).unwrap_or("").to_string();
+        let value_type = vars.get_type(&full_key).to_string();
+        result = result.replace(&needle, &placeholder);
+        mappings.push(VarMapping {
+            placeholder: placeholder.to_lowercase(),
+            value,
+            value_type,
+        });
     }
 
     (result, mappings)
 }
 
+/// Produce a typed DataFusion literal from a string value and value_type.
+fn typed_lit(value: &str, value_type: &str) -> datafusion::logical_expr::Expr {
+    match value_type {
+        "integer" => {
+            if let Ok(n) = value.parse::<i64>() {
+                lit(ScalarValue::Int64(Some(n)))
+            } else {
+                lit(value) // fallback to string if parse fails
+            }
+        }
+        "boolean" => {
+            if let Ok(b) = value.parse::<bool>() {
+                lit(ScalarValue::Boolean(Some(b)))
+            } else {
+                lit(value)
+            }
+        }
+        _ => lit(value), // "string" and unknown types
+    }
+}
+
 /// Convert a sqlparser AST expression to a DataFusion Expr.
-/// Handles: identifiers (column refs or placeholder vars), literals, binary ops,
-/// IS NULL, IS NOT NULL, NOT, BETWEEN, LIKE, IN LIST, CAST, and scalar functions.
+///
+/// This is a custom converter for expression fragments (filter/mask templates),
+/// not full SQL statements. It handles a subset of SQL syntax:
+///
+/// **Supported:** Identifier, CompoundIdentifier, Value (number/string/bool/null),
+/// BinaryOp (+, -, *, /, =, !=, <, >, <=, >=, AND, OR, ||), UnaryOp (NOT, -),
+/// IsNull, IsNotNull, Nested (parentheses), Between, Like, InList, Cast,
+/// Function (via registry), Case (CASE WHEN ... THEN ... ELSE ... END).
+///
+/// **Not yet supported (add as needed):**
+/// - ILike (case-insensitive LIKE)
+/// - IsTrue / IsFalse / IsNotTrue / IsNotFalse
+/// - IsDistinctFrom / IsNotDistinctFrom
+/// - InSubquery (subquery in IN clause)
+/// - Extract (EXTRACT(field FROM expr))
+/// - Substring, Trim, Overlay, Position (SQL string functions — use UDF registry instead)
+/// - Exists / Subquery (correlated subqueries)
+/// - Array, Struct, Map literals
+/// - JsonAccess (-> / ->> operators)
+/// - AtTimeZone
+/// - TypedString (e.g., DATE '2024-01-01')
+/// - Interval
 ///
 /// Pass `Some(ctx)` as `registry` to enable full scalar function lookup (required for
 /// column mask expressions). Pass `None` for row filter expressions where only
 /// COALESCE is supported.
 fn sql_ast_to_df_expr(
     expr: &SqlExpr,
-    var_values: &[(String, String)],
+    var_values: &[VarMapping],
     registry: Option<&dyn FunctionRegistry>,
 ) -> datafusion::error::Result<datafusion::logical_expr::Expr> {
     use datafusion::logical_expr::Expr;
     match expr {
         SqlExpr::Identifier(ident) => {
             let name_lc = ident.value.to_lowercase();
-            if let Some((_, val)) = var_values.iter().find(|(p, _)| p == &name_lc) {
-                Ok(lit(val.as_str()))
+            if let Some(mapping) = var_values.iter().find(|m| m.placeholder == name_lc) {
+                Ok(typed_lit(&mapping.value, &mapping.value_type))
             } else {
                 Ok(col(&ident.value))
             }
@@ -322,6 +429,41 @@ fn sql_ast_to_df_expr(
             };
             Ok(datafusion::logical_expr::cast(inner, arrow_type))
         }
+        SqlExpr::Case {
+            operand,
+            conditions,
+            else_result,
+            ..
+        } => {
+            // CASE [operand] WHEN cond THEN result [ELSE else_result] END
+            let operand_expr = operand
+                .as_ref()
+                .map(|e| sql_ast_to_df_expr(e, var_values, registry))
+                .transpose()?;
+            let when_then: Vec<(Box<Expr>, Box<Expr>)> = conditions
+                .iter()
+                .map(|cw| {
+                    let cond = sql_ast_to_df_expr(&cw.condition, var_values, registry)?;
+                    let result = sql_ast_to_df_expr(&cw.result, var_values, registry)?;
+                    // For simple CASE (with operand), the condition is compared via Eq
+                    let when = if let Some(ref op) = operand_expr {
+                        Box::new(op.clone().eq(cond))
+                    } else {
+                        Box::new(cond)
+                    };
+                    Ok((when, Box::new(result)))
+                })
+                .collect::<datafusion::error::Result<_>>()?;
+            let else_expr = else_result
+                .as_ref()
+                .map(|e| sql_ast_to_df_expr(e, var_values, registry).map(Box::new))
+                .transpose()?;
+            Ok(Expr::Case(datafusion::logical_expr::Case {
+                expr: None, // conditions already include the comparison
+                when_then_expr: when_then,
+                else_expr,
+            }))
+        }
         other => Err(datafusion::error::DataFusionError::Plan(format!(
             "Unsupported expression type in filter: {other:?}"
         ))),
@@ -386,6 +528,36 @@ fn parse_mask_expr(
     sql_ast_to_df_expr(&sql_expr, &var_values, Some(ctx))
 }
 
+// ---------- expression validation (used at policy save time) ----------
+
+/// Validate that a filter_expression or mask_expression can be parsed successfully.
+/// Called at policy create/update time to reject unsupported syntax early,
+/// instead of failing silently at query time.
+///
+/// Uses dummy user variables so the parse succeeds regardless of actual user values.
+/// The goal is to catch unsupported SQL syntax, not to evaluate the expression.
+pub fn validate_expression(expression: &str, is_mask: bool) -> Result<(), String> {
+    let dummy_vars = UserVars {
+        tenant: "__validate__".to_string(),
+        username: "__validate__".to_string(),
+        user_id: "__validate__".to_string(),
+        attributes: HashMap::new(),
+    };
+
+    if is_mask {
+        // Mask expressions need a function registry for UDF lookup.
+        // Use a bare SessionContext which has all built-in functions registered.
+        let ctx = SessionContext::new();
+        parse_mask_expr(&ctx, "dummy_col", expression, &dummy_vars)
+            .map(|_| ())
+            .map_err(|e| format!("Invalid mask expression: {e}"))
+    } else {
+        parse_filter_expr(expression, &dummy_vars)
+            .map(|_| ())
+            .map_err(|e| format!("Invalid filter expression: {e}"))
+    }
+}
+
 // ---------- resolved policy data structures ----------
 
 #[derive(Clone)]
@@ -424,6 +596,8 @@ struct SessionData {
     datasource_name: String,
     /// Role names for the current user (resolved via role_resolver).
     roles: Vec<String>,
+    /// User attributes with types (from attribute_definition).
+    user_attributes: HashMap<String, TypedAttribute>,
     loaded_at: std::time::Instant,
 }
 
@@ -434,29 +608,20 @@ const CACHE_TTL_SECS: u64 = 60;
 pub struct PolicyHook {
     db: DatabaseConnection,
     cache: Arc<RwLock<HashMap<(Uuid, String), SessionData>>>,
-    /// Shared wasmtime Engine for evaluating decision functions at query time.
-    engine: wasmtime::Engine,
-    /// Pre-compiled QuickJS engine plugin module (compiled once at startup).
-    plugin_module: wasmtime::Module,
+    /// Shared WASM runtime for evaluating decision functions at query time.
+    wasm_runtime: Arc<crate::decision::wasm::WasmDecisionRuntime>,
 }
 
 impl PolicyHook {
     pub fn new(
         db: DatabaseConnection,
-    ) -> Result<Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
-        let mut config = wasmtime::Config::new();
-        config.consume_fuel(true);
-        config.wasm_memory64(false);
-        let engine = wasmtime::Engine::new(&config)?;
-
-        let plugin_module = wasmtime::Module::new(&engine, crate::decision::wasm::PLUGIN_WASM)?;
-
-        Ok(Arc::new(Self {
+        wasm_runtime: Arc<crate::decision::wasm::WasmDecisionRuntime>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
             db,
             cache: Arc::new(RwLock::new(HashMap::new())),
-            engine,
-            plugin_module,
-        }))
+            wasm_runtime,
+        })
     }
 
     pub async fn invalidate_datasource(&self, datasource_name: &str) {
@@ -594,6 +759,9 @@ impl PolicyHook {
             vec![]
         };
 
+        // Load user attributes (from proxy_user.attributes JSON column)
+        let user_attributes = self.load_user_attributes(user_id).await?;
+
         // Load policy assignments for this datasource+user (user-specific, role-based, or wildcard)
         let relevant_assignments =
             crate::role_resolver::resolve_effective_assignments(&self.db, user_id, ds.id).await?;
@@ -623,6 +791,7 @@ impl PolicyHook {
                 datasource_id: ds.id,
                 datasource_name: ds.name.clone(),
                 roles: role_names,
+                user_attributes,
                 loaded_at: std::time::Instant::now(),
             });
         }
@@ -719,8 +888,54 @@ impl PolicyHook {
             datasource_id: ds.id,
             datasource_name: ds.name.clone(),
             roles: role_names,
+            user_attributes,
             loaded_at: std::time::Instant::now(),
         })
+    }
+
+    /// Load user attributes from the proxy_user model and pair with types
+    /// from attribute_definition. Returns a HashMap of TypedAttribute.
+    async fn load_user_attributes(
+        &self,
+        user_id: Uuid,
+    ) -> Result<HashMap<String, TypedAttribute>, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::entity::{attribute_definition, proxy_user};
+
+        let user = proxy_user::Entity::find_by_id(user_id)
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| format!("User {user_id} not found"))?;
+
+        let raw_attrs = proxy_user::parse_attributes(&user.attributes);
+        if raw_attrs.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        // Load definitions for the keys this user has
+        let keys: Vec<String> = raw_attrs.keys().cloned().collect();
+        let defs = attribute_definition::Entity::find()
+            .filter(attribute_definition::Column::EntityType.eq("user"))
+            .filter(attribute_definition::Column::Key.is_in(keys))
+            .all(&self.db)
+            .await?;
+
+        let def_map: HashMap<&str, &str> = defs
+            .iter()
+            .map(|d| (d.key.as_str(), d.value_type.as_str()))
+            .collect();
+
+        let mut result = HashMap::new();
+        for (key, value) in raw_attrs {
+            let value_type = def_map.get(key.as_str()).unwrap_or(&"string");
+            result.insert(
+                key,
+                TypedAttribute {
+                    value,
+                    value_type: value_type.to_string(),
+                },
+            );
+        }
+        Ok(result)
     }
 }
 
@@ -735,6 +950,7 @@ struct SessionDataClone {
     datasource_id: Uuid,
     datasource_name: String,
     roles: Vec<String>,
+    user_attributes: HashMap<String, TypedAttribute>,
 }
 
 fn clone_session_data(s: &SessionData) -> SessionDataRef {
@@ -746,6 +962,7 @@ fn clone_session_data(s: &SessionData) -> SessionDataRef {
         datasource_id: s.datasource_id,
         datasource_name: s.datasource_name.clone(),
         roles: s.roles.clone(),
+        user_attributes: s.user_attributes.clone(),
     })
 }
 
@@ -944,8 +1161,7 @@ struct PolicyEffects {
 
 /// Optional context for decision function evaluation at query time.
 pub struct DecisionEvalContext<'a> {
-    pub engine: &'a wasmtime::Engine,
-    pub plugin_module: &'a wasmtime::Module,
+    pub wasm_runtime: &'a crate::decision::wasm::WasmDecisionRuntime,
     pub decision_ctx: serde_json::Value,
 }
 
@@ -997,40 +1213,25 @@ async fn evaluate_decision_fn(
         .unwrap_or(serde_json::json!({}));
 
     let fuel_limit = crate::decision::wasm::DEFAULT_FUEL_LIMIT;
-
-    // Clone engine + plugin (internally Arc'd, cheap) and wasm bytes for spawn_blocking
-    let engine = eval_ctx.engine.clone();
-    let plugin_module = eval_ctx.plugin_module.clone();
-    let wasm_owned = wasm_bytes.to_vec();
-    let ctx_clone = eval_ctx.decision_ctx.clone();
     let log_level = df.log_level.clone();
     let log_level_outer = log_level.clone();
     let on_error = df.on_error.clone();
     let policy_name = policy.name.clone();
     let policy_id = policy.id;
 
-    let spawn_result = tokio::task::spawn_blocking(move || {
-        // Compile bytecode module (~1ms for 1-16 KB dynamic bytecode)
-        let bytecode_module = wasmtime::Module::new(&engine, &wasm_owned).map_err(|e| {
-            crate::decision::RuntimeError::ExecutionError(format!(
-                "WASM bytecode compilation failed: {e}"
-            ))
-        })?;
-
-        crate::decision::wasm::evaluate_wasm_sync(
-            &engine,
-            &plugin_module,
-            &bytecode_module,
-            &ctx_clone,
+    let spawn_result = eval_ctx
+        .wasm_runtime
+        .evaluate_bytes(
+            wasm_bytes,
+            &eval_ctx.decision_ctx,
             &config,
             fuel_limit,
             &log_level,
         )
-    })
-    .await;
+        .await;
 
     match spawn_result {
-        Ok(Ok(mut result)) => {
+        Ok(mut result) => {
             // Filter logs based on log_level
             if log_level_outer == "error" {
                 // Keep only error-related logs (stderr), which in practice
@@ -1042,7 +1243,7 @@ async fn evaluate_decision_fn(
             decision_results.insert(policy_id, result);
             fire
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             tracing::error!(
                 policy = %policy_name,
                 error = %e,
@@ -1057,25 +1258,6 @@ async fn evaluate_decision_fn(
                     fuel_consumed: 0,
                     time_us: 0,
                     error: Some(e.to_string()),
-                },
-            );
-            fire
-        }
-        Err(join_err) => {
-            tracing::error!(
-                policy = %policy_name,
-                error = %join_err,
-                "Decision function task panicked"
-            );
-            let fire = on_error == "deny";
-            decision_results.insert(
-                policy_id,
-                crate::decision::DecisionResult {
-                    fire,
-                    logs: vec![],
-                    fuel_consumed: 0,
-                    time_us: 0,
-                    error: Some(format!("Decision function task panicked: {join_err}")),
                 },
             );
             fire
@@ -1648,12 +1830,6 @@ impl QueryHook for PolicyHook {
         let client_ip = Some(client.socket_addr().ip().to_string());
         let client_info = metadata.get("application_name").cloned();
 
-        let user_vars = UserVars {
-            tenant,
-            username: username.clone(),
-            user_id: user_id.to_string(),
-        };
-
         // Load session data
         let session = match self.get_session(user_id, &datasource).await {
             Ok(s) => s,
@@ -1663,6 +1839,13 @@ impl QueryHook for PolicyHook {
                     e.to_string(),
                 )))));
             }
+        };
+
+        let user_vars = UserVars {
+            tenant,
+            username: username.clone(),
+            user_id: user_id.to_string(),
+            attributes: session.user_attributes.clone(),
         };
 
         let query_start = std::time::Instant::now();
@@ -1696,6 +1879,27 @@ impl QueryHook for PolicyHook {
             };
 
             // Build decision evaluation context with session + query metadata.
+            // Convert TypedAttribute map to typed JSON values for decision context
+            let json_attrs: HashMap<String, serde_json::Value> = session
+                .user_attributes
+                .iter()
+                .map(|(k, ta)| {
+                    let v = match ta.value_type.as_str() {
+                        "integer" => ta
+                            .value
+                            .parse::<i64>()
+                            .map(|n| serde_json::json!(n))
+                            .unwrap_or_else(|_| serde_json::json!(&ta.value)),
+                        "boolean" => ta
+                            .value
+                            .parse::<bool>()
+                            .map(|b| serde_json::json!(b))
+                            .unwrap_or_else(|_| serde_json::json!(&ta.value)),
+                        _ => serde_json::json!(&ta.value),
+                    };
+                    (k.clone(), v)
+                })
+                .collect();
             let session_info = crate::decision::context::SessionInfo {
                 user_id,
                 username: username.clone(),
@@ -1703,13 +1907,13 @@ impl QueryHook for PolicyHook {
                 roles: session.roles.clone(),
                 datasource_name: session.datasource_name.clone(),
                 access_mode: session.access_mode.clone(),
+                attributes: json_attrs,
             };
             let query_meta = extract_query_metadata(&logical_plan);
             let decision_ctx =
                 crate::decision::context::build_query_context(&session_info, &query_meta);
             let decision_eval = DecisionEvalContext {
-                engine: &self.engine,
-                plugin_module: &self.plugin_module,
+                wasm_runtime: &self.wasm_runtime,
                 decision_ctx,
             };
 
@@ -1899,6 +2103,7 @@ mod tests {
             datasource_id: Uuid::nil(),
             datasource_name: "test_ds".to_string(),
             roles: vec![],
+            user_attributes: HashMap::new(),
         }
     }
 
@@ -2037,6 +2242,7 @@ mod tests {
             tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            attributes: HashMap::new(),
         }
     }
 
@@ -2094,6 +2300,7 @@ mod tests {
             tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "test-id".to_string(),
+            attributes: HashMap::new(),
         };
         let expr = parse_filter_expr("organization_id = {user.tenant}", &vars).unwrap();
         let expr_str = format!("{expr:?}");
@@ -2109,6 +2316,7 @@ mod tests {
             tenant: "any".to_string(),
             username: "u".to_string(),
             user_id: "i".to_string(),
+            attributes: HashMap::new(),
         };
         let expr = parse_filter_expr("1=1", &vars).unwrap();
         let expr_str = format!("{expr:?}");
@@ -2124,6 +2332,7 @@ mod tests {
             tenant: "my-tenant".to_string(),
             username: "alice".to_string(),
             user_id: "uid-1".to_string(),
+            attributes: HashMap::new(),
         };
         let (mangled, mappings) =
             mangle_vars("org = {user.tenant} AND user = {user.username}", &vars);
@@ -2138,6 +2347,7 @@ mod tests {
             tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "uid".to_string(),
+            attributes: HashMap::new(),
         };
         let expr = parse_filter_expr(
             "organization_id = {user.tenant} AND is_active = true",
@@ -3620,15 +3830,10 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
         wasm
     }
 
-    fn make_wasm_engine() -> wasmtime::Engine {
-        let mut config = wasmtime::Config::new();
-        config.consume_fuel(true);
-        config.wasm_memory64(false);
-        wasmtime::Engine::new(&config).unwrap()
-    }
-
-    fn make_plugin_module(engine: &wasmtime::Engine) -> wasmtime::Module {
-        wasmtime::Module::new(engine, crate::decision::wasm::PLUGIN_WASM).unwrap()
+    fn shared_wasm_runtime() -> &'static crate::decision::wasm::WasmDecisionRuntime {
+        use std::sync::OnceLock;
+        static RUNTIME: OnceLock<crate::decision::wasm::WasmDecisionRuntime> = OnceLock::new();
+        RUNTIME.get_or_init(|| crate::decision::wasm::WasmDecisionRuntime::new().unwrap())
     }
 
     #[tokio::test]
@@ -3663,12 +3868,10 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             vec![("id", DataType::Int32), ("status", DataType::Utf8)],
         );
 
-        let engine = make_wasm_engine();
-        let plugin_module = make_plugin_module(&engine);
+        let wasm_runtime = shared_wasm_runtime();
         let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
         let eval = DecisionEvalContext {
-            engine: &engine,
-            plugin_module: &plugin_module,
+            wasm_runtime: &wasm_runtime,
             decision_ctx,
         };
 
@@ -3720,12 +3923,10 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             vec![("id", DataType::Int32), ("status", DataType::Utf8)],
         );
 
-        let engine = make_wasm_engine();
-        let plugin_module = make_plugin_module(&engine);
+        let wasm_runtime = shared_wasm_runtime();
         let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
         let eval = DecisionEvalContext {
-            engine: &engine,
-            plugin_module: &plugin_module,
+            wasm_runtime: &wasm_runtime,
             decision_ctx,
         };
 
@@ -3798,12 +3999,10 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             vec![("id", DataType::Int32), ("status", DataType::Utf8)],
         );
 
-        let engine = make_wasm_engine();
-        let plugin_module = make_plugin_module(&engine);
+        let wasm_runtime = shared_wasm_runtime();
         let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
         let eval = DecisionEvalContext {
-            engine: &engine,
-            plugin_module: &plugin_module,
+            wasm_runtime: &wasm_runtime,
             decision_ctx,
         };
 
@@ -3851,12 +4050,10 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             vec![("id", DataType::Int32), ("status", DataType::Utf8)],
         );
 
-        let engine = make_wasm_engine();
-        let plugin_module = make_plugin_module(&engine);
+        let wasm_runtime = shared_wasm_runtime();
         let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
         let eval = DecisionEvalContext {
-            engine: &engine,
-            plugin_module: &plugin_module,
+            wasm_runtime: &wasm_runtime,
             decision_ctx,
         };
 
@@ -3903,12 +4100,10 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             vec![("id", DataType::Int32), ("status", DataType::Utf8)],
         );
 
-        let engine = make_wasm_engine();
-        let plugin_module = make_plugin_module(&engine);
+        let wasm_runtime = shared_wasm_runtime();
         let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
         let eval = DecisionEvalContext {
-            engine: &engine,
-            plugin_module: &plugin_module,
+            wasm_runtime: &wasm_runtime,
             decision_ctx,
         };
 
@@ -3963,8 +4158,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             vec![("id", DataType::Int32), ("status", DataType::Utf8)],
         );
 
-        let engine = make_wasm_engine();
-        let plugin_module = make_plugin_module(&engine);
+        let wasm_runtime = shared_wasm_runtime();
         // Build query context (has query.tables, query.join_count, etc.)
         let decision_ctx = crate::decision::context::build_query_context(
             &crate::decision::context::SessionInfo {
@@ -3974,6 +4168,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
                 roles: vec!["analyst".to_string()],
                 datasource_name: "test_ds".to_string(),
                 access_mode: "open".to_string(),
+                attributes: HashMap::new(),
             },
             &crate::decision::context::QueryMetadata {
                 tables: vec!["public.orders".to_string()],
@@ -3986,8 +4181,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             },
         );
         let eval = DecisionEvalContext {
-            engine: &engine,
-            plugin_module: &plugin_module,
+            wasm_runtime: &wasm_runtime,
             decision_ctx,
         };
 
@@ -4043,8 +4237,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             vec![("id", DataType::Int32), ("status", DataType::Utf8)],
         );
 
-        let engine = make_wasm_engine();
-        let plugin_module = make_plugin_module(&engine);
+        let wasm_runtime = shared_wasm_runtime();
         // Build session-only context (no query field)
         let decision_ctx = crate::decision::context::build_session_context(
             &crate::decision::context::SessionInfo {
@@ -4054,11 +4247,11 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
                 roles: vec![],
                 datasource_name: "test_ds".to_string(),
                 access_mode: "open".to_string(),
+                attributes: HashMap::new(),
             },
         );
         let eval = DecisionEvalContext {
-            engine: &engine,
-            plugin_module: &plugin_module,
+            wasm_runtime: &wasm_runtime,
             decision_ctx,
         };
 
@@ -4117,12 +4310,10 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             vec![("id", DataType::Int32), ("status", DataType::Utf8)],
         );
 
-        let engine = make_wasm_engine();
-        let plugin_module = make_plugin_module(&engine);
+        let wasm_runtime = shared_wasm_runtime();
         let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
         let eval = DecisionEvalContext {
-            engine: &engine,
-            plugin_module: &plugin_module,
+            wasm_runtime: &wasm_runtime,
             decision_ctx,
         };
 
@@ -4168,12 +4359,10 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             vec![("id", DataType::Int32), ("status", DataType::Utf8)],
         );
 
-        let engine = make_wasm_engine();
-        let plugin_module = make_plugin_module(&engine);
+        let wasm_runtime = shared_wasm_runtime();
         let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
         let eval = DecisionEvalContext {
-            engine: &engine,
-            plugin_module: &plugin_module,
+            wasm_runtime: &wasm_runtime,
             decision_ctx,
         };
 
@@ -4215,12 +4404,10 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             vec![("id", DataType::Int32), ("status", DataType::Utf8)],
         );
 
-        let engine = make_wasm_engine();
-        let plugin_module = make_plugin_module(&engine);
+        let wasm_runtime = shared_wasm_runtime();
         let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
         let eval = DecisionEvalContext {
-            engine: &engine,
-            plugin_module: &plugin_module,
+            wasm_runtime: &wasm_runtime,
             decision_ctx,
         };
 
@@ -4238,5 +4425,273 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
         assert!(dr.fuel_consumed > 0, "Should have consumed some fuel");
         assert!(dr.time_us > 0, "Should have nonzero execution time");
         assert!(dr.error.is_none());
+    }
+
+    // ---------- ABAC: mangle_vars with custom attributes ----------
+
+    #[test]
+    fn test_mangle_vars_custom_attribute() {
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "region".to_string(),
+            TypedAttribute {
+                value: "us-east".to_string(),
+                value_type: "string".to_string(),
+            },
+        );
+        let vars = UserVars {
+            tenant: "acme".to_string(),
+            username: "alice".to_string(),
+            user_id: "uid".to_string(),
+            attributes: attrs,
+        };
+        let (mangled, mappings) = mangle_vars("region = {user.region}", &vars);
+        assert!(
+            !mangled.contains("{user.region}"),
+            "placeholder should be replaced"
+        );
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].value, "us-east");
+        assert_eq!(mappings[0].value_type, "string");
+    }
+
+    #[test]
+    fn test_mangle_vars_mixed_builtin_and_custom() {
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "dept".to_string(),
+            TypedAttribute {
+                value: "eng".to_string(),
+                value_type: "string".to_string(),
+            },
+        );
+        let vars = UserVars {
+            tenant: "acme".to_string(),
+            username: "alice".to_string(),
+            user_id: "uid".to_string(),
+            attributes: attrs,
+        };
+        let (mangled, mappings) =
+            mangle_vars("tenant = {user.tenant} AND dept = {user.dept}", &vars);
+        assert!(!mangled.contains("{user.tenant}"));
+        assert!(!mangled.contains("{user.dept}"));
+        assert_eq!(mappings.len(), 2);
+    }
+
+    #[test]
+    fn test_mangle_vars_unknown_attribute_empty() {
+        let vars = UserVars {
+            tenant: "acme".to_string(),
+            username: "alice".to_string(),
+            user_id: "uid".to_string(),
+            attributes: HashMap::new(),
+        };
+        let (_, mappings) = mangle_vars("x = {user.nonexistent}", &vars);
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(
+            mappings[0].value, "",
+            "unknown attribute should produce empty string"
+        );
+    }
+
+    // ---------- ABAC: UserVars::get priority ----------
+
+    #[test]
+    fn test_user_vars_builtin_priority() {
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "tenant".to_string(),
+            TypedAttribute {
+                value: "evil".to_string(),
+                value_type: "string".to_string(),
+            },
+        );
+        let vars = UserVars {
+            tenant: "acme".to_string(),
+            username: "alice".to_string(),
+            user_id: "uid".to_string(),
+            attributes: attrs,
+        };
+        // Built-in "tenant" must win over the attribute
+        assert_eq!(vars.get("user.tenant"), Some("acme"));
+    }
+
+    #[test]
+    fn test_user_vars_custom_attribute_fallback() {
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "region".to_string(),
+            TypedAttribute {
+                value: "eu-west".to_string(),
+                value_type: "string".to_string(),
+            },
+        );
+        let vars = UserVars {
+            tenant: "acme".to_string(),
+            username: "alice".to_string(),
+            user_id: "uid".to_string(),
+            attributes: attrs,
+        };
+        assert_eq!(vars.get("user.region"), Some("eu-west"));
+        assert_eq!(vars.get("user.unknown"), None);
+    }
+
+    // ---------- ABAC: typed_lit ----------
+
+    #[test]
+    fn test_typed_lit_string() {
+        let expr = typed_lit("hello", "string");
+        let debug = format!("{expr:?}");
+        assert!(
+            debug.contains("Utf8"),
+            "string should produce Utf8 literal: {debug}"
+        );
+    }
+
+    #[test]
+    fn test_typed_lit_integer() {
+        let expr = typed_lit("42", "integer");
+        let debug = format!("{expr:?}");
+        assert!(
+            debug.contains("Int64"),
+            "integer should produce Int64 literal: {debug}"
+        );
+    }
+
+    #[test]
+    fn test_typed_lit_boolean() {
+        let expr = typed_lit("true", "boolean");
+        let debug = format!("{expr:?}");
+        assert!(
+            debug.contains("Boolean"),
+            "boolean should produce Boolean literal: {debug}"
+        );
+    }
+
+    #[test]
+    fn test_typed_lit_integer_fallback() {
+        // Invalid integer falls back to string
+        let expr = typed_lit("abc", "integer");
+        let debug = format!("{expr:?}");
+        assert!(
+            debug.contains("Utf8"),
+            "bad integer should fallback to Utf8: {debug}"
+        );
+    }
+
+    // ---------- ABAC: parse_filter_expr with integer attribute ----------
+
+    #[test]
+    fn test_parse_filter_integer_comparison() {
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "clearance".to_string(),
+            TypedAttribute {
+                value: "3".to_string(),
+                value_type: "integer".to_string(),
+            },
+        );
+        let vars = UserVars {
+            tenant: "acme".to_string(),
+            username: "alice".to_string(),
+            user_id: "uid".to_string(),
+            attributes: attrs,
+        };
+        let expr = parse_filter_expr("level >= {user.clearance}", &vars).unwrap();
+        let debug = format!("{expr:?}");
+        assert!(
+            debug.contains("Int64(3)"),
+            "clearance should be Int64(3) not a string: {debug}"
+        );
+    }
+
+    // ---------- ABAC: CASE WHEN in expression parser ----------
+
+    #[test]
+    fn test_parse_case_when_expression() {
+        let vars = default_vars();
+        let expr = parse_filter_expr(
+            "CASE WHEN status = 'active' THEN true ELSE false END",
+            &vars,
+        )
+        .unwrap();
+        let debug = format!("{expr:?}");
+        assert!(
+            debug.contains("Case"),
+            "Should produce a Case expression: {debug}"
+        );
+    }
+
+    // ---------- Security: builtin field override defense (Vector 67) ----------
+
+    #[test]
+    fn test_user_vars_builtin_priority_over_attributes() {
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "tenant".to_string(),
+            TypedAttribute {
+                value: "evil_override".to_string(),
+                value_type: "string".to_string(),
+            },
+        );
+        attributes.insert(
+            "username".to_string(),
+            TypedAttribute {
+                value: "evil_user".to_string(),
+                value_type: "string".to_string(),
+            },
+        );
+        attributes.insert(
+            "id".to_string(),
+            TypedAttribute {
+                value: "evil_id".to_string(),
+                value_type: "string".to_string(),
+            },
+        );
+
+        let vars = UserVars {
+            tenant: "real_tenant".to_string(),
+            username: "real_user".to_string(),
+            user_id: "real_id".to_string(),
+            attributes,
+        };
+
+        // Built-in fields must always win over attribute overrides
+        assert_eq!(vars.get("user.tenant"), Some("real_tenant"));
+        assert_eq!(vars.get("user.username"), Some("real_user"));
+        assert_eq!(vars.get("user.id"), Some("real_id"));
+
+        // Type should also return the builtin type
+        assert_eq!(vars.get_type("user.tenant"), "string");
+        assert_eq!(vars.get_type("user.username"), "string");
+        assert_eq!(vars.get_type("user.id"), "string");
+    }
+
+    #[test]
+    fn test_filter_expr_builtin_overrides_attribute() {
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "tenant".to_string(),
+            TypedAttribute {
+                value: "evil".to_string(),
+                value_type: "string".to_string(),
+            },
+        );
+        let vars = UserVars {
+            tenant: "acme".to_string(),
+            username: "alice".to_string(),
+            user_id: "test-id".to_string(),
+            attributes,
+        };
+        let expr = parse_filter_expr("organization_id = {user.tenant}", &vars).unwrap();
+        let debug = format!("{expr:?}");
+        assert!(
+            debug.contains("acme"),
+            "Should use builtin tenant, not attribute: {debug}"
+        );
+        assert!(
+            !debug.contains("evil"),
+            "Should NOT use attribute override: {debug}"
+        );
     }
 }

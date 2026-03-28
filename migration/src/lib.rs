@@ -45,6 +45,9 @@ mod m20260325_000048_create_decision_function;
 mod m20260325_000049_idx_decision_function_name;
 mod m20260325_000050_add_decision_function_id_to_policy;
 mod m20260325_000051_clear_static_wasm;
+mod m20260328_000052_create_attribute_definition;
+mod m20260328_000053_idx_attribute_definition_key_entity;
+mod m20260328_000054_add_user_attributes;
 
 pub struct Migrator;
 
@@ -97,6 +100,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260325_000049_idx_decision_function_name::Migration),
             Box::new(m20260325_000050_add_decision_function_id_to_policy::Migration),
             Box::new(m20260325_000051_clear_static_wasm::Migration),
+            Box::new(m20260328_000052_create_attribute_definition::Migration),
+            Box::new(m20260328_000053_idx_attribute_definition_key_entity::Migration),
+            Box::new(m20260328_000054_add_user_attributes::Migration),
         ]
     }
 }

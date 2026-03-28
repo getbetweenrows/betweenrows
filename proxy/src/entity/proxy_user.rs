@@ -1,4 +1,5 @@
 use sea_orm::entity::prelude::*;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -17,6 +18,8 @@ pub struct Model {
     pub last_login_at: Option<DateTime>,
     pub created_at: DateTime,
     pub updated_at: DateTime,
+    #[sea_orm(default_value = "{}")]
+    pub attributes: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -32,3 +35,8 @@ impl Related<super::role_member::Entity> for Entity {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
+
+/// Parse the JSON attributes column into a HashMap.
+pub fn parse_attributes(json_str: &str) -> HashMap<String, String> {
+    serde_json::from_str(json_str).unwrap_or_default()
+}

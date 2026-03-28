@@ -7,6 +7,7 @@ import { PasswordInput } from '../components/PasswordInput'
 import { PasswordStrengthIndicator } from '../components/PasswordStrengthIndicator'
 import { validatePassword } from '../utils/passwordValidation'
 import { AuditTimeline } from '../components/AuditTimeline'
+import { UserAttributeEditor } from '../components/UserAttributeEditor'
 import type { UpdateUserPayload } from '../types/user'
 
 export function UserEditPage() {
@@ -23,6 +24,11 @@ export function UserEditPage() {
 
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+
+  const [pendingAttributes, setPendingAttributes] = useState<Record<string, string> | null>(null)
+  const [attrSaving, setAttrSaving] = useState(false)
+  const [attrError, setAttrError] = useState<string | null>(null)
+  const [attrSuccess, setAttrSuccess] = useState(false)
 
   const [newPassword, setNewPassword] = useState('')
   const [changingPw, setChangingPw] = useState(false)
@@ -67,6 +73,26 @@ export function UserEditPage() {
       setPwError(msg)
     } finally {
       setChangingPw(false)
+    }
+  }
+
+  async function handleSaveAttributes() {
+    if (pendingAttributes === null) return
+    setAttrError(null)
+    setAttrSuccess(false)
+    setAttrSaving(true)
+    try {
+      await updateUser(userId, { attributes: pendingAttributes })
+      await queryClient.invalidateQueries({ queryKey: ['users'] })
+      setPendingAttributes(null)
+      setAttrSuccess(true)
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ??
+        'Failed to update attributes'
+      setAttrError(msg)
+    } finally {
+      setAttrSaving(false)
     }
   }
 
@@ -128,6 +154,34 @@ export function UserEditPage() {
           {pwError && <p className="text-sm text-red-600">{pwError}</p>}
         </form>
         {pwSuccess && <p className="text-sm text-green-600 mt-2">Password updated.</p>}
+      </section>
+
+      {/* User Attributes */}
+      <section className="border-t border-gray-200 pt-8">
+        <h2 className="text-base font-semibold text-gray-900 mb-1">Attributes</h2>
+        <p className="text-sm text-gray-500 mb-4">
+          Custom key-value pairs available as {'{'}user.KEY{'}'} in filter and mask expressions,
+          and as <code className="text-xs bg-gray-100 px-1 rounded">ctx.session.user.attributes</code> in decision functions.
+        </p>
+        <UserAttributeEditor
+          attributes={pendingAttributes ?? user.attributes}
+          onChange={(attrs) => {
+            setPendingAttributes(attrs)
+            setAttrSuccess(false)
+          }}
+        />
+        <div className="mt-4 flex items-center gap-3">
+          <button
+            type="button"
+            onClick={handleSaveAttributes}
+            disabled={attrSaving || pendingAttributes === null}
+            className="bg-gray-800 hover:bg-gray-900 disabled:opacity-60 text-white text-sm font-medium rounded-lg px-4 py-2 transition-colors"
+          >
+            {attrSaving ? 'Saving...' : 'Save attributes'}
+          </button>
+          {attrSuccess && <span className="text-sm text-green-600">Attributes saved.</span>}
+        </div>
+        {attrError && <p className="text-sm text-red-600 mt-2">{attrError}</p>}
       </section>
 
       {/* Activity */}

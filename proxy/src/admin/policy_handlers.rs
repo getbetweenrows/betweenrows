@@ -1011,7 +1011,7 @@ mod tests {
     use chrono::Utc;
     use migration::MigratorTrait as _;
     use sea_orm::{ActiveModelTrait, Database, DatabaseConnection, Set};
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
     use tokio::sync::Mutex;
     use tower::ServiceExt;
     use uuid::Uuid;
@@ -1024,8 +1024,16 @@ mod tests {
         db
     }
 
+    fn shared_wasm_runtime() -> Arc<crate::decision::wasm::WasmDecisionRuntime> {
+        static RUNTIME: OnceLock<Arc<crate::decision::wasm::WasmDecisionRuntime>> = OnceLock::new();
+        RUNTIME
+            .get_or_init(|| Arc::new(crate::decision::wasm::WasmDecisionRuntime::new().unwrap()))
+            .clone()
+    }
+
     fn make_state(db: DatabaseConnection) -> AdminState {
-        let engine_cache = EngineCache::new(db.clone(), [0u8; 32]);
+        let wasm_runtime = shared_wasm_runtime();
+        let engine_cache = EngineCache::new(db.clone(), [0u8; 32], wasm_runtime.clone());
         AdminState {
             auth: Arc::new(Auth::new(db.clone())),
             db,
@@ -1036,6 +1044,7 @@ mod tests {
             job_store: Arc::new(Mutex::new(discovery_job::JobStore::new())),
             policy_hook: None,
             proxy_handler: None,
+            wasm_runtime,
         }
     }
 

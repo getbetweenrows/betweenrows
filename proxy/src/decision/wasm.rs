@@ -61,6 +61,52 @@ impl WasmDecisionRuntime {
             plugin_module,
         })
     }
+
+    /// Evaluate compiled WASM bytes with the given context and config.
+    ///
+    /// This is the primary entry point for PolicyHook, EngineCache, and the
+    /// admin test endpoint. Compiles the bytecode module (~1ms) and runs it
+    /// on a blocking thread via `spawn_blocking`.
+    pub async fn evaluate_bytes(
+        &self,
+        wasm_bytes: &[u8],
+        context: &serde_json::Value,
+        config: &serde_json::Value,
+        fuel_limit: u64,
+        log_level: &str,
+    ) -> Result<DecisionResult, RuntimeError> {
+        let engine = self.engine.clone();
+        let plugin_module = self.plugin_module.clone();
+        let wasm_bytes = wasm_bytes.to_vec();
+        let context = context.clone();
+        let config = config.clone();
+        let log_level = log_level.to_string();
+
+        // Module::new() is a blocking JIT compile (~1ms) — must stay inside
+        // spawn_blocking to avoid blocking the async tokio runtime.
+        tokio::task::spawn_blocking(move || {
+            let bytecode_module = Module::new(&engine, &wasm_bytes).map_err(|e| {
+                RuntimeError::ExecutionError(format!("Failed to compile bytecode module: {e}"))
+            })?;
+            evaluate_wasm(
+                &engine,
+                &plugin_module,
+                &bytecode_module,
+                &context,
+                &config,
+                fuel_limit,
+                &log_level,
+            )
+        })
+        .await
+        .map_err(|e| {
+            if e.is_panic() {
+                RuntimeError::ExecutionError(format!("Decision function task panicked: {e}"))
+            } else {
+                RuntimeError::ExecutionError(format!("Task join error: {e}"))
+            }
+        })?
+    }
 }
 
 /// Wrapper for Javy WASM module evaluation.
@@ -206,32 +252,6 @@ Javy.IO.writeSync(1, new TextEncoder().encode(output));
     let _ = tokio::fs::remove_file(&output_path).await;
 
     Ok(wasm_bytes)
-}
-
-/// Evaluate a dynamic-mode Javy WASM module with the given context and config.
-/// Public sync version for use in PolicyEffects::collect() (sync context).
-///
-/// `plugin_module`: pre-compiled QuickJS engine plugin (compiled once at startup).
-/// `bytecode_module`: per-function bytecode module (1-16 KB, compiled on the fly).
-/// `log_level`: `"off"` = no capture, `"error"` / `"info"` = capture stderr + console.log from stdout.
-pub fn evaluate_wasm_sync(
-    engine: &Engine,
-    plugin_module: &Module,
-    bytecode_module: &Module,
-    context: &serde_json::Value,
-    config: &serde_json::Value,
-    fuel_limit: u64,
-    log_level: &str,
-) -> Result<super::DecisionResult, super::RuntimeError> {
-    evaluate_wasm(
-        engine,
-        plugin_module,
-        bytecode_module,
-        context,
-        config,
-        fuel_limit,
-        log_level,
-    )
 }
 
 /// Parse the JSON result from stdout, handling console.log output that may precede it.
@@ -657,32 +677,8 @@ impl DecisionRuntime for WasmDecisionRuntime {
         fuel_limit: u64,
         log_level: &str,
     ) -> Result<DecisionResult, RuntimeError> {
-        // Compile the small bytecode module (~1ms for 1-16 KB)
-        let bytecode_module = Module::new(&self.engine, wasm_bytes).map_err(|e| {
-            RuntimeError::ExecutionError(format!("Failed to compile bytecode module: {e}"))
-        })?;
-
-        // Clone what we need for the blocking spawn
-        let engine = self.engine.clone();
-        let plugin_module = self.plugin_module.clone(); // cheap Arc clone
-        let context = context.clone();
-        let config = config.clone();
-        let log_level = log_level.to_string();
-
-        // Run WASM evaluation on a blocking thread (wasmtime is synchronous)
-        tokio::task::spawn_blocking(move || {
-            evaluate_wasm(
-                &engine,
-                &plugin_module,
-                &bytecode_module,
-                &context,
-                &config,
-                fuel_limit,
-                &log_level,
-            )
-        })
-        .await
-        .map_err(|e| RuntimeError::ExecutionError(format!("Task join error: {e}")))?
+        self.evaluate_bytes(wasm_bytes, context, config, fuel_limit, log_level)
+            .await
     }
 
     async fn validate(
@@ -732,10 +728,16 @@ impl DecisionRuntime for WasmDecisionRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::OnceLock;
+
+    fn shared_runtime() -> &'static WasmDecisionRuntime {
+        static RUNTIME: OnceLock<WasmDecisionRuntime> = OnceLock::new();
+        RUNTIME.get_or_init(|| WasmDecisionRuntime::new().unwrap())
+    }
 
     #[tokio::test]
     async fn test_compile_simple_function() {
-        let runtime = WasmDecisionRuntime::new().unwrap();
+        let runtime = shared_runtime();
         let js = r#"
             function evaluate(ctx, config) {
                 return { fire: true };
@@ -747,7 +749,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dynamic_module_size_small() {
-        let runtime = WasmDecisionRuntime::new().unwrap();
+        let runtime = shared_runtime();
         let js = r#"
             function evaluate(ctx, config) {
                 return { fire: ctx.session.user.roles.includes("analyst") };
@@ -764,7 +766,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_strict_mode_rejects_global_leak() {
-        let runtime = WasmDecisionRuntime::new().unwrap();
+        let runtime = shared_runtime();
         // Assigning to an undeclared variable is a ReferenceError in strict mode
         let js = r#"
             function evaluate(ctx, config) {
@@ -792,7 +794,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_evaluate_returns_fire_true() {
-        let runtime = WasmDecisionRuntime::new().unwrap();
+        let runtime = shared_runtime();
         let js = r#"
             function evaluate(ctx, config) {
                 return { fire: true };
@@ -811,7 +813,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_evaluate_returns_fire_false() {
-        let runtime = WasmDecisionRuntime::new().unwrap();
+        let runtime = shared_runtime();
         let js = r#"
             function evaluate(ctx, config) {
                 return { fire: false };
@@ -829,7 +831,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_evaluate_with_config() {
-        let runtime = WasmDecisionRuntime::new().unwrap();
+        let runtime = shared_runtime();
         let js = r#"
             function evaluate(ctx, config) {
                 return { fire: config.max_joins <= 3 };
@@ -847,7 +849,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_evaluate_role_based_decision() {
-        let runtime = WasmDecisionRuntime::new().unwrap();
+        let runtime = shared_runtime();
         let js = r#"
             function evaluate(ctx, config) {
                 return { fire: ctx.session.user.roles.includes("analyst") };
@@ -888,7 +890,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compile_invalid_js() {
-        let runtime = WasmDecisionRuntime::new().unwrap();
+        let runtime = shared_runtime();
         let js = "this is not valid javascript {{{";
         let result = runtime.compile("test", js).await;
         assert!(result.is_err());
@@ -896,7 +898,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_good_function() {
-        let runtime = WasmDecisionRuntime::new().unwrap();
+        let runtime = shared_runtime();
         let js = r#"
             function evaluate(ctx, config) {
                 return { fire: true };
@@ -914,7 +916,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_bad_return() {
-        let runtime = WasmDecisionRuntime::new().unwrap();
+        let runtime = shared_runtime();
         let js = r#"
             function evaluate(ctx, config) {
                 return { wrong: "shape" };
@@ -931,7 +933,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_console_log_does_not_break_result_parsing() {
-        let runtime = WasmDecisionRuntime::new().unwrap();
+        let runtime = shared_runtime();
         let js = r#"
             function evaluate(ctx, config) {
                 console.log('evaluate() called');

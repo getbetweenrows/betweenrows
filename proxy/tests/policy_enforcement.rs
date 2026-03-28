@@ -6661,3 +6661,457 @@ async fn df_column_deny_session_ctx_username_check_conditional() {
     let data = extract_rows(&rows);
     assert_eq!(data.len(), 2);
 }
+
+// ===========================================================================
+// ABAC: User Attributes
+// ===========================================================================
+
+/// ABAC row filter with string attribute: `region = {user.region}`
+#[tokio::test]
+async fn abac_row_filter_string_attribute() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "abac_rf_str";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, region TEXT, amount INT);
+             INSERT INTO {schema}.orders VALUES
+               (1, 'us-east', 100),
+               (2, 'eu-west', 200),
+               (3, 'us-east', 300),
+               (4, 'ap-south', 400);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_abac_str", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    // Define the attribute
+    server
+        .create_attribute_definition(
+            "region",
+            "user",
+            "string",
+            Some(vec!["us-east", "eu-west", "ap-south"]),
+        )
+        .await;
+
+    // Create user and set region attribute
+    let user_id = server
+        .create_user("abac_alice", "AlicePass1!", "acme", ds_id)
+        .await;
+    server
+        .set_user_attributes(user_id, serde_json::json!({"region": "us-east"}))
+        .await;
+
+    // Create row filter using {user.region}
+    server
+        .create_row_filter(
+            "abac-region-filter",
+            schema,
+            "orders",
+            "region = {user.region}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("abac-allow-all", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("abac_alice", "AlicePass1!", "ds_abac_str")
+        .await;
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT id, region FROM {schema}.orders ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    assert_eq!(rows.len(), 2, "Should only see us-east rows");
+    assert_eq!(rows[0][1], "us-east");
+    assert_eq!(rows[1][1], "us-east");
+    assert_eq!(rows[0][0], "1");
+    assert_eq!(rows[1][0], "3");
+}
+
+/// ABAC row filter with integer attribute: numeric comparison works
+#[tokio::test]
+async fn abac_row_filter_integer_attribute() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "abac_rf_int";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.docs;
+             CREATE TABLE {schema}.docs (id INT, title TEXT, sensitivity INT);
+             INSERT INTO {schema}.docs VALUES
+               (1, 'Public Report', 1),
+               (2, 'Internal Memo', 3),
+               (3, 'Classified', 5),
+               (4, 'Team Update', 2);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_abac_int", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    // Define integer attribute
+    server
+        .create_attribute_definition("clearance", "user", "integer", None)
+        .await;
+
+    // Create user with clearance=3
+    let user_id = server
+        .create_user("abac_bob", "BobPass123!", "acme", ds_id)
+        .await;
+    server
+        .set_user_attributes(user_id, serde_json::json!({"clearance": "3"}))
+        .await;
+
+    // Row filter: only show docs where sensitivity <= user.clearance
+    server
+        .create_row_filter(
+            "abac-clearance-filter",
+            schema,
+            "docs",
+            "sensitivity <= {user.clearance}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("abac-allow-docs", schema, "docs", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("abac_bob", "BobPass123!", "ds_abac_int")
+        .await;
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT id, title, sensitivity FROM {schema}.docs ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    // clearance=3, so sensitivity <= 3 → rows 1 (1), 2 (3), 4 (2)
+    assert_eq!(rows.len(), 3, "Should see docs with sensitivity <= 3");
+    assert_eq!(rows[0][0], "1"); // sensitivity=1
+    assert_eq!(rows[1][0], "2"); // sensitivity=3
+    assert_eq!(rows[2][0], "4"); // sensitivity=2
+}
+
+/// ABAC column mask with string attribute: mask includes user attribute value
+#[tokio::test]
+async fn abac_column_mask_with_attribute() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "abac_mask";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.employees;
+             CREATE TABLE {schema}.employees (id INT, name TEXT, salary INT);
+             INSERT INTO {schema}.employees VALUES
+               (1, 'Alice', 90000),
+               (2, 'Bob', 75000);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_abac_mask", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    // Define string attribute
+    server
+        .create_attribute_definition("mask_label", "user", "string", None)
+        .await;
+
+    let user_id = server
+        .create_user("abac_carol", "CarolPass1!", "acme", ds_id)
+        .await;
+    server
+        .set_user_attributes(user_id, serde_json::json!({"mask_label": "REDACTED"}))
+        .await;
+
+    // Mask name column with the user's attribute value
+    server
+        .create_column_mask(
+            "abac-name-mask",
+            schema,
+            "employees",
+            "name",
+            "{user.mask_label}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("abac-allow-emp", schema, "employees", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("abac_carol", "CarolPass1!", "ds_abac_mask")
+        .await;
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT id, name FROM {schema}.employees ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0][1], "REDACTED",
+        "name should be masked with user attribute"
+    );
+    assert_eq!(
+        rows[1][1], "REDACTED",
+        "name should be masked with user attribute"
+    );
+}
+
+/// ABAC column mask with CASE WHEN and integer attribute
+#[tokio::test]
+async fn abac_column_mask_case_when() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "abac_case";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.employees;
+             CREATE TABLE {schema}.employees (id INT, name TEXT, salary INT);
+             INSERT INTO {schema}.employees VALUES
+               (1, 'Alice', 90000),
+               (2, 'Bob', 75000);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_abac_case", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    server
+        .create_attribute_definition("access_level", "user", "integer", None)
+        .await;
+
+    // User with low access level
+    let user_id = server
+        .create_user("abac_dan", "DanPass123!", "acme", ds_id)
+        .await;
+    server
+        .set_user_attributes(user_id, serde_json::json!({"access_level": "1"}))
+        .await;
+
+    // Mask salary with CASE WHEN: show 0 unless access_level >= 3
+    server
+        .create_column_mask(
+            "abac-salary-case",
+            schema,
+            "employees",
+            "salary",
+            "CASE WHEN {user.access_level} >= 3 THEN salary ELSE 0 END",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("abac-allow-case", schema, "employees", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("abac_dan", "DanPass123!", "ds_abac_case")
+        .await;
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT id, name, salary FROM {schema}.employees ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0][2], "0",
+        "salary should be masked to 0 (access_level=1 < 3)"
+    );
+    assert_eq!(
+        rows[1][2], "0",
+        "salary should be masked to 0 (access_level=1 < 3)"
+    );
+}
+
+/// Security: built-in field {user.tenant} cannot be overridden by an attribute
+#[tokio::test]
+async fn abac_builtin_field_override_security() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "abac_override";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.data;
+             CREATE TABLE {schema}.data (id INT, tenant TEXT);
+             INSERT INTO {schema}.data VALUES
+               (1, 'acme'),
+               (2, 'evil'),
+               (3, 'acme');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_abac_sec", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    // Try to define "tenant" as a user attribute — should be rejected
+    let resp = server
+        .admin
+        .post("/api/v1/attribute-definitions")
+        .authorization_bearer(&server.admin_token)
+        .json(&serde_json::json!({
+            "key": "tenant",
+            "entity_type": "user",
+            "display_name": "Tenant Override",
+            "value_type": "string",
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Even if somehow an attribute named "tenant" existed, {user.tenant}
+    // should resolve to the built-in tenant, not the attribute.
+    // The API validation already blocks this, so this test confirms the API guard.
+}
+
+/// Attribute definition CRUD and validation
+#[tokio::test]
+async fn abac_attribute_definition_crud() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+
+    // Create
+    let def_id = server
+        .create_attribute_definition(
+            "department",
+            "user",
+            "string",
+            Some(vec!["engineering", "sales", "hr"]),
+        )
+        .await;
+
+    // Get
+    let resp = server
+        .admin
+        .get(&format!("/api/v1/attribute-definitions/{def_id}"))
+        .authorization_bearer(&server.admin_token)
+        .await;
+    resp.assert_status_ok();
+    let body = resp.json::<Value>();
+    assert_eq!(body["key"].as_str().unwrap(), "department");
+    assert_eq!(body["entity_type"].as_str().unwrap(), "user");
+    assert_eq!(body["value_type"].as_str().unwrap(), "string");
+
+    // List filtered by entity_type
+    let resp = server
+        .admin
+        .get("/api/v1/attribute-definitions?entity_type=user")
+        .authorization_bearer(&server.admin_token)
+        .await;
+    resp.assert_status_ok();
+    let body = resp.json::<Value>();
+    assert!(body["total"].as_u64().unwrap() >= 1);
+
+    // Update
+    let resp = server
+        .admin
+        .put(&format!("/api/v1/attribute-definitions/{def_id}"))
+        .authorization_bearer(&server.admin_token)
+        .json(&serde_json::json!({
+            "display_name": "Department Name",
+        }))
+        .await;
+    resp.assert_status_ok();
+    assert_eq!(
+        resp.json::<Value>()["display_name"].as_str().unwrap(),
+        "Department Name"
+    );
+
+    // Delete (no users have it, no force needed)
+    let resp = server
+        .admin
+        .delete(&format!("/api/v1/attribute-definitions/{def_id}"))
+        .authorization_bearer(&server.admin_token)
+        .await;
+    resp.assert_status(axum::http::StatusCode::NO_CONTENT);
+}
+
+/// Attribute definition delete with force cascade
+#[tokio::test]
+async fn abac_attribute_definition_force_delete() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "abac_fdel";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.t;
+             CREATE TABLE {schema}.t (id INT);
+             INSERT INTO {schema}.t VALUES (1);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_abac_fdel", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let def_id = server
+        .create_attribute_definition("team", "user", "string", None)
+        .await;
+
+    let user_id = server
+        .create_user("abac_dan", "DanPass123!", "acme", ds_id)
+        .await;
+    server
+        .set_user_attributes(user_id, serde_json::json!({"team": "alpha"}))
+        .await;
+
+    // Delete without force — should be rejected
+    let resp = server
+        .admin
+        .delete(&format!("/api/v1/attribute-definitions/{def_id}"))
+        .authorization_bearer(&server.admin_token)
+        .await;
+    resp.assert_status(axum::http::StatusCode::CONFLICT);
+
+    // Delete with force — should cascade
+    let resp = server
+        .admin
+        .delete(&format!(
+            "/api/v1/attribute-definitions/{def_id}?force=true"
+        ))
+        .authorization_bearer(&server.admin_token)
+        .await;
+    resp.assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    // Verify attribute removed from user
+    let resp = server
+        .admin
+        .get(&format!("/api/v1/users/{user_id}"))
+        .authorization_bearer(&server.admin_token)
+        .await;
+    resp.assert_status_ok();
+    let attrs = &resp.json::<Value>()["attributes"];
+    assert!(
+        attrs.get("team").is_none(),
+        "team attribute should be removed after force delete"
+    );
+}

@@ -9,7 +9,7 @@ pgwire 0.38, DataFusion 52, axum 0.8, SeaORM 1, tokio-postgres 0.7, argon2 0.5, 
 - `src/admin/jwt.rs` — `AdminClaims` / `AuthClaims` extractors
 - `src/admin/datasource_types.rs` — `split_config`, `merge_config`, `get_type_defs`
 - `src/admin/discovery_job.rs` — `JobStore`, `DiscoveryJob`, `DiscoveryEvent`, `DiscoveryRequest`
-- `src/engine/mod.rs` — `EngineCache` (includes `wasm_engine` + `plugin_module` for visibility-level decision fn evaluation), `VirtualCatalogProvider`, `build_arrow_schema()`, `arrow_type_to_string()`
+- `src/engine/mod.rs` — `EngineCache` (uses shared `Arc<WasmDecisionRuntime>` for visibility-level decision fn evaluation), `VirtualCatalogProvider`, `build_arrow_schema()`, `arrow_type_to_string()`
 - `src/engine/rewrite.rs` — `rewrite_statement()` AST visitor (pg_catalog table qualification, schema-stripped function calls)
 - `src/hooks/read_only.rs` — `ReadOnlyHook` (allowlist: Query, Show*, Explain*)
 - `src/hooks/policy.rs` — `PolicyHook` (five policy types: row_filter, column_mask, column_allow, column_deny, table_deny; audit logging)
@@ -22,8 +22,10 @@ pgwire 0.38, DataFusion 52, axum 0.8, SeaORM 1, tokio-postgres 0.7, argon2 0.5, 
 - `src/decision/` — WASM-based decision function runtime (`mod.rs`: `DecisionRuntime` trait + `DecisionResult`; `context.rs`: `SessionInfo`, `QueryMetadata`, `build_session_context`, `build_query_context`; `wasm.rs`: `WasmDecisionRuntime` backed by wasmtime + Javy dynamic mode — QuickJS plugin compiled once at startup, per-function bytecode ~1ms)
 - `src/entity/decision_function.rs` — SeaORM entity for the `decision_function` table (id, name, decision_fn JS source, decision_wasm bytes, decision_config JSON, evaluate_context, on_error, log_level, is_enabled, version)
 - `src/admin/decision_function_handlers.rs` — CRUD endpoints for decision functions (`GET/POST /decision-functions`, `GET/PUT/DELETE /decision-functions/{id}`)
+- `src/entity/attribute_definition.rs` — SeaORM entity for the `attribute_definition` table (id, key, entity_type, display_name, value_type, default_value, allowed_values, description). Includes `validate_value()` and `parse_allowed_values()`.
+- `src/admin/attribute_definition_handlers.rs` — CRUD endpoints for attribute definitions (`GET/POST /attribute-definitions`, `GET/PUT/DELETE /attribute-definitions/{id}`). Supports `?entity_type=user` filter and `?force=true` cascade delete via database-specific JSON operations (SQLite `json_remove()`, PostgreSQL `jsonb -`). Includes `validate_json_path_key()` defense-in-depth before SQL interpolation. Update handler invalidates caches when `value_type` changes.
 - `src/crypto.rs` — AES-256-GCM `encrypt_json` / `decrypt_json`
-- `../migration/src/lib.rs` — `Migrator` (45 migrations)
+- `../migration/src/lib.rs` — `Migrator` (54 migrations)
 
 ## Critical Gotchas
 
@@ -54,6 +56,12 @@ Policy CRUD handlers call `state.policy_hook.invalidate_datasource(&ds.name).awa
 ### `AdminState.proxy_handler` is `Option<Arc<ProxyHandler>>`
 Policy CRUD handlers also call `state.proxy_handler.rebuild_contexts_for_datasource(&ds.name)` after each policy mutation. This rebuilds the per-connection `SessionContext` for all active connections on that datasource in the background, so schema visibility changes (column deny/allow) take effect immediately without requiring a reconnect. It is `Option` so tests can construct `AdminState` with `proxy_handler: None`.
 
+### `AdminState.wasm_runtime` is `Arc<WasmDecisionRuntime>` (non-Option)
+A single shared WASM runtime created once at startup in `main.rs` and passed to `EngineCache`, `PolicyHook`, and `AdminState`. Unlike `policy_hook` and `proxy_handler`, it is always required because `EngineCache` needs it unconditionally. Tests must provide a real instance (use `OnceLock` singletons to avoid re-creating per test).
+
+### wasmtime `Module::new()` is a blocking JIT compile
+`Module::new(&engine, bytes)` compiles WASM to native code (~1ms for small bytecode). Always call inside `spawn_blocking` — never on the async tokio runtime thread. See `WasmDecisionRuntime::evaluate_bytes()` in `decision/wasm.rs`.
+
 ## Key Patterns
 - **Always-stream response**: `handler.rs` always returns `Response::Query(encode_dataframe(...))` for every statement that reaches DataFusion — no `is_select` enumeration. The only exception is `Statement::Explain`, which is intercepted before streaming and reformatted into PostgreSQL's single `"QUERY PLAN"` column via `execute_explain()`. Arrow → pgwire encoding is handled by `arrow-pg`.
 - **Hook ordering**: `PolicyHook` runs first (audits write rejections, then returns `None`), then `ReadOnlyHook` (blocks writes with SQLSTATE 25006). Hooks run in both simple and extended query paths. The allowlist in `ReadOnlyHook` must be reviewed before adding new `Statement` variants.
@@ -68,7 +76,7 @@ Policy CRUD handlers also call `state.proxy_handler.rebuild_contexts_for_datasou
 
 `PolicyHook` replaces the old hardcoded `RLSHook`. It loads policies from the DB, caches per `(datasource_id, username)` for 60 seconds, and applies five policy types:
 
-- **row_filter** — `Filter(expr)` node injected below the matching `TableScan` via `transform_up`. Template variables (`{user.tenant}`, `{user.username}`, `{user.id}`) are substituted as `Expr::Literal` after parsing — never interpolated as raw SQL. Multiple `row_filter` policies are AND-combined (intersection, not union).
+- **row_filter** — `Filter(expr)` node injected below the matching `TableScan` via `transform_up`. Three built-in template variables (`{user.tenant}`, `{user.username}`, `{user.id}`) plus custom user attributes (`{user.KEY}`) are substituted as typed `Expr::Literal` after parsing — never interpolated as raw SQL. Custom attributes produce typed literals based on their attribute definition's `value_type` (string→Utf8, integer→Int64, boolean→Boolean). Multiple `row_filter` policies are AND-combined (intersection, not union).
 - **column_mask** — mask `Projection` injected above each matching `TableScan` via `apply_column_mask_at_scan` (`transform_up`). Replaces the masked column with the mask expression, aliased with `alias_qualified` to preserve the table qualifier. Parsed synchronously via `sql_ast_to_df_expr(..., Some(ctx))` — sqlparser converts the mask template to a DataFusion `Expr` using the session's `FunctionRegistry` for built-in function lookup (RIGHT, LEFT, UPPER, LOWER, CONCAT, COALESCE, etc.). Scan-level enforcement prevents CTE/subquery alias bypass. Masks are cleared from `column_masks` after scan-level application to prevent double-masking.
 - **column_allow** — specifies which columns a user may see for matching tables. In `policy_required` mode, a `column_allow` policy is the only type that grants table access; without one, the table receives `Filter(lit(false))`.
 - **column_deny** — enforced at two levels: (1) visibility-level via `compute_user_visibility` / `build_user_context` — denied columns removed from per-user schema at connect time; (2) defense-in-depth via top-level `Projection` in `apply_projection_qualified`. Does NOT short-circuit the query. If all selected columns are stripped, returns SQLSTATE `42501` (insufficient_privilege).
@@ -80,7 +88,7 @@ Policy CRUD handlers also call `state.proxy_handler.rebuild_contexts_for_datasou
 
 **Cache invalidation**: call `policy_hook.invalidate_datasource(&name)` after any policy or datasource mutation. Call `policy_hook.invalidate_user(user_id)` after user tenant/deactivation changes. Also call `proxy_handler.rebuild_contexts_for_datasource(&name)` after policy mutations so active connections immediately see the updated schema (column visibility changes without reconnect). For role changes, call `proxy_handler.rebuild_contexts_for_user(user_id)` for each affected user (resolved via `role_resolver::resolve_all_role_members`).
 
-**Enforcement order in `apply_policies`**: (1) `apply_column_mask_at_scan` — mask Projection above TableScan, (2) `apply_row_filters` — Filter below mask Projection but above TableScan, (3) `apply_projection_qualified` — top-level Projection for allow/deny. Masks must run before filters so that `transform_up` places the Filter between TableScan and the mask Projection. This ensures row filters evaluate against raw (unmasked) data. Swapping this order is a security bug — see vector 32 in `docs/permission-security-tests.md`.
+**Enforcement order in `apply_policies`**: (1) `apply_column_mask_at_scan` — mask Projection above TableScan, (2) `apply_row_filters` — Filter below mask Projection but above TableScan, (3) `apply_projection_qualified` — top-level Projection for allow/deny. Masks must run before filters so that `transform_up` places the Filter between TableScan and the mask Projection. This ensures row filters evaluate against raw (unmasked) data. Swapping this order is a security bug — see vector 32 in `docs/security-vectors.md`.
 
 **Column-level policies must be enforced at scan level**: All column-level policies (deny, mask, and any future types) MUST be enforced at the `TableScan` level (visibility-level for deny, `transform_up` Projection for mask) to prevent CTE/subquery alias bypass. `SubqueryAlias` and CTE nodes change the DFSchema qualifier from the real table name to the alias, causing top-level-only matching to miss. Top-level `apply_projection_qualified` is defense-in-depth only.
 
@@ -88,7 +96,7 @@ Policy CRUD handlers also call `state.proxy_handler.rebuild_contexts_for_datasou
 
 ### Decision Functions in PolicyHook
 
-`PolicyHook` holds a `wasmtime::Engine` and a pre-compiled `plugin_module` (QuickJS engine, ~869 KB, compiled once at startup). Decision functions are compiled in **Javy dynamic mode** — the JS source produces a small bytecode WASM (1-16 KB) that imports the QuickJS engine from the plugin module at runtime. This two-module linking approach compiles in ~1ms per function vs ~1-2s for the old static mode.
+A single `Arc<WasmDecisionRuntime>` is created once at startup in `main.rs` and shared by `PolicyHook`, `EngineCache`, and `AdminState`. The runtime holds a `wasmtime::Engine` and a pre-compiled QuickJS plugin module (~869 KB). Decision functions are compiled in **Javy dynamic mode** — the JS source produces a small bytecode WASM (1-16 KB) that imports the QuickJS engine from the plugin module at runtime. This two-module linking approach compiles in ~1ms per function vs ~1-2s for the old static mode.
 
 **`evaluate_decision_fn` flow** (called once per policy in `PolicyEffects::collect`):
 
@@ -96,15 +104,13 @@ Policy CRUD handlers also call `state.proxy_handler.rebuild_contexts_for_datasou
 2. If the resolved `DecisionFunction` has `is_enabled = false` → always fires (gate disabled).
 3. If `decision_wasm` is `None` or empty → always fires (not compiled yet).
 4. If `evaluate_context = "query"` but the `DecisionEvalContext` has no `"query"` key → always fires (defensive fallback — in practice query context is always present at query time).
-5. Compile the small bytecode module via `wasmtime::Module::new(engine, wasm_bytes)` (~1ms for 1-16 KB).
-6. Call `evaluate_wasm_sync(engine, plugin_module, bytecode_module, ctx, config, 1_000_000, log_level)` on the blocking thread. This instantiates the plugin, registers its exports under `"javy-default-plugin-v3"`, then instantiates the bytecode module which imports from the plugin.
-7. On success: cache the `DecisionResult`, return `result.fire`.
-8. On error: log with `tracing::error!`, set `fire = (on_error == "deny")`, cache the error result, return `fire`.
+5. Call `wasm_runtime.evaluate_bytes(wasm_bytes, ctx, config, fuel_limit, log_level)` — this compiles the bytecode module (~1ms), spawns a blocking thread, instantiates the plugin, links the bytecode module, and runs it.
+6. On success: cache the `DecisionResult`, return `result.fire`.
+7. On error: log with `tracing::error!`, set `fire = (on_error == "deny")`, cache the error result, return `fire`.
 
 **`DecisionEvalContext`** is built in `handle_query` and passed into `PolicyEffects::collect`. It carries:
 - `decision_ctx: serde_json::Value` — the full context JSON (session or session+query depending on policies present)
-- `engine: &Engine` — shared engine reference
-- `plugin_module: &Module` — pre-compiled QuickJS engine plugin
+- `wasm_runtime: &WasmDecisionRuntime` — shared WASM runtime reference
 
 **`QueryMetadata` extraction** happens after DataFusion plans the query. The `LogicalPlan` is walked to extract `tables` (from `TableScan` nodes, filtering system schemas), `columns` (from the top-level output schema fields), `join_count` (from `Join` nodes), `has_aggregation` (from `Aggregate` nodes), `has_subquery` (from `SubqueryAlias` nodes), `has_where` (from `Filter` nodes), and `statement_type` (hardcoded `"SELECT"` since only SELECT reaches PolicyHook). This data populates the `"query"` key in the context JSON for `evaluate_context = "query"` functions.
 
@@ -112,9 +118,29 @@ Policy CRUD handlers also call `state.proxy_handler.rebuild_contexts_for_datasou
 
 **JS harness**: User JS is wrapped in a strict-mode IIFE that prevents global variable leaks. The IIFE validates that the user code defines an `evaluate(ctx, config)` function, then the harness reads stdin JSON, calls `evaluate()`, validates the result shape, and writes to stdout. Note: Javy 8.x routes `console.log` to stdout (fd 1) by default — `parse_stdout_result()` in `wasm.rs` handles this by extracting the JSON result from the last stdout line and treating preceding lines as log output.
 
-**Visibility-level decision function evaluation**: `EngineCache` holds its own `wasm_engine` and `plugin_module` (same pattern as `PolicyHook`) for evaluating decision functions at connect time in `compute_user_visibility()`. Policies with `affects_visibility() == true` (column_allow, column_deny, table_deny) have their decision functions evaluated via `evaluate_visibility_decision_fn()`. If `evaluate_context = "session"` and `fire: false`, the policy is skipped (column/table stays visible). If `evaluate_context = "query"`, the visibility effect is skipped entirely (deferred to query time — column/table stays visible in schema, enforcement happens at query time via `PolicyEffects::collect`). Error handling uses `on_error`: `"deny"` → apply, `"skip"` → skip.
+**Visibility-level decision function evaluation**: `EngineCache` uses the same shared `Arc<WasmDecisionRuntime>` for evaluating decision functions at connect time in `compute_user_visibility()`. Policies with `affects_visibility() == true` (column_allow, column_deny, table_deny) have their decision functions evaluated via `evaluate_visibility_decision_fn()`. If `evaluate_context = "session"` and `fire: false`, the policy is skipped (column/table stays visible). If `evaluate_context = "query"`, the visibility effect is skipped entirely (deferred to query time — column/table stays visible in schema, enforcement happens at query time via `PolicyEffects::collect`). Error handling uses `on_error`: `"deny"` → apply, `"skip"` → skip.
 
 **Startup recompilation**: After migrations run, `recompile_decision_functions()` in `main.rs` queries for any decision functions with `decision_fn IS NOT NULL AND decision_wasm IS NULL` and recompiles them in dynamic mode. This ensures all functions are ready after deployment without manual re-save.
+
+## User Attributes (ABAC)
+
+Custom key-value attributes on users, governed by a schema-first attribute definition system.
+
+**Storage**: JSON column `attributes TEXT DEFAULT '{}'` on `proxy_user`. Loads for free with the user model — zero extra queries on the hot path.
+
+**Attribute definitions**: `attribute_definition` table defines allowed keys with types. One row per `(key, entity_type)` pair. `UNIQUE(key, entity_type)` index. For now only `entity_type = "user"` is wired up; `"table"` and `"column"` are accepted but not used in policy evaluation yet. Reserved keys for users: `tenant`, `username`, `id`, `user_id` — rejected at the API.
+
+**Value types**: `"string"` (→ Utf8 literal), `"integer"` (→ Int64), `"boolean"` (→ Boolean). Type-safe substitution in both template variables and decision function context.
+
+**Template variables**: `{user.KEY}` in filter/mask expressions. Built-in fields (`{user.tenant}`, `{user.username}`, `{user.id}`) take priority via `match` arms in `UserVars::get()`, preventing attribute override attacks. Custom attributes fall through to the attribute map.
+
+**Decision function context**: `ctx.session.user.attributes` is a JSON object with typed values. `ctx.session.time.now` is an ISO 8601 / RFC 3339 timestamp of the evaluation time (not session start).
+
+**Save-time expression validation**: `validate_expression()` in `hooks/policy.rs` dry-run parses filter/mask expressions at policy create/update time and returns 422 if the syntax is unsupported. Called from `validate_definition()` in `dto.rs`.
+
+**API endpoints**: `GET/POST /attribute-definitions`, `GET/PUT/DELETE /attribute-definitions/{id}`. User attributes are set via `PUT /users/{id}` with an `attributes` field (full-replace semantics, validated against definitions). DELETE supports `?force=true` for cascade cleanup via database-specific JSON operations (SQLite `json_remove()`, PostgreSQL `jsonb -`).
+
+**Cache invalidation**: attribute changes trigger `policy_hook.invalidate_user()` + `proxy_handler.rebuild_contexts_for_user()`. This fires on attribute changes, tenant changes, and is_active changes in `update_user`. Attribute definition `value_type` changes also trigger cache invalidation for all users with that attribute.
 
 ## RBAC (Role-Based Access Control)
 
@@ -166,12 +192,12 @@ Run with `cargo test --test policy_enforcement` or `cargo test --test protocol`.
 
 **Conventions:**
 - Each test uses a unique upstream schema name (e.g. `"t1_rowfilt"`, `"tc_rf01"`) to avoid collisions during parallel execution.
-- TC-prefixed tests map to security vector numbers in `docs/permission-security-tests.md`.
+- TC-prefixed tests map to security vector numbers in `docs/security-vectors.md`.
 - Template vars in `filter_expression` must not be quoted: `tenant = {user.tenant}` ✓, `tenant = '{user.tenant}'` ✗.
 
 ### Documentation requirements (non-optional)
 After completing any feature or adding tests, always update:
-- **`docs/permission-security-tests.md`** — add a new vector entry for any new attack surface or bypass that was tested (Vector → Bug/Defense → Test format).
+- **`docs/security-vectors.md`** — add a new vector entry for any new attack surface or bypass that was tested (Vector → Bug/Defense → Test format).
 - **`docs/permission-system.md`** — keep the conceptual model, policy type descriptions, and examples in sync with the current implementation.
 
 ## Bug Fix Protocol
@@ -179,7 +205,7 @@ Use TDD: write the failing test(s) first to reproduce the bug, then fix the code
 
 1. Write unit and integration tests that reproduce the bug and fail on the current code. Cover all relevant edge cases — add as many tests as needed, not just one of each.
 2. Fix the code until the test passes.
-3. Security-related bugs (policy bypass, access control, injection) MUST also be documented in `docs/permission-security-tests.md` following the existing Vector → Bug → Defense → Test format.
+3. Security-related bugs (policy bypass, access control, injection) MUST also be documented in `docs/security-vectors.md` following the existing Vector → Bug → Defense → Test format.
 
 ## Known Issues
 - **regclass / regproc not supported** — `datafusion-table-providers` drops these columns. Catalog stores `arrow_type = NULL`; `build_arrow_schema` skips them.

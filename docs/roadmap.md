@@ -3,7 +3,7 @@
 ## MVP Checklist
 
 - [x] **Roles (RBAC)** — DAG-based role hierarchy for policy assignment and datasource access. `role`, `role_member`, `role_inheritance` tables. Policy assignments can target a role (`assignment_scope='role'`), and users in the role (including via inheritance) receive those policies. Includes cycle detection, depth cap (10), soft delete, admin audit log, effective policy preview, and immediate cache invalidation for active connections.
-- [ ] **User Attributes (ABAC)** — Key-value attributes on users (`user_attributes` table: `user_id, key, value`). Available as `{user.*}` template variables in filter/mask expressions and conditions. Extends the current hardcoded `{user.tenant}`, `{user.username}`, `{user.id}`. No IDP sync for MVP.
+- [x] **User Attributes (ABAC)** — Schema-first attribute system: `attribute_definition` table defines allowed keys with types (`string`/`integer`/`boolean`), entity type scoping, and optional enum constraints. User attribute values stored as JSON column on `proxy_user`. Available as typed `{user.*}` template variables in filter/mask expressions. Available in decision function context as `ctx.session.user.attributes` with typed JSON values. `time.now` (RFC 3339 evaluation timestamp) added to decision context for time-windowed access. ABAC and TBAC (resource tags) unified as "attributes" — same concept applied to different entity types. Resource-level attributes planned for future. No IDP sync for MVP.
 - [ ] **Conditional Policies** — Optional `condition` field on all policy types. Policy only applies when condition evaluates to true. Uses same expression syntax and `{user.*}` substitution as filter/mask expressions. Enables attribute-based policy activation (e.g., `user.role != 'admin'`).
 - [ ] **Shadow Mode** — Per-policy dry-run state. Instead of blocking/masking, log what would have happened. Removes "fear of breaking prod" adoption blocker. Each policy gets an `action_status` field: `enforce` (default) or `shadow`.
 - [ ] **YAML Import/Export** — Export all policies for a datasource as YAML. Import YAML to create/update policies. Enables version-controlled policy-as-code workflows and easy promotion between environments (dev → staging → prod).
@@ -62,12 +62,12 @@ Shadow Mode is a "dry-run" state for individual SQL security policies. Instead o
 ### Programmable Governance (The "Leapfrog" Layer)
 
 - **Programmable Policies (WASM Decision Functions)**: **Implemented.** Policy decision functions are JS functions compiled to WASM via Javy and evaluated at query time via wasmtime. Each policy can reference an optional `decision_function_id`. The function receives session and/or query context and returns `{ fire: boolean }`. Fuel-limited to 1M WASM instructions. `on_error` controls fail-secure vs fail-open behavior. Decision results are captured in the query audit log. See `docs/permission-system.md` for full details.
-  - **WASM Linear Memory Limit**: Add a configurable per-function memory cap (e.g., 10 MB default) to prevent a single decision function from allocating unbounded memory. wasmtime supports `Store::limiter()` for this — wire it into `evaluate_wasm_sync` alongside the existing fuel limit.
+  - **WASM Linear Memory Limit**: Add a configurable per-function memory cap (e.g., 10 MB default) to prevent a single decision function from allocating unbounded memory. wasmtime supports `Store::limiter()` for this — wire it into `WasmDecisionRuntime::evaluate_bytes()` alongside the existing fuel limit.
   - **Module Cache in PolicyHook**: Pre-compile WASM modules once per `(decision_function_id, version)` and cache them in PolicyHook, instead of recompiling from bytes on every query evaluation. Evict on decision function update/delete. Reduces per-query overhead from ~ms compilation to ~us lookup.
   - **Decision Function Integration Tests**: Add integration tests in `policy_enforcement.rs` that exercise decision functions through the full proxy stack (real WASM evaluation via pgwire). Current coverage is unit tests only (`hooks/policy.rs`). Requires javy CLI in CI.
 - **Validated Purpose (PBAC)**: Move beyond roles to "Purposes." Require a validated claim (e.g., a ticket ID from a ticketing system) to unlock specific data lenses.
 - **Clean Room Joins**: Support "Blind Joins" where two tables can be joined on a sensitive key, but the proxy guarantees the key cannot be leaked in results or filters.
-- **User Attribute Sync**: Dynamically pull ABAC attributes (Region, Department, Clearance) from identity claims at connect time.
+- **User Attribute Sync**: Dynamically pull ABAC attributes (Region, Department, Clearance) from identity claims at connect time. (Base ABAC with admin-defined attributes is shipped; IDP sync is the next step.)
 - **Impact Analysis Engine**: Run a "What-If" simulation of a policy change against historical query logs to identify breaking changes before enforcement.
 - **Policy Impersonation (Sudo Mode)**: Admin tool to "Run as User X" to verify policy enforcement and visibility in real-time.
 
@@ -151,6 +151,25 @@ This section details the core mechanisms we are implementing to achieve parity w
 3.  **Use Cases:** Calling an external vault for decryption, applying custom NLP models for scrubbing, or performing complex calculations that SQL cannot handle efficiently.
 
 ---
+
+### Expression Parser Coverage (`sql_ast_to_df_expr`)
+
+The custom expression converter in `PolicyHook` (`proxy/src/hooks/policy.rs`) manually converts sqlparser AST to DataFusion `Expr`. It handles a subset of SQL syntax and each new SQL construct must be added by hand. Currently supported: identifiers, literals, binary ops, unary ops, IS NULL/NOT NULL, BETWEEN, LIKE, IN LIST, CAST, scalar functions (via registry), and CASE WHEN. Not yet supported (add as use cases arise):
+
+- ILike (case-insensitive LIKE)
+- IsTrue / IsFalse / IsNotTrue / IsNotFalse
+- IsDistinctFrom / IsNotDistinctFrom
+- InSubquery (subquery in IN clause — needed for RE-11 relationship-based filtering)
+- Extract (EXTRACT(field FROM expr))
+- Substring, Trim, Overlay, Position (SQL string functions — workaround: use UDF names via function registry)
+- Exists / Subquery (correlated subqueries)
+- JsonAccess (-> / ->> operators)
+- TypedString (e.g., DATE '2024-01-01')
+- Interval
+
+**Save-time validation**: as of v0.8, `validate_expression()` dry-run parses filter/mask expressions at policy create/update time and returns 422 if the syntax is unsupported. This prevents silent failures at query time.
+
+**Future refactor — delegate to DataFusion's planner**: Instead of the custom converter, wrap the expression in `SELECT {expr} FROM __dummy__` and let DataFusion's `SqlToRel` handle the full SQL-to-Expr conversion natively. This would support every SQL expression DataFusion supports (CASE, EXTRACT, subqueries, window functions, etc.) without maintaining a custom converter. The previous attempt (pre-bug #13) had issues with qualified column references and double aliasing — a new attempt should address those by using unqualified dummy columns and stripping aliases from the extracted expression. This is a significant refactor that needs careful design and should be covered by the existing integration test suite as a safety net.
 
 ### Performance of PolicyHook
 
@@ -426,7 +445,7 @@ Two distinct "flows" in CI/CD pipeline:
 
 ### Testing Strategy
 
-Given complexity of new policy system (interaction with DataFusion and PostgreSQL), detailed security test plan needed (see docs/permission-security-tests.md):
+Given complexity of new policy system (interaction with DataFusion and PostgreSQL), detailed security test plan needed (see docs/security-vectors.md):
 
 - Edge cases for policy conflicts and priority resolution
 - Negative tests to ensure policy bypasses are not possible

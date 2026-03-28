@@ -64,7 +64,7 @@ Every feature plan MUST include a comprehensive test case inventory before imple
 | **Multi-entity interaction** | How do multiple instances interact? | Multiple roles, multiple datasources, overlapping policies, priority conflicts |
 | **Backward compatibility** | Does existing functionality still work? | Old API formats, migration of existing data, default values |
 
-**Test naming convention:** Group tests by category with descriptive names. Map security-relevant tests to vector numbers in `docs/permission-security-tests.md`.
+**Test naming convention:** Group tests by category with descriptive names. Map security-relevant tests to vector numbers in `docs/security-vectors.md`.
 
 ### Security-First Thinking
 This is a data security product. Every feature that touches access control, policy resolution, or data visibility must be evaluated through a security lens:

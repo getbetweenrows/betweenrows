@@ -58,6 +58,17 @@ use proxy::hooks::policy::PolicyHook;
 use proxy::server::process_socket_with_idle_timeout;
 
 // ---------------------------------------------------------------------------
+// Shared WASM runtime (one per test binary)
+// ---------------------------------------------------------------------------
+
+fn shared_wasm_runtime() -> Arc<proxy::decision::wasm::WasmDecisionRuntime> {
+    static RUNTIME: OnceLock<Arc<proxy::decision::wasm::WasmDecisionRuntime>> = OnceLock::new();
+    RUNTIME
+        .get_or_init(|| Arc::new(proxy::decision::wasm::WasmDecisionRuntime::new().unwrap()))
+        .clone()
+}
+
+// ---------------------------------------------------------------------------
 // Shared Postgres container (one per test binary)
 // ---------------------------------------------------------------------------
 
@@ -197,9 +208,10 @@ impl ProxyTestServer {
             .await
             .unwrap();
 
-        // 3. Engine cache + policy hook
-        let engine_cache = EngineCache::new(db.clone(), MASTER_KEY);
-        let policy_hook = PolicyHook::new(db.clone()).unwrap();
+        // 3. WASM runtime + engine cache + policy hook
+        let wasm_runtime = shared_wasm_runtime();
+        let engine_cache = EngineCache::new(db.clone(), MASTER_KEY, wasm_runtime.clone());
+        let policy_hook = PolicyHook::new(db.clone(), wasm_runtime.clone());
 
         // 4. ProxyHandler
         let handler = Arc::new(ProxyHandler::new(
@@ -219,6 +231,7 @@ impl ProxyTestServer {
             job_store: Arc::new(tokio::sync::Mutex::new(JobStore::new())),
             policy_hook: Some(policy_hook.clone()),
             proxy_handler: Some(handler.clone()),
+            wasm_runtime,
         };
 
         // 6. axum-test TestServer for the admin API
@@ -953,5 +966,51 @@ impl ProxyTestServer {
     ) -> Uuid {
         self.create_user_unassigned(username, password, tenant)
             .await
+    }
+
+    // -- ABAC helpers --
+
+    /// Create an attribute definition.
+    #[allow(dead_code)]
+    pub async fn create_attribute_definition(
+        &self,
+        key: &str,
+        entity_type: &str,
+        value_type: &str,
+        allowed_values: Option<Vec<&str>>,
+    ) -> Uuid {
+        let mut body = json!({
+            "key": key,
+            "entity_type": entity_type,
+            "display_name": key,
+            "value_type": value_type,
+        });
+        if let Some(av) = allowed_values {
+            body["allowed_values"] = json!(av);
+        }
+        let resp = self
+            .admin
+            .post("/api/v1/attribute-definitions")
+            .authorization_bearer(&self.admin_token)
+            .json(&body)
+            .await;
+        resp.assert_status(axum::http::StatusCode::CREATED);
+        resp.json::<Value>()["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    /// Set attributes on a user (full replace).
+    #[allow(dead_code)]
+    pub async fn set_user_attributes(&self, user_id: Uuid, attributes: Value) {
+        let resp = self
+            .admin
+            .put(&format!("/api/v1/users/{user_id}"))
+            .authorization_bearer(&self.admin_token)
+            .json(&json!({ "attributes": attributes }))
+            .await;
+        resp.assert_status_ok();
     }
 }

@@ -4530,6 +4530,7 @@ dependencies = [
  "pg_interval_2",
  "pgwire",
  "rand_core 0.6.4",
+ "regex",
  "rust_decimal",
  "sea-orm",
  "serde",

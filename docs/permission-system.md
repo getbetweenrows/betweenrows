@@ -122,15 +122,31 @@ No `definition` field. The `targets` array specifies which schema/table combinat
 
 ## Template variables
 
-Filter and mask expressions can reference the authenticated user's attributes:
+Filter and mask expressions can reference the authenticated user's identity and custom attributes:
 
-| Placeholder | Value |
-|---|---|
-| `{user.tenant}` | The user's tenant string |
-| `{user.username}` | The user's username |
-| `{user.id}` | The user's UUID |
+### Built-in variables
 
-The proxy uses a **parse-then-substitute** pattern: the expression is parsed into a DataFusion expression tree first, then placeholder identifiers are replaced with typed literal values. The user's tenant/username never passes through the SQL parser, making this immune to SQL injection even if the tenant string contains SQL syntax.
+| Placeholder | Value | Type |
+|---|---|---|
+| `{user.tenant}` | The user's tenant string | string |
+| `{user.username}` | The user's username | string |
+| `{user.id}` | The user's UUID | string |
+
+### Custom attribute variables
+
+Any attribute defined via Attribute Definitions (see below) can be referenced as `{user.KEY}`. The type of the produced literal matches the attribute definition's `value_type`:
+
+| Attribute `value_type` | Placeholder example | Produced literal |
+|---|---|---|
+| `string` | `{user.region}` | `'us-east'` (Utf8) |
+| `integer` | `{user.clearance}` | `3` (Int64) |
+| `boolean` | `{user.is_vip}` | `true` (Boolean) |
+
+Built-in variables (`tenant`, `username`, `id`) always take priority over custom attributes with the same name. This prevents attribute-based override of identity fields.
+
+### Parse-then-substitute pattern
+
+The proxy uses a **parse-then-substitute** pattern: the expression is parsed into a DataFusion expression tree first, then placeholder identifiers are replaced with typed literal values. The user's values never pass through the SQL parser, making this immune to SQL injection even if the value contains SQL syntax.
 
 Example:
 ```
@@ -140,6 +156,19 @@ becomes (at query time, for a user with tenant `acme`):
 ```
 organization_id = 'acme'
 ```
+
+Integer attribute example:
+```
+sensitivity_level <= {user.clearance}
+```
+becomes (for a user with `clearance = 3`):
+```
+sensitivity_level <= 3
+```
+
+### Save-time validation
+
+Filter and mask expressions are validated at policy create/update time. If the expression contains unsupported SQL syntax, the API returns a 422 error immediately — the policy is not saved. This prevents silent failures at query time.
 
 ## Wildcards and glob patterns
 
@@ -238,6 +267,72 @@ SELECT * FROM customers JOIN orders ON customers.id = orders.customer_id
 
 Column qualifiers from DataFusion's query planner identify which table each output column originated from, ensuring column policies apply only to their intended table.
 
+## User Attributes (ABAC)
+
+User attributes are custom key-value properties on users that drive policy evaluation. They extend the built-in identity fields (`tenant`, `username`, `id`) with arbitrary, admin-defined metadata like `region`, `department`, or `clearance_level`.
+
+### Attribute definitions (schema-first)
+
+Before setting attributes on users, admins must define the allowed keys via Attribute Definitions. Each definition specifies:
+
+- **`key`** — the attribute name (e.g., `region`). Must match `^[a-zA-Z][a-zA-Z0-9_]*$`, 1-64 chars.
+- **`entity_type`** — which entity this attribute applies to. Currently only `"user"` is wired up; `"table"` and `"column"` are reserved for future resource-level attributes.
+- **`display_name`** — human-readable label shown in the admin UI (e.g., "AWS Region").
+- **`value_type`** — one of `"string"`, `"integer"`, `"boolean"`. Determines the type of the literal produced in template variable substitution and in the decision function context.
+- **`allowed_values`** — optional enum constraint. If set, only these values are accepted.
+- **`default_value`** — optional default (must pass type and enum validation).
+- **`description`** — optional help text shown in the admin UI.
+
+The same key can exist for different entity types with different constraints (e.g., user `region` as enum vs table `region` as free-text).
+
+Reserved keys for `entity_type = "user"`: `tenant`, `username`, `id`, `user_id` — these are rejected to prevent overriding built-in identity fields.
+
+### Setting attributes on users
+
+User attributes are stored as a JSON column on the user record. They are set via `PUT /api/v1/users/{id}` with an `attributes` field:
+
+```json
+PUT /api/v1/users/{id}
+{
+  "attributes": {"region": "us-east", "clearance": "3"}
+}
+```
+
+- **Full replace semantics**: the entire attribute map is replaced. Absent field = don't touch. Empty `{}` = clear all.
+- **Validation at write time**: every key must match a defined attribute; every value must pass type and enum checks.
+- **No validation on read**: attributes are returned as-is from the JSON column.
+
+### Using attributes in expressions
+
+See [Template variables](#template-variables) above. `{user.KEY}` references produce typed literals based on the attribute definition's `value_type`.
+
+### Using attributes in decision functions
+
+User attributes are available in the decision function context as `ctx.session.user.attributes` with correctly typed JSON values:
+
+```json
+{
+  "session": {
+    "user": {
+      "attributes": {
+        "region": "us-east",
+        "clearance_level": 3,
+        "is_vip": true
+      }
+    }
+  }
+}
+```
+
+### Cache behavior
+
+Attribute changes via the admin API trigger immediate cache invalidation (`invalidate_user` + `rebuild_contexts_for_user`). The PolicyHook session cache (60s TTL) is also cleared. Changes take effect without requiring user reconnect.
+
+### Deleting attribute definitions
+
+- Without `?force=true`: returns 409 with the count of affected users.
+- With `?force=true`: deletes the definition and removes the key from all users' attribute JSON (database-specific: SQLite `json_remove()`, PostgreSQL `jsonb -`). Triggers cache invalidation.
+
 ## Decision Functions
 
 Decision functions are optional, programmable gates that control whether a policy fires for a given query. They are standalone entities with their own lifecycle, separate from policies. A policy references a decision function via `decision_function_id`; one decision function can be reused across multiple policies.
@@ -276,8 +371,12 @@ function evaluate(ctx, config) {
 
 | Value | `ctx` contains | When it can fire |
 |-------|---------------|-----------------|
-| `"session"` | `ctx.session` only: user id/username/tenant/roles, time (hour, day_of_week), datasource name/access_mode | Both at connect time (visibility) and query time |
+| `"session"` | `ctx.session` only: user id/username/tenant/roles/attributes, time (now, hour, day_of_week), datasource name/access_mode | Both at connect time (visibility) and query time |
 | `"query"` | `ctx.session` + `ctx.query`: tables, columns, join_count, has_aggregation, has_subquery, has_where, statement_type | Query time only — visibility effect skipped at connect time (policy deferred to query time) |
+
+`time.now` is an ISO 8601 / RFC 3339 timestamp representing the **evaluation time** — the moment the context is built. For visibility-level functions this is when the connection context is computed; for query-level functions it is when the query is processed. This enables time-windowed decision functions (e.g., break-glass temporary access).
+
+`user.attributes` is a JSON object containing the user's custom attributes with correctly typed values (string/number/boolean). See [User Attributes (ABAC)](#user-attributes-abac) for details.
 
 **Visibility-level enforcement**: `column_deny`, `table_deny`, and `column_allow` policies are enforced at connect time (visibility level) by removing columns/tables from the per-user schema. Decision functions on these policy types are evaluated at visibility time when `evaluate_context = "session"`. If the decision function returns `fire: false`, the policy is skipped and the column/table remains visible. For `evaluate_context = "query"`, the policy's visibility effect is skipped entirely (deferred to query time), since query metadata is not available at connect time — the column/table stays visible in the schema and the decision function runs at query time as normal.
 

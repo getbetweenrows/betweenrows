@@ -58,6 +58,18 @@ export function Layout() {
             Roles
           </NavLink>
           <NavLink
+            to="/attributes"
+            className={({ isActive }) =>
+              `flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+                isActive
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-300 hover:bg-gray-700 hover:text-white'
+              }`
+            }
+          >
+            Attributes
+          </NavLink>
+          <NavLink
             to="/policies"
             className={({ isActive }) =>
               `flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${

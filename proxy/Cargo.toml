@@ -34,6 +34,8 @@ migration = { path = "../migration" }
 # UUID generation
 uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
 
+regex = "1"
+
 # Password hashing
 argon2 = "0.5"
 password-hash = { version = "0.5", features = ["std"] }

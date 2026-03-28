@@ -18,6 +18,7 @@ use crate::handler::ProxyHandler;
 use crate::hooks::policy::PolicyHook;
 
 pub mod admin_audit;
+pub mod attribute_definition_handlers;
 pub mod audit_handlers;
 pub mod auth_handlers;
 pub mod catalog_handlers;
@@ -47,6 +48,8 @@ pub struct AdminState {
     pub policy_hook: Option<Arc<PolicyHook>>,
     /// ProxyHandler reference to rebuild per-connection SessionContexts after policy mutations.
     pub proxy_handler: Option<Arc<ProxyHandler>>,
+    /// Shared WASM runtime for the admin test endpoint.
+    pub wasm_runtime: Arc<crate::decision::wasm::WasmDecisionRuntime>,
 }
 
 // ---------- error type ----------
@@ -202,6 +205,18 @@ fn api_v1() -> Router<AdminState> {
             get(policy_handlers::get_policy)
                 .put(policy_handlers::update_policy)
                 .delete(policy_handlers::delete_policy),
+        )
+        // attribute definitions
+        .route(
+            "/attribute-definitions",
+            get(attribute_definition_handlers::list_attribute_definitions)
+                .post(attribute_definition_handlers::create_attribute_definition),
+        )
+        .route(
+            "/attribute-definitions/{id}",
+            get(attribute_definition_handlers::get_attribute_definition)
+                .put(attribute_definition_handlers::update_attribute_definition)
+                .delete(attribute_definition_handlers::delete_attribute_definition),
         )
         // decision functions
         .route(

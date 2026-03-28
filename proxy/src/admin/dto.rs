@@ -5,15 +5,32 @@ use uuid::Uuid;
 use crate::entity::proxy_user;
 use crate::policy_match::{PolicyType, TargetEntry};
 
-/// Deserialize `Option<Option<serde_json::Value>>` from JSON.
+/// Deserialize `Option<Option<T>>` with 3-state semantics:
+/// - absent → `None` (no change) — handled by `#[serde(default)]`
+/// - `null` → `Some(None)` (clear)
+/// - value → `Some(Some(value))` (set)
+///
+/// Must pair with `#[serde(default)]` so absent fields become `None`.
+/// When this function is called, the field IS present in JSON, so we
+/// always wrap in `Some(...)`.
+fn deserialize_optional_nullable<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    // Field is present → wrap in Some. null → Some(None), value → Some(Some(v))
+    let inner: Option<T> = Option::deserialize(deserializer)?;
+    Ok(Some(inner))
+}
+
+/// Alias for backward compat with existing call sites.
 fn deserialize_optional_nullable_value<'de, D>(
     deserializer: D,
 ) -> Result<Option<Option<serde_json::Value>>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let opt: Option<Option<serde_json::Value>> = Option::deserialize(deserializer)?;
-    Ok(opt)
+    deserialize_optional_nullable(deserializer)
 }
 
 // ---------- user requests ----------
@@ -42,6 +59,9 @@ pub struct UpdateUserRequest {
     pub is_active: Option<bool>,
     pub email: Option<String>,
     pub display_name: Option<String>,
+    /// Full-replace semantics: absent = don't touch, {} = clear all,
+    /// {"key": "val"} = replace with exactly this.
+    pub attributes: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +93,7 @@ pub struct UserResponse {
     pub is_active: bool,
     pub email: Option<String>,
     pub display_name: Option<String>,
+    pub attributes: std::collections::HashMap<String, String>,
     pub last_login_at: Option<NaiveDateTime>,
     pub created_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,
@@ -80,6 +101,7 @@ pub struct UserResponse {
 
 impl From<proxy_user::Model> for UserResponse {
     fn from(m: proxy_user::Model) -> Self {
+        let attributes = proxy_user::parse_attributes(&m.attributes);
         Self {
             id: m.id,
             username: m.username,
@@ -88,6 +110,7 @@ impl From<proxy_user::Model> for UserResponse {
             is_active: m.is_active,
             email: m.email,
             display_name: m.display_name,
+            attributes,
             last_login_at: m.last_login_at,
             created_at: m.created_at,
             updated_at: m.updated_at,
@@ -101,6 +124,151 @@ pub struct PaginatedResponse<T> {
     pub total: u64,
     pub page: u64,
     pub page_size: u64,
+}
+
+// ---------- attribute definition requests/responses ----------
+
+#[derive(Debug, Deserialize)]
+pub struct CreateAttributeDefinitionRequest {
+    pub key: String,
+    pub entity_type: String,
+    pub display_name: String,
+    pub value_type: String,
+    pub default_value: Option<String>,
+    pub allowed_values: Option<Vec<String>>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateAttributeDefinitionRequest {
+    pub display_name: Option<String>,
+    pub value_type: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
+    pub default_value: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
+    pub allowed_values: Option<Option<Vec<String>>>,
+    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
+    pub description: Option<Option<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListAttributeDefinitionsQuery {
+    pub entity_type: Option<String>,
+    pub page: Option<u64>,
+    pub page_size: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteAttributeDefinitionQuery {
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AttributeDefinitionResponse {
+    pub id: Uuid,
+    pub key: String,
+    pub entity_type: String,
+    pub display_name: String,
+    pub value_type: String,
+    pub default_value: Option<String>,
+    pub allowed_values: Option<Vec<String>>,
+    pub description: Option<String>,
+    pub created_by: Uuid,
+    pub updated_by: Uuid,
+    pub created_at: NaiveDateTime,
+    pub updated_at: NaiveDateTime,
+}
+
+impl From<crate::entity::attribute_definition::Model> for AttributeDefinitionResponse {
+    fn from(m: crate::entity::attribute_definition::Model) -> Self {
+        let allowed_values: Option<Vec<String>> = m
+            .allowed_values
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+        Self {
+            id: m.id,
+            key: m.key,
+            entity_type: m.entity_type,
+            display_name: m.display_name,
+            value_type: m.value_type,
+            default_value: m.default_value,
+            allowed_values,
+            description: m.description,
+            created_by: m.created_by,
+            updated_by: m.updated_by,
+            created_at: m.created_at,
+            updated_at: m.updated_at,
+        }
+    }
+}
+
+/// Validate attribute definition key: 1-64 chars, starts with letter, [a-zA-Z0-9_].
+pub fn validate_attribute_key(key: &str) -> Result<(), String> {
+    if key.is_empty() || key.len() > 64 {
+        return Err("key must be 1-64 characters".to_string());
+    }
+    let first = key.chars().next().unwrap();
+    if !first.is_ascii_alphabetic() {
+        return Err("key must start with a letter".to_string());
+    }
+    if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err("key must contain only letters, digits, and underscores".to_string());
+    }
+    Ok(())
+}
+
+const RESERVED_USER_ATTRIBUTE_KEYS: &[&str] = &["tenant", "username", "id", "user_id"];
+const VALID_ENTITY_TYPES: &[&str] = &["user", "table", "column"];
+const VALID_VALUE_TYPES: &[&str] = &["string", "integer", "boolean"];
+
+pub fn validate_attribute_definition(
+    key: &str,
+    entity_type: &str,
+    value_type: &str,
+    default_value: Option<&str>,
+    allowed_values: Option<&[String]>,
+) -> Result<(), String> {
+    validate_attribute_key(key)?;
+
+    if !VALID_ENTITY_TYPES.contains(&entity_type) {
+        return Err(format!(
+            "entity_type must be one of: {}",
+            VALID_ENTITY_TYPES.join(", ")
+        ));
+    }
+
+    if entity_type == "user" && RESERVED_USER_ATTRIBUTE_KEYS.contains(&key) {
+        return Err(format!(
+            "'{key}' is a reserved attribute key for user entities"
+        ));
+    }
+
+    if !VALID_VALUE_TYPES.contains(&value_type) {
+        return Err(format!(
+            "value_type must be one of: {}",
+            VALID_VALUE_TYPES.join(", ")
+        ));
+    }
+
+    if let Some(dv) = default_value {
+        crate::entity::attribute_definition::validate_value(dv, value_type)
+            .map_err(|e| format!("invalid default_value: {e}"))?;
+    }
+
+    if let Some(avs) = allowed_values {
+        for av in avs {
+            crate::entity::attribute_definition::validate_value(av, value_type)
+                .map_err(|e| format!("invalid allowed_value '{av}': {e}"))?;
+        }
+        if let Some(dv) = default_value
+            && !avs.iter().any(|v| v == dv)
+        {
+            return Err("default_value must be in allowed_values".to_string());
+        }
+    }
+
+    Ok(())
 }
 
 // ---------- data source requests ----------
@@ -356,7 +524,11 @@ pub fn validate_definition(
                 .as_ref()
                 .ok_or("row_filter policy requires a 'definition' with 'filter_expression'")?;
             match def.get("filter_expression") {
-                Some(v) if v.is_string() => Ok(()),
+                Some(v) if v.is_string() => {
+                    let expr = v.as_str().unwrap();
+                    crate::hooks::policy::validate_expression(expr, false)?;
+                    Ok(())
+                }
                 Some(_) => Err("row_filter: 'filter_expression' must be a string".to_string()),
                 None => Err("row_filter: missing required field 'filter_expression'".to_string()),
             }
@@ -366,7 +538,11 @@ pub fn validate_definition(
                 .as_ref()
                 .ok_or("column_mask policy requires a 'definition' with 'mask_expression'")?;
             match def.get("mask_expression") {
-                Some(v) if v.is_string() => Ok(()),
+                Some(v) if v.is_string() => {
+                    let expr = v.as_str().unwrap();
+                    crate::hooks::policy::validate_expression(expr, true)?;
+                    Ok(())
+                }
                 Some(_) => Err("column_mask: 'mask_expression' must be a string".to_string()),
                 None => Err("column_mask: missing required field 'mask_expression'".to_string()),
             }
@@ -714,4 +890,178 @@ pub struct JobStatusResponse {
     pub status: String,
     pub result: Option<serde_json::Value>,
     pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------- validate_attribute_key ----------
+
+    #[test]
+    fn key_valid() {
+        assert!(validate_attribute_key("region").is_ok());
+        assert!(validate_attribute_key("clearance_level").is_ok());
+        assert!(validate_attribute_key("a").is_ok());
+        assert!(validate_attribute_key("dept123").is_ok());
+    }
+
+    #[test]
+    fn key_empty() {
+        assert!(validate_attribute_key("").is_err());
+    }
+
+    #[test]
+    fn key_too_long() {
+        let long = "a".repeat(65);
+        assert!(validate_attribute_key(&long).is_err());
+    }
+
+    #[test]
+    fn key_starts_with_digit() {
+        assert!(validate_attribute_key("1region").is_err());
+    }
+
+    #[test]
+    fn key_special_chars() {
+        assert!(validate_attribute_key("my-key").is_err());
+        assert!(validate_attribute_key("my.key").is_err());
+        assert!(validate_attribute_key("my key").is_err());
+    }
+
+    // ---------- validate_attribute_definition ----------
+
+    #[test]
+    fn valid_definition() {
+        assert!(validate_attribute_definition("region", "user", "string", None, None).is_ok());
+        assert!(validate_attribute_definition("level", "user", "integer", Some("3"), None).is_ok());
+        assert!(
+            validate_attribute_definition("active", "column", "boolean", Some("true"), None)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn reserved_key_for_user() {
+        assert!(validate_attribute_definition("tenant", "user", "string", None, None).is_err());
+        assert!(validate_attribute_definition("username", "user", "string", None, None).is_err());
+        assert!(validate_attribute_definition("id", "user", "string", None, None).is_err());
+        assert!(validate_attribute_definition("user_id", "user", "string", None, None).is_err());
+    }
+
+    #[test]
+    fn reserved_key_ok_for_non_user() {
+        // "tenant" is only reserved for entity_type="user"
+        assert!(validate_attribute_definition("tenant", "table", "string", None, None).is_ok());
+    }
+
+    #[test]
+    fn invalid_entity_type() {
+        assert!(validate_attribute_definition("key", "database", "string", None, None).is_err());
+    }
+
+    #[test]
+    fn invalid_value_type() {
+        assert!(validate_attribute_definition("key", "user", "float", None, None).is_err());
+    }
+
+    #[test]
+    fn default_value_type_mismatch() {
+        assert!(
+            validate_attribute_definition("key", "user", "integer", Some("abc"), None).is_err()
+        );
+        assert!(
+            validate_attribute_definition("key", "user", "boolean", Some("yes"), None).is_err()
+        );
+    }
+
+    #[test]
+    fn allowed_values_type_mismatch() {
+        let av = vec!["abc".to_string()];
+        assert!(validate_attribute_definition("key", "user", "integer", None, Some(&av)).is_err());
+    }
+
+    #[test]
+    fn default_not_in_allowed_values() {
+        let av = vec!["a".to_string(), "b".to_string()];
+        assert!(
+            validate_attribute_definition("key", "user", "string", Some("c"), Some(&av)).is_err()
+        );
+    }
+
+    #[test]
+    fn default_in_allowed_values() {
+        let av = vec!["a".to_string(), "b".to_string()];
+        assert!(
+            validate_attribute_definition("key", "user", "string", Some("a"), Some(&av)).is_ok()
+        );
+    }
+
+    // ---------- UpdateAttributeDefinitionRequest 3-state deserialization ----------
+
+    #[test]
+    fn attr_update_absent_fields() {
+        let json = r#"{}"#;
+        let req: UpdateAttributeDefinitionRequest = serde_json::from_str(json).unwrap();
+        assert!(req.default_value.is_none());
+        assert!(req.allowed_values.is_none());
+        assert!(req.description.is_none());
+    }
+
+    #[test]
+    fn attr_update_null_clears() {
+        let json = r#"{"default_value": null, "allowed_values": null, "description": null}"#;
+        let req: UpdateAttributeDefinitionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.default_value, Some(None));
+        assert_eq!(req.allowed_values, Some(None));
+        assert_eq!(req.description, Some(None));
+    }
+
+    #[test]
+    fn attr_update_value_sets() {
+        let json =
+            r#"{"default_value": "foo", "allowed_values": ["a","b"], "description": "desc"}"#;
+        let req: UpdateAttributeDefinitionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.default_value, Some(Some("foo".to_string())));
+        assert_eq!(
+            req.allowed_values,
+            Some(Some(vec!["a".to_string(), "b".to_string()]))
+        );
+        assert_eq!(req.description, Some(Some("desc".to_string())));
+    }
+
+    // ---------- validate_expression (save-time) ----------
+
+    #[test]
+    fn validate_filter_expression_ok() {
+        assert!(crate::hooks::policy::validate_expression("tenant = {user.tenant}", false).is_ok());
+        assert!(crate::hooks::policy::validate_expression("level >= 3", false).is_ok());
+        assert!(crate::hooks::policy::validate_expression("1=1", false).is_ok());
+    }
+
+    #[test]
+    fn validate_filter_expression_bad_syntax() {
+        assert!(
+            crate::hooks::policy::validate_expression("EXTRACT(HOUR FROM col)", false).is_err()
+        );
+    }
+
+    #[test]
+    fn validate_mask_expression_ok() {
+        assert!(crate::hooks::policy::validate_expression("'REDACTED'", true).is_ok());
+        assert!(
+            crate::hooks::policy::validate_expression("'***-**-' || RIGHT(ssn, 4)", true).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_mask_case_when_ok() {
+        assert!(
+            crate::hooks::policy::validate_expression(
+                "CASE WHEN {user.clearance} >= 3 THEN salary ELSE 0 END",
+                true,
+            )
+            .is_ok()
+        );
+    }
 }

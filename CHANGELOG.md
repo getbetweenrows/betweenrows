@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-03-28
+
+### Added
+- **User Attributes (ABAC)** — schema-first attribute system for attribute-based access control
+  - `attribute_definition` table defines allowed keys with types (`string`/`integer`/`boolean`), entity type scoping, optional enum constraints, and reserved key protection
+  - User attribute values stored as JSON column on `proxy_user` with full-replace semantics and write-time validation
+  - Typed `{user.KEY}` template variables in filter/mask expressions (Utf8/Int64/Boolean literals)
+  - User attributes available in decision function context as `ctx.session.user.attributes` with typed JSON values
+  - `time.now` (RFC 3339 evaluation timestamp) added to decision function context for time-windowed access
+  - Admin UI: attribute definition list/create/edit pages, user attribute editor with type-aware inputs
+  - CRUD API with `?force=true` cascade delete (SQLite `json_remove()` / PostgreSQL `jsonb -`)
+  - 3 new migrations (052–054)
+- **Save-time expression validation** — filter and mask expressions are validated at policy create/update time; unsupported SQL syntax returns 422 immediately instead of failing silently at query time
+  - CASE WHEN expression support added to the expression parser
+
+### Changed
+- **Shared WASM runtime** — consolidated `WasmDecisionRuntime` into a single `Arc` singleton created at startup, shared by `PolicyHook`, `EngineCache`, and `AdminState` (replaces per-use instantiation)
+- **Security vectors doc renamed** — `docs/permission-security-tests.md` → `docs/security-vectors.md`; added vectors 59–68 covering predicate probing, aggregate inference, EXPLAIN leakage, HAVING bypass, CASE expression bypass, window function ordering, timing side channels, and ABAC-specific vectors
+
 ## [0.7.0] - 2026-03-26
 
 ### Added

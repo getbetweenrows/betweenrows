@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-03-28
+
+### Added
+- **List attribute type for ABAC user attributes** — new `"list"` value type for attribute definitions, storing arrays of strings (max 100 elements)
+  - Use with `IN ({user.KEY})` in filter expressions; list expands into comma-separated placeholders
+  - Empty lists expand to `NULL` (effectively returning no rows)
+  - API validates list values as JSON arrays of strings; `allowed_values` constrains individual elements
+  - Decision function context includes list attributes as JSON arrays
+  - Admin UI: tag/chip input for free-form lists, multi-select checkboxes for lists with allowed values
+  - Extracted `AttributeDefinitionForm` component (matches `RoleForm`/`DataSourceForm` pattern)
+  - Added PolicyForm validation: blocks submit when decision function toggle is on but no function is attached or reference is stale
+  - DecisionFunctionModal: autocomplete hints for per-attribute `ctx.session.user.attributes.*`, test context pre-populated from current user's real attributes
+  - Config JSON validation: blocks save on invalid JSON instead of silently defaulting to `{}`
+
 ## [0.8.0] - 2026-03-28
 
 ### Added

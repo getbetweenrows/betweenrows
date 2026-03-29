@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-03-29
+
+### Fixed
+- **Decision function test context** — mock context in the expression editor nested user attributes under an `attributes` key instead of flattening them as top-level fields on `ctx.session.user`, causing runtime errors when testing functions that access custom attributes (e.g. `ctx.session.user.departments`). Added cross-reference comments between `context.rs` and `DecisionFunctionModal.tsx` to prevent future drift.
+
 ## [0.10.0] - 2026-03-29
 
 ### Changed

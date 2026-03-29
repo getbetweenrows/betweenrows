@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-03-29
+
+### Changed
+- **Flatten user attributes in decision function context** — Custom attributes are now first-class fields on `ctx.session.user` (e.g., `ctx.session.user.region`) instead of nested under `ctx.session.user.attributes`. Built-in fields (`id`, `username`, `tenant`, `roles`) always take priority on collision.
+  - **BREAKING**: Existing decision functions referencing `ctx.session.user.attributes.*` must be updated to `ctx.session.user.*`
+
+### Added
+- **Expression editor with autocomplete** — Filter and mask expression fields in PolicyForm now use a CodeMirror editor with `{user.*}` template variable autocomplete (built-in + custom attribute definitions).
+- **Server-side expression validation** — New `POST /policies/validate-expression` endpoint and "Check" button in the expression editor to validate filter/mask syntax before saving.
+- **ORM-derived reserved attribute keys** — Reserved user attribute keys are now computed from the `proxy_user` ORM columns (+ virtual fields like `roles`), preventing accidental collisions with DB-level field names.
+- **Conditional policy documentation** — Comprehensive ABAC expression patterns and conditional policy examples for all five policy types added to `docs/permission-system.md`. Conditional Policies marked as resolved in roadmap (covered by `CASE WHEN` expressions + decision functions).
+
 ## [0.9.0] - 2026-03-28
 
 ### Added

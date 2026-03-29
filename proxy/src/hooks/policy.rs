@@ -160,15 +160,47 @@ fn mangle_vars(template: &str, vars: &UserVars) -> (String, Vec<VarMapping>) {
         .collect();
     for (needle, attr_key) in captures {
         let full_key = format!("user.{}", attr_key);
-        let placeholder = format!("__br_user_{}__", attr_key);
         let value = vars.get(&full_key).unwrap_or("").to_string();
         let value_type = vars.get_type(&full_key).to_string();
-        result = result.replace(&needle, &placeholder);
-        mappings.push(VarMapping {
-            placeholder: placeholder.to_lowercase(),
-            value,
-            value_type,
-        });
+
+        if value_type == "list" {
+            // List type: expand into multiple comma-separated placeholders
+            // so `department IN {user.departments}` becomes
+            // `department IN __br_user_departments_0__, __br_user_departments_1__`
+            let elements: Vec<String> = serde_json::from_str(&value).unwrap_or_default();
+            if elements.is_empty() {
+                // Empty list → single NULL placeholder
+                let ph = format!("__br_user_{}_0__", attr_key);
+                result = result.replace(&needle, &ph);
+                mappings.push(VarMapping {
+                    placeholder: ph.to_lowercase(),
+                    value: String::new(),
+                    value_type: "null".to_string(),
+                });
+            } else {
+                let phs: Vec<String> = elements
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("__br_user_{}_{i}__", attr_key))
+                    .collect();
+                result = result.replace(&needle, &phs.join(", "));
+                for (i, elem) in elements.iter().enumerate() {
+                    mappings.push(VarMapping {
+                        placeholder: format!("__br_user_{}_{i}__", attr_key).to_lowercase(),
+                        value: elem.clone(),
+                        value_type: "string".to_string(),
+                    });
+                }
+            }
+        } else {
+            let placeholder = format!("__br_user_{}__", attr_key);
+            result = result.replace(&needle, &placeholder);
+            mappings.push(VarMapping {
+                placeholder: placeholder.to_lowercase(),
+                value,
+                value_type,
+            });
+        }
     }
 
     (result, mappings)
@@ -177,6 +209,7 @@ fn mangle_vars(template: &str, vars: &UserVars) -> (String, Vec<VarMapping>) {
 /// Produce a typed DataFusion literal from a string value and value_type.
 fn typed_lit(value: &str, value_type: &str) -> datafusion::logical_expr::Expr {
     match value_type {
+        "null" => lit(ScalarValue::Null),
         "integer" => {
             if let Ok(n) = value.parse::<i64>() {
                 lit(ScalarValue::Int64(Some(n)))
@@ -927,10 +960,20 @@ impl PolicyHook {
         let mut result = HashMap::new();
         for (key, value) in raw_attrs {
             let value_type = def_map.get(key.as_str()).unwrap_or(&"string");
+            // Convert serde_json::Value to string representation for TypedAttribute.
+            // For list type, serialize back to JSON array string.
+            // For scalar types, extract the raw string value.
+            let str_value = match *value_type {
+                "list" => serde_json::to_string(&value).unwrap_or_else(|_| "[]".to_string()),
+                _ => match &value {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                },
+            };
             result.insert(
                 key,
                 TypedAttribute {
-                    value,
+                    value: str_value,
                     value_type: value_type.to_string(),
                 },
             );
@@ -1885,6 +1928,9 @@ impl QueryHook for PolicyHook {
                 .iter()
                 .map(|(k, ta)| {
                     let v = match ta.value_type.as_str() {
+                        "list" => serde_json::from_str::<Vec<String>>(&ta.value)
+                            .map(|arr| serde_json::json!(arr))
+                            .unwrap_or_else(|_| serde_json::json!(&ta.value)),
                         "integer" => ta
                             .value
                             .parse::<i64>()
@@ -4492,6 +4538,136 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             mappings[0].value, "",
             "unknown attribute should produce empty string"
         );
+    }
+
+    // ---------- ABAC: list attribute expansion ----------
+
+    #[test]
+    fn test_mangle_vars_list_attribute() {
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "departments".to_string(),
+            TypedAttribute {
+                value: r#"["eng","sec"]"#.to_string(),
+                value_type: "list".to_string(),
+            },
+        );
+        let vars = UserVars {
+            tenant: "acme".to_string(),
+            username: "alice".to_string(),
+            user_id: "uid".to_string(),
+            attributes: attrs,
+        };
+        let (mangled, mappings) = mangle_vars("dept IN {user.departments}", &vars);
+        assert_eq!(mappings.len(), 2);
+        assert!(mangled.contains("__br_user_departments_0__"));
+        assert!(mangled.contains("__br_user_departments_1__"));
+        assert_eq!(mappings[0].value, "eng");
+        assert_eq!(mappings[0].value_type, "string");
+        assert_eq!(mappings[1].value, "sec");
+        assert_eq!(mappings[1].value_type, "string");
+    }
+
+    #[test]
+    fn test_mangle_vars_list_empty() {
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "departments".to_string(),
+            TypedAttribute {
+                value: "[]".to_string(),
+                value_type: "list".to_string(),
+            },
+        );
+        let vars = UserVars {
+            tenant: "acme".to_string(),
+            username: "alice".to_string(),
+            user_id: "uid".to_string(),
+            attributes: attrs,
+        };
+        let (mangled, mappings) = mangle_vars("dept IN {user.departments}", &vars);
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].value_type, "null");
+        assert!(mangled.contains("__br_user_departments_0__"));
+    }
+
+    #[test]
+    fn test_mangle_vars_list_single_element() {
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "regions".to_string(),
+            TypedAttribute {
+                value: r#"["us-east"]"#.to_string(),
+                value_type: "list".to_string(),
+            },
+        );
+        let vars = UserVars {
+            tenant: "acme".to_string(),
+            username: "alice".to_string(),
+            user_id: "uid".to_string(),
+            attributes: attrs,
+        };
+        let (mangled, mappings) = mangle_vars("region IN {user.regions}", &vars);
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].value, "us-east");
+        assert_eq!(mappings[0].value_type, "string");
+        assert!(mangled.contains("__br_user_regions_0__"));
+    }
+
+    #[test]
+    fn test_typed_lit_null() {
+        let expr = typed_lit("", "null");
+        match expr {
+            datafusion::logical_expr::Expr::Literal(sv, _) => {
+                assert!(sv.is_null(), "null sentinel should produce NULL literal");
+            }
+            _ => panic!("expected Literal, got {expr:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_filter_list_in_clause() {
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "departments".to_string(),
+            TypedAttribute {
+                value: r#"["eng","sec"]"#.to_string(),
+                value_type: "list".to_string(),
+            },
+        );
+        let vars = UserVars {
+            tenant: "acme".to_string(),
+            username: "alice".to_string(),
+            user_id: "uid".to_string(),
+            attributes: attrs,
+        };
+        let expr = parse_filter_expr("department IN ({user.departments})", &vars);
+        assert!(expr.is_ok(), "list IN clause should parse: {expr:?}");
+        let expr = expr.unwrap();
+        let display = format!("{expr}");
+        assert!(
+            display.contains("department IN"),
+            "should contain IN expression: {display}"
+        );
+    }
+
+    #[test]
+    fn test_parse_filter_list_empty_in_clause() {
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "departments".to_string(),
+            TypedAttribute {
+                value: "[]".to_string(),
+                value_type: "list".to_string(),
+            },
+        );
+        let vars = UserVars {
+            tenant: "acme".to_string(),
+            username: "alice".to_string(),
+            user_id: "uid".to_string(),
+            attributes: attrs,
+        };
+        let expr = parse_filter_expr("department IN ({user.departments})", &vars);
+        assert!(expr.is_ok(), "empty list IN clause should parse: {expr:?}");
     }
 
     // ---------- ABAC: UserVars::get priority ----------

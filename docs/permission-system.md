@@ -141,6 +141,7 @@ Any attribute defined via Attribute Definitions (see below) can be referenced as
 | `string` | `{user.region}` | `'us-east'` (Utf8) |
 | `integer` | `{user.clearance}` | `3` (Int64) |
 | `boolean` | `{user.is_vip}` | `true` (Boolean) |
+| `list` | `{user.departments}` | `'eng', 'sec'` (multiple Utf8 — use with `IN`) |
 
 Built-in variables (`tenant`, `username`, `id`) always take priority over custom attributes with the same name. This prevents attribute-based override of identity fields.
 
@@ -165,6 +166,16 @@ becomes (for a user with `clearance = 3`):
 ```
 sensitivity_level <= 3
 ```
+
+List attribute example:
+```
+department IN ({user.departments})
+```
+becomes (for a user with `departments = ["engineering", "security"]`):
+```
+department IN ('engineering', 'security')
+```
+An empty list produces `department IN (NULL)`, which evaluates to false (no rows returned).
 
 ### Save-time validation
 
@@ -278,7 +289,7 @@ Before setting attributes on users, admins must define the allowed keys via Attr
 - **`key`** — the attribute name (e.g., `region`). Must match `^[a-zA-Z][a-zA-Z0-9_]*$`, 1-64 chars.
 - **`entity_type`** — which entity this attribute applies to. Currently only `"user"` is wired up; `"table"` and `"column"` are reserved for future resource-level attributes.
 - **`display_name`** — human-readable label shown in the admin UI (e.g., "AWS Region").
-- **`value_type`** — one of `"string"`, `"integer"`, `"boolean"`. Determines the type of the literal produced in template variable substitution and in the decision function context.
+- **`value_type`** — one of `"string"`, `"integer"`, `"boolean"`, `"list"`. Determines the type of the literal produced in template variable substitution and in the decision function context. `"list"` stores an array of strings (max 100 elements); use with `IN ({user.KEY})` in filter expressions.
 - **`allowed_values`** — optional enum constraint. If set, only these values are accepted.
 - **`default_value`** — optional default (must pass type and enum validation).
 - **`description`** — optional help text shown in the admin UI.
@@ -294,7 +305,7 @@ User attributes are stored as a JSON column on the user record. They are set via
 ```json
 PUT /api/v1/users/{id}
 {
-  "attributes": {"region": "us-east", "clearance": "3"}
+  "attributes": {"region": "us-east", "clearance": "3", "departments": ["engineering", "security"]}
 }
 ```
 
@@ -317,7 +328,8 @@ User attributes are available in the decision function context as `ctx.session.u
       "attributes": {
         "region": "us-east",
         "clearance_level": 3,
-        "is_vip": true
+        "is_vip": true,
+        "departments": ["engineering", "security"]
       }
     }
   }
@@ -376,7 +388,7 @@ function evaluate(ctx, config) {
 
 `time.now` is an ISO 8601 / RFC 3339 timestamp representing the **evaluation time** — the moment the context is built. For visibility-level functions this is when the connection context is computed; for query-level functions it is when the query is processed. This enables time-windowed decision functions (e.g., break-glass temporary access).
 
-`user.attributes` is a JSON object containing the user's custom attributes with correctly typed values (string/number/boolean). See [User Attributes (ABAC)](#user-attributes-abac) for details.
+`user.attributes` is a JSON object containing the user's custom attributes with correctly typed values (string/number/boolean/array). List attributes appear as JSON arrays of strings. See [User Attributes (ABAC)](#user-attributes-abac) for details.
 
 **Visibility-level enforcement**: `column_deny`, `table_deny`, and `column_allow` policies are enforced at connect time (visibility level) by removing columns/tables from the per-user schema. Decision functions on these policy types are evaluated at visibility time when `evaluate_context = "session"`. If the decision function returns `fire: false`, the policy is skipped and the column/table remains visible. For `evaluate_context = "query"`, the policy's visibility effect is skipped entirely (deferred to query time), since query metadata is not available at connect time — the column/table stays visible in the schema and the decision function runs at query time as normal.
 

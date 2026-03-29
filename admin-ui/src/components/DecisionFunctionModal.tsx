@@ -16,6 +16,9 @@ import {
   updateDecisionFunction,
   testDecisionFn,
 } from '../api/decisionFunctions'
+import { listAttributeDefinitions } from '../api/attributeDefinitions'
+import type { AttributeDefinition } from '../types/attributeDefinition'
+import { useAuth } from '../auth/AuthContext'
 
 const TEMPLATES = [
   {
@@ -42,17 +45,28 @@ const TEMPLATES = [
   },
 ]
 
-function buildCtxCompletions(evaluateContext: EvaluateContext, configStr: string) {
+function buildCtxCompletions(evaluateContext: EvaluateContext, configStr: string, attrDefs: AttributeDefinition[]) {
   const items = [
     { label: 'ctx.session.user.id', type: 'variable' as const, detail: 'UUID' },
     { label: 'ctx.session.user.username', type: 'variable' as const },
     { label: 'ctx.session.user.tenant', type: 'variable' as const },
     { label: 'ctx.session.user.roles', type: 'variable' as const, detail: 'string[]' },
+    { label: 'ctx.session.user.attributes', type: 'variable' as const, detail: 'object' },
     { label: 'ctx.session.time.hour', type: 'variable' as const, detail: '0-23' },
     { label: 'ctx.session.time.day_of_week', type: 'variable' as const, detail: 'Monday-Sunday' },
     { label: 'ctx.session.datasource.name', type: 'variable' as const },
     { label: 'ctx.session.datasource.access_mode', type: 'variable' as const },
   ]
+
+  // Add per-attribute completions from definitions
+  for (const def of attrDefs) {
+    const detail = def.value_type === 'list' ? 'string[]' : def.value_type
+    items.push({
+      label: `ctx.session.user.attributes.${def.key}`,
+      type: 'variable' as const,
+      detail,
+    })
+  }
 
   if (evaluateContext === 'query') {
     items.push(
@@ -295,15 +309,56 @@ export function DecisionFunctionModal({
 
   const editorRef = useRef<ReactCodeMirrorRef>(null)
   const backdropRef = useRef<HTMLDivElement>(null)
+  const userEditedTestContext = useRef(false)
+  const { user: currentUser } = useAuth()
 
-  // Initialize test context when modal opens
+  // Load attribute definitions for autocomplete hints and test context
+  const [attrDefs, setAttrDefs] = useState<AttributeDefinition[]>([])
   useEffect(() => {
     if (!open) return
+    listAttributeDefinitions({ entity_type: 'user', page_size: 200 })
+      .then((res) => setAttrDefs(res.data))
+      .catch(() => {}) // non-critical — autocomplete just won't have attribute hints
+  }, [open])
+
+  // Initialize test context when modal opens (re-runs when attrDefs load)
+  useEffect(() => {
+    if (!open) return
+    if (userEditedTestContext.current) return
+    // Build attributes: current user's real values first, then fill gaps with samples
+    const userAttrs = currentUser?.attributes ?? {}
+    const testAttrs: Record<string, unknown> = {}
+    for (const def of attrDefs) {
+      if (def.key in userAttrs) {
+        testAttrs[def.key] = userAttrs[def.key]
+      } else {
+        // Fill with a sensible sample so test context doesn't have undefined keys
+        switch (def.value_type) {
+          case 'list':
+            testAttrs[def.key] = def.allowed_values?.slice(0, 2) ?? ['example']
+            break
+          case 'integer':
+            testAttrs[def.key] = def.default_value ? Number(def.default_value) : 0
+            break
+          case 'boolean':
+            testAttrs[def.key] = def.default_value === 'true'
+            break
+          default:
+            testAttrs[def.key] = def.default_value ?? 'example'
+        }
+      }
+    }
     setTestContextStr(
       JSON.stringify(
         {
           session: {
-            user: { id: '00000000-0000-0000-0000-000000000000', username: 'testuser', tenant: 'default', roles: ['analyst'] },
+            user: {
+              id: currentUser?.id ?? '00000000-0000-0000-0000-000000000000',
+              username: currentUser?.username ?? 'testuser',
+              tenant: currentUser?.tenant ?? 'default',
+              roles: ['analyst'],
+              attributes: testAttrs,
+            },
             time: { hour: 14, day_of_week: 'Monday' },
             datasource: { name: 'my_ds', access_mode: 'policy_required' },
           },
@@ -325,11 +380,12 @@ export function DecisionFunctionModal({
         2,
       ),
     )
-  }, [open, evaluateContext])
+  }, [open, evaluateContext, attrDefs])
 
   // Load function from API when modal opens for editing, or reset for create mode
   useEffect(() => {
     if (!open) return
+    userEditedTestContext.current = false
     setTestResult(null)
     setSaveError(null)
 
@@ -390,7 +446,12 @@ export function DecisionFunctionModal({
     setSaveError(null)
     try {
       let config: Record<string, unknown> = {}
-      try { config = JSON.parse(configStr) } catch { /* keep empty */ }
+      if (configStr.trim()) {
+        try { config = JSON.parse(configStr) } catch {
+          setSaveError('Invalid JSON in Configuration')
+          return
+        }
+      }
 
       if (isEdit && initialId) {
         const updated = await updateDecisionFunction(initialId, {
@@ -492,7 +553,7 @@ export function DecisionFunctionModal({
 
   if (!open) return null
 
-  const completionItems = buildCtxCompletions(evaluateContext, configStr)
+  const completionItems = buildCtxCompletions(evaluateContext, configStr, attrDefs)
 
   return (
     <div
@@ -686,7 +747,7 @@ export function DecisionFunctionModal({
               <label className="block text-xs font-medium text-gray-600 mb-1">Mock Context</label>
               <CodeMirror
                 value={testContextStr}
-                onChange={setTestContextStr}
+                onChange={(v) => { userEditedTestContext.current = true; setTestContextStr(v) }}
                 height="140px"
                 extensions={[json(), jsonLinter, lintGutter()]}
                 basicSetup={{

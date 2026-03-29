@@ -457,6 +457,7 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
       setExistingFunctions(fns)
     } catch {
       setExistingFunctions([])
+      setAttachedFnError('Failed to load decision functions')
     } finally {
       setLoadingExisting(false)
     }
@@ -475,11 +476,24 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
     }
   }
 
+  // Stale ref: policy has a decision_function_id but the server didn't return a summary
+  // (the referenced function was deleted from DB). Auto-clears when user detaches.
+  const isStaleRef = !!initial?.decision_function_id && !initial?.decision_function && attachedFnId === initial?.decision_function_id
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     const nErr = validatePolicyName(name)
     setNameError(nErr)
     if (nErr) return
+
+    if (useDecisionFn && !attachedFnId) {
+      setAttachedFnError('Please create or select a decision function, or turn off the toggle.')
+      return
+    }
+    if (useDecisionFn && isStaleRef) {
+      setAttachedFnError('The attached decision function no longer exists. Detach it or select a new one.')
+      return
+    }
 
     const values: PolicyFormValues = {
       name,
@@ -494,10 +508,6 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
 
     await onSubmit(values)
   }
-
-  // Stale ref: policy has a decision_function_id but the server didn't return a summary
-  // (the referenced function was deleted from DB). Auto-clears when user detaches.
-  const isStaleRef = !!initial?.decision_function_id && !initial?.decision_function && attachedFnId === initial?.decision_function_id
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
@@ -691,15 +701,20 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
 
           {/* Toggle ON, stale reference */}
           {useDecisionFn && isStaleRef && (
-            <div className="mt-3 bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-lg px-4 py-3 flex items-center justify-between">
-              <span>Function not found — detach and create a new one.</span>
-              <button
-                type="button"
-                onClick={handleDetach}
-                className="text-xs text-red-600 hover:text-red-800 font-medium ml-3"
-              >
+            <div className="mt-3 bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-lg px-4 py-3">
+              <div className="flex items-center justify-between">
+                <span>Function not found — detach and create a new one.</span>
+                <button
+                  type="button"
+                  onClick={handleDetach}
+                  className="text-xs text-red-600 hover:text-red-800 font-medium ml-3"
+                >
                 Detach
-              </button>
+                </button>
+              </div>
+              {attachedFnError && (
+                <span className="text-xs text-red-600 mt-2 block">{attachedFnError}</span>
+              )}
             </div>
           )}
 

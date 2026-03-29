@@ -23,6 +23,10 @@ const mockCreateDecisionFunction = vi.fn()
 const mockUpdateDecisionFunction = vi.fn()
 const mockTestDecisionFn = vi.fn()
 
+vi.mock('../api/attributeDefinitions', () => ({
+  listAttributeDefinitions: vi.fn().mockResolvedValue({ data: [], total: 0, page: 1, page_size: 200 }),
+}))
+
 vi.mock('../api/decisionFunctions', () => ({
   listDecisionFunctions: (...args: unknown[]) => mockListDecisionFunctions(...args),
   getDecisionFunction: (...args: unknown[]) => mockGetDecisionFunction(...args),
@@ -455,6 +459,126 @@ describe('PolicyForm — submission with decision function', () => {
     await waitFor(() => {
       expect(onSubmit).toHaveBeenCalledTimes(1)
       expect(onSubmit.mock.calls[0][0].decision_function_id).toBeNull()
+    })
+  })
+})
+
+describe('PolicyForm — decision function validation', () => {
+  it('blocks submit when toggle ON but no function attached', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined)
+    renderForm({ onSubmit })
+
+    // Toggle ON
+    await userEvent.click(screen.getByLabelText('Use decision function'))
+
+    // Fill name so name validation passes
+    const nameInput = screen.getAllByRole('textbox')[0]
+    await userEvent.clear(nameInput)
+    await userEvent.type(nameInput, 'my-policy')
+
+    fireEvent.submit(document.querySelector('form')!)
+    await waitFor(() => {
+      expect(screen.getByText(/create or select a decision function/)).toBeTruthy()
+    })
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('blocks submit when stale decision function reference detected', async () => {
+    const policy = makePolicy({
+      decision_function_id: 'deleted-fn-id',
+      decision_function: undefined,
+    })
+    const onSubmit = vi.fn().mockResolvedValue(undefined)
+    renderForm({ initial: policy, onSubmit })
+
+    // Fill name so name validation passes
+    const nameInput = screen.getAllByRole('textbox')[0]
+    await userEvent.clear(nameInput)
+    await userEvent.type(nameInput, 'my-policy')
+
+    fireEvent.submit(document.querySelector('form')!)
+    await waitFor(() => {
+      expect(screen.getByText(/no longer exists/i)).toBeTruthy()
+    })
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('shows error when list decision functions API fails', async () => {
+    mockListDecisionFunctions.mockRejectedValue(new Error('Network error'))
+    renderForm()
+
+    await userEvent.click(screen.getByLabelText('Use decision function'))
+    await userEvent.click(screen.getByText('Select Existing'))
+
+    await waitFor(() => {
+      expect(screen.getByText('Failed to load decision functions')).toBeTruthy()
+    })
+  })
+
+  it('select existing → submit includes decision_function_id', async () => {
+    const fnA = makeDecisionFunction({ id: 'fn-a', name: 'func-alpha' })
+    mockListDecisionFunctions.mockResolvedValue([fnA])
+    mockGetDecisionFunction.mockResolvedValue(fnA)
+    const onSubmit = vi.fn().mockResolvedValue(undefined)
+    renderForm({ onSubmit })
+
+    // Fill name
+    const nameInput = screen.getAllByRole('textbox')[0]
+    await userEvent.clear(nameInput)
+    await userEvent.type(nameInput, 'my-policy')
+
+    // Toggle ON and select existing
+    await userEvent.click(screen.getByLabelText('Use decision function'))
+    await userEvent.click(screen.getByText('Select Existing'))
+
+    await waitFor(() => expect(screen.getByText('func-alpha')).toBeTruthy())
+
+    const selectEl = screen.getByText('Pick a function…').closest('select')!
+    await userEvent.selectOptions(selectEl, 'fn-a')
+
+    // Wait for function to be attached (compact widget shows name)
+    await waitFor(() => {
+      // After selection, the compact widget replaces the select dropdown
+      expect(mockGetDecisionFunction).toHaveBeenCalledWith('fn-a')
+    })
+
+    // Submit
+    fireEvent.submit(document.querySelector('form')!)
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1)
+      expect(onSubmit.mock.calls[0][0].decision_function_id).toBe('fn-a')
+    })
+  })
+
+  it('create via modal → submit includes decision_function_id', async () => {
+    const created = makeDecisionFunction({ id: 'new-fn-id', name: 'auto-name' })
+    mockCreateDecisionFunction.mockResolvedValue(created)
+    const onSubmit = vi.fn().mockResolvedValue(undefined)
+    renderForm({ onSubmit })
+
+    // Fill name
+    const nameInput = screen.getAllByRole('textbox')[0]
+    await userEvent.clear(nameInput)
+    await userEvent.type(nameInput, 'my-policy')
+
+    // Toggle ON and open create modal
+    await userEvent.click(screen.getByLabelText('Use decision function'))
+    await userEvent.click(screen.getByText('+ Create New'))
+
+    // Modal should be open — fill code and save
+    await waitFor(() => expect(screen.getByText('Create Function')).toBeTruthy())
+    const editors = screen.getAllByTestId('codemirror')
+    fireEvent.change(editors[0], { target: { value: 'function evaluate(ctx) { return { fire: true }; }' } })
+    await userEvent.click(screen.getByText('Create Function'))
+
+    // Wait for modal to close and function to be attached
+    await waitFor(() => expect(mockCreateDecisionFunction).toHaveBeenCalledTimes(1))
+
+    // Submit the form
+    fireEvent.submit(document.querySelector('form')!)
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1)
+      expect(onSubmit.mock.calls[0][0].decision_function_id).toBe('new-fn-id')
     })
   })
 })

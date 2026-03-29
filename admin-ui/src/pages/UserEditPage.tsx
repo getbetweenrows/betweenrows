@@ -8,7 +8,7 @@ import { PasswordStrengthIndicator } from '../components/PasswordStrengthIndicat
 import { validatePassword } from '../utils/passwordValidation'
 import { AuditTimeline } from '../components/AuditTimeline'
 import { UserAttributeEditor } from '../components/UserAttributeEditor'
-import type { UpdateUserPayload } from '../types/user'
+import type { AttributeValue, UpdateUserPayload } from '../types/user'
 
 export function UserEditPage() {
   const { id } = useParams<{ id: string }>()
@@ -25,7 +25,7 @@ export function UserEditPage() {
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
-  const [pendingAttributes, setPendingAttributes] = useState<Record<string, string> | null>(null)
+  const [pendingAttributes, setPendingAttributes] = useState<Record<string, AttributeValue> | null>(null)
   const [attrSaving, setAttrSaving] = useState(false)
   const [attrError, setAttrError] = useState<string | null>(null)
   const [attrSuccess, setAttrSuccess] = useState(false)

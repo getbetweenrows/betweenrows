@@ -1,3 +1,6 @@
+/** Attribute values: strings for scalar types, string arrays for list type. */
+export type AttributeValue = string | string[]
+
 export interface User {
   id: string
   username: string
@@ -6,7 +9,7 @@ export interface User {
   is_active: boolean
   email: string | null
   display_name: string | null
-  attributes: Record<string, string>
+  attributes: Record<string, AttributeValue>
   last_login_at: string | null
   created_at: string
   updated_at: string
@@ -39,5 +42,5 @@ export interface UpdateUserPayload {
   is_active?: boolean
   email?: string
   display_name?: string
-  attributes?: Record<string, string>
+  attributes?: Record<string, AttributeValue>
 }

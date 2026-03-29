@@ -30,8 +30,9 @@ React 19, Vite 7, Tailwind 4, TanStack Query 5, react-router-dom 7, Vitest 4, @t
 - `src/api/attributeDefinitions.ts` — API client: `listAttributeDefinitions`, `getAttributeDefinition`, `createAttributeDefinition`, `updateAttributeDefinition`, `deleteAttributeDefinition`
 - `src/types/attributeDefinition.ts` — TypeScript interfaces (`AttributeDefinition`, `CreateAttributeDefinitionPayload`, `UpdateAttributeDefinitionPayload`, `ValueType`, `EntityType`)
 - `src/pages/AttributeDefinitionsPage.tsx` — List attribute definitions with entity type filter, force-delete support
-- `src/pages/AttributeDefinitionEditPage.tsx` — Create/edit attribute definitions (exports `AttributeDefinitionCreatePage` and `AttributeDefinitionEditPage`)
-- `src/components/UserAttributeEditor.tsx` — Inline editor for user attributes on UserEditPage. Loads attribute definitions to show type-appropriate inputs (text, number, boolean toggle, enum dropdown). Shows `{user.KEY}` syntax hint per attribute.
+- `src/pages/AttributeDefinitionEditPage.tsx` — Create/edit attribute definitions (exports `AttributeDefinitionCreatePage` and `AttributeDefinitionEditPage`). Uses `AttributeDefinitionForm` component with standard card wrapper + back button layout.
+- `src/components/AttributeDefinitionForm.tsx` — Reusable form for attribute definition create/edit (matches `RoleForm`/`DataSourceForm` pattern). Supports value types: string, integer, boolean, list.
+- `src/components/UserAttributeEditor.tsx` — Inline editor for user attributes on UserEditPage. Loads attribute definitions to show type-appropriate inputs (text, number, boolean toggle, enum dropdown, tag/chip input for lists, multi-select checkboxes for lists with allowed values). Shows `{user.KEY}` syntax hint per attribute.
 - `src/test/test-utils.tsx` — `renderWithProviders` (QueryClient + AuthProvider + MemoryRouter)
 - `src/test/factories.ts` — `makeUser`, `makeDataSource`, `makeDataSourceType`, `makeDiscoveredSchema/Table/Column`, `makeDecisionFunction`, `makePolicy`, `makePolicyAssignment`
 

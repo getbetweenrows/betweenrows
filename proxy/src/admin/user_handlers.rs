@@ -242,23 +242,74 @@ pub async fn update_user(
                     )
                 })?;
 
-                attribute_definition::validate_value(value, &def.value_type).map_err(|e| {
-                    ApiErr::new(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        format!("Invalid value for attribute '{key}': {e}"),
-                    )
-                })?;
-
-                if let Some(ref av_json) = def.allowed_values {
-                    let allowed = attribute_definition::parse_allowed_values(av_json);
-                    if !allowed.is_empty() && !allowed.contains(value) {
-                        return Err(ApiErr::new(
+                if def.value_type == "list" {
+                    // List type: value must be a JSON array of strings
+                    let elems = value.as_array().ok_or_else(|| {
+                        ApiErr::new(
                             StatusCode::UNPROCESSABLE_ENTITY,
                             format!(
-                                "Value '{value}' for attribute '{key}' is not in allowed values: {:?}",
-                                allowed
+                                "Attribute '{key}' has type 'list' — value must be a JSON array"
                             ),
-                        ));
+                        )
+                    })?;
+
+                    // Validate via validate_value (checks element count, types, lengths)
+                    let json_str = serde_json::to_string(value).unwrap_or_default();
+                    attribute_definition::validate_value(&json_str, "list").map_err(|e| {
+                        ApiErr::new(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            format!("Invalid value for attribute '{key}': {e}"),
+                        )
+                    })?;
+
+                    // Check each element against allowed_values
+                    if let Some(ref av_json) = def.allowed_values {
+                        let allowed = attribute_definition::parse_allowed_values(av_json);
+                        if !allowed.is_empty() {
+                            for elem in elems {
+                                let s = elem.as_str().unwrap_or_default();
+                                if !allowed.contains(&s.to_string()) {
+                                    return Err(ApiErr::new(
+                                        StatusCode::UNPROCESSABLE_ENTITY,
+                                        format!(
+                                            "List element '{s}' for attribute '{key}' is not in allowed values: {allowed:?}",
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Scalar types: value must be a JSON string
+                    let str_value = value.as_str().ok_or_else(|| {
+                        ApiErr::new(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            format!(
+                                "Attribute '{key}' has type '{}' — value must be a string",
+                                def.value_type
+                            ),
+                        )
+                    })?;
+
+                    attribute_definition::validate_value(str_value, &def.value_type).map_err(
+                        |e| {
+                            ApiErr::new(
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                format!("Invalid value for attribute '{key}': {e}"),
+                            )
+                        },
+                    )?;
+
+                    if let Some(ref av_json) = def.allowed_values {
+                        let allowed = attribute_definition::parse_allowed_values(av_json);
+                        if !allowed.is_empty() && !allowed.contains(&str_value.to_string()) {
+                            return Err(ApiErr::new(
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                format!(
+                                    "Value '{str_value}' for attribute '{key}' is not in allowed values: {allowed:?}",
+                                ),
+                            ));
+                        }
                     }
                 }
             }

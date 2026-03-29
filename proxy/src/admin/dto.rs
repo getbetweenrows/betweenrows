@@ -61,7 +61,8 @@ pub struct UpdateUserRequest {
     pub display_name: Option<String>,
     /// Full-replace semantics: absent = don't touch, {} = clear all,
     /// {"key": "val"} = replace with exactly this.
-    pub attributes: Option<std::collections::HashMap<String, String>>,
+    /// Values may be strings for scalar types or arrays of strings for list type.
+    pub attributes: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,7 +94,7 @@ pub struct UserResponse {
     pub is_active: bool,
     pub email: Option<String>,
     pub display_name: Option<String>,
-    pub attributes: std::collections::HashMap<String, String>,
+    pub attributes: std::collections::HashMap<String, serde_json::Value>,
     pub last_login_at: Option<NaiveDateTime>,
     pub created_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,
@@ -220,7 +221,7 @@ pub fn validate_attribute_key(key: &str) -> Result<(), String> {
 
 const RESERVED_USER_ATTRIBUTE_KEYS: &[&str] = &["tenant", "username", "id", "user_id"];
 const VALID_ENTITY_TYPES: &[&str] = &["user", "table", "column"];
-const VALID_VALUE_TYPES: &[&str] = &["string", "integer", "boolean"];
+const VALID_VALUE_TYPES: &[&str] = &["string", "integer", "boolean", "list"];
 
 pub fn validate_attribute_definition(
     key: &str,
@@ -257,14 +258,34 @@ pub fn validate_attribute_definition(
     }
 
     if let Some(avs) = allowed_values {
+        // For list type, allowed_values constrains the individual elements (strings),
+        // not the list value itself.
+        let element_type = if value_type == "list" {
+            "string"
+        } else {
+            value_type
+        };
         for av in avs {
-            crate::entity::attribute_definition::validate_value(av, value_type)
+            crate::entity::attribute_definition::validate_value(av, element_type)
                 .map_err(|e| format!("invalid allowed_value '{av}': {e}"))?;
         }
-        if let Some(dv) = default_value
-            && !avs.iter().any(|v| v == dv)
-        {
-            return Err("default_value must be in allowed_values".to_string());
+        if value_type != "list" {
+            if let Some(dv) = default_value
+                && !avs.iter().any(|v| v == dv)
+            {
+                return Err("default_value must be in allowed_values".to_string());
+            }
+        } else if let Some(dv) = default_value {
+            // For list type, each element of the default value must be in allowed_values.
+            let default_elems: Vec<String> = serde_json::from_str(dv)
+                .map_err(|_| "default_value for list must be a JSON array of strings")?;
+            for elem in &default_elems {
+                if !avs.iter().any(|v| v == elem) {
+                    return Err(format!(
+                        "default_value element '{elem}' is not in allowed_values"
+                    ));
+                }
+            }
         }
     }
 
@@ -1060,6 +1081,23 @@ mod tests {
             crate::hooks::policy::validate_expression(
                 "CASE WHEN {user.clearance} >= 3 THEN salary ELSE 0 END",
                 true,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_filter_list_attribute_in_ok() {
+        // List-type attributes like {user.departments} are treated as scalar during validation
+        // (dummy_vars has empty attributes). This is safe because IN (scalar) is valid SQL.
+        assert!(
+            crate::hooks::policy::validate_expression("department IN ({user.departments})", false,)
+                .is_ok()
+        );
+        assert!(
+            crate::hooks::policy::validate_expression(
+                "department NOT IN ({user.departments})",
+                false,
             )
             .is_ok()
         );

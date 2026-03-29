@@ -130,7 +130,7 @@ Custom key-value attributes on users, governed by a schema-first attribute defin
 
 **Attribute definitions**: `attribute_definition` table defines allowed keys with types. One row per `(key, entity_type)` pair. `UNIQUE(key, entity_type)` index. For now only `entity_type = "user"` is wired up; `"table"` and `"column"` are accepted but not used in policy evaluation yet. Reserved keys for users: `tenant`, `username`, `id`, `user_id` — rejected at the API.
 
-**Value types**: `"string"` (→ Utf8 literal), `"integer"` (→ Int64), `"boolean"` (→ Boolean). Type-safe substitution in both template variables and decision function context.
+**Value types**: `"string"` (→ Utf8 literal), `"integer"` (→ Int64), `"boolean"` (→ Boolean), `"list"` (→ list of strings, max 100 elements). Type-safe substitution in both template variables and decision function context. List attributes expand into multiple comma-separated string literals in `mangle_vars()` for use with `IN` clauses: `department IN ({user.departments})`. Empty lists expand to a NULL sentinel (effectively false). `parse_attributes()` returns `HashMap<String, serde_json::Value>` (not `HashMap<String, String>`).
 
 **Template variables**: `{user.KEY}` in filter/mask expressions. Built-in fields (`{user.tenant}`, `{user.username}`, `{user.id}`) take priority via `match` arms in `UserVars::get()`, preventing attribute override attacks. Custom attributes fall through to the attribute map.
 

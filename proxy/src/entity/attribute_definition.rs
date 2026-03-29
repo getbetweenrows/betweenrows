@@ -49,6 +49,24 @@ pub fn validate_value(value: &str, value_type: &str) -> Result<(), String> {
                 "'{value}' is not a valid boolean (must be 'true' or 'false')"
             )),
         },
+        "list" => {
+            let arr: Vec<serde_json::Value> = serde_json::from_str(value)
+                .map_err(|_| format!("'{value}' is not a valid JSON array"))?;
+            if arr.len() > 100 {
+                return Err("list cannot exceed 100 elements".to_string());
+            }
+            for (i, elem) in arr.iter().enumerate() {
+                let s = elem
+                    .as_str()
+                    .ok_or_else(|| format!("list element at index {i} is not a string"))?;
+                if s.len() > 1024 {
+                    return Err(format!(
+                        "list element at index {i} exceeds 1024 character limit"
+                    ));
+                }
+            }
+            Ok(())
+        }
         other => Err(format!("unknown value_type '{other}'")),
     }
 }
@@ -104,6 +122,40 @@ mod tests {
     #[test]
     fn validate_unknown_type() {
         assert!(validate_value("x", "float").is_err());
+    }
+
+    #[test]
+    fn validate_list_ok() {
+        assert!(validate_value(r#"["a","b","c"]"#, "list").is_ok());
+        assert!(validate_value(r#"["single"]"#, "list").is_ok());
+        assert!(validate_value("[]", "list").is_ok());
+    }
+
+    #[test]
+    fn validate_list_not_json() {
+        assert!(validate_value("not json", "list").is_err());
+        assert!(validate_value("hello", "list").is_err());
+    }
+
+    #[test]
+    fn validate_list_non_string_elements() {
+        assert!(validate_value("[1, 2, 3]", "list").is_err());
+        assert!(validate_value(r#"["a", 1]"#, "list").is_err());
+        assert!(validate_value("[true]", "list").is_err());
+    }
+
+    #[test]
+    fn validate_list_too_many_elements() {
+        let elems: Vec<String> = (0..101).map(|i| format!("\"v{i}\"")).collect();
+        let json = format!("[{}]", elems.join(","));
+        assert!(validate_value(&json, "list").is_err());
+    }
+
+    #[test]
+    fn validate_list_element_too_long() {
+        let long = "x".repeat(1025);
+        let json = format!(r#"["{long}"]"#);
+        assert!(validate_value(&json, "list").is_err());
     }
 
     #[test]

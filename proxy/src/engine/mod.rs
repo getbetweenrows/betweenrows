@@ -1499,11 +1499,11 @@ impl EngineCache {
     }
 }
 
-/// Build typed JSON attributes from raw string values and attribute definitions.
+/// Build typed JSON attributes from parsed attribute values and attribute definitions.
 /// Used for building the decision function context at visibility time.
 async fn build_typed_json_attributes(
     db: &sea_orm::DatabaseConnection,
-    raw_attrs: &std::collections::HashMap<String, String>,
+    raw_attrs: &std::collections::HashMap<String, serde_json::Value>,
 ) -> std::collections::HashMap<String, serde_json::Value> {
     use crate::entity::attribute_definition;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -1529,15 +1529,30 @@ async fn build_typed_json_attributes(
     for (key, value) in raw_attrs {
         let value_type = def_map.get(key.as_str()).unwrap_or(&"string");
         let json_val = match *value_type {
-            "integer" => value
-                .parse::<i64>()
-                .map(|n| serde_json::json!(n))
-                .unwrap_or_else(|_| serde_json::json!(value)),
-            "boolean" => value
-                .parse::<bool>()
-                .map(|b| serde_json::json!(b))
-                .unwrap_or_else(|_| serde_json::json!(value)),
-            _ => serde_json::json!(value),
+            // List values are already JSON arrays — pass through directly
+            "list" => value.clone(),
+            "integer" => {
+                let s = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                s.parse::<i64>()
+                    .map(|n| serde_json::json!(n))
+                    .unwrap_or_else(|_| serde_json::json!(s))
+            }
+            "boolean" => {
+                let s = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                s.parse::<bool>()
+                    .map(|b| serde_json::json!(b))
+                    .unwrap_or_else(|_| serde_json::json!(s))
+            }
+            _ => match value {
+                serde_json::Value::String(s) => serde_json::json!(s),
+                other => other.clone(),
+            },
         };
         result.insert(key.clone(), json_val);
     }

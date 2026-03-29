@@ -10,6 +10,7 @@ const VALUE_TYPE_BADGE: Record<string, string> = {
   string: 'bg-blue-100 text-blue-700',
   integer: 'bg-purple-100 text-purple-700',
   boolean: 'bg-amber-100 text-amber-700',
+  list: 'bg-green-100 text-green-700',
 }
 
 export function AttributeDefinitionsPage() {
@@ -126,7 +127,7 @@ export function AttributeDefinitionsPage() {
       ) : items.length === 0 ? (
         <p className="text-sm text-gray-500">No attribute definitions found.</p>
       ) : (
-        <div className="border border-gray-200 rounded-xl overflow-hidden">
+        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">

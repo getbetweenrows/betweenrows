@@ -22,6 +22,10 @@ const mockUpdateDecisionFunction = vi.fn()
 const mockTestDecisionFn = vi.fn()
 const mockGetDecisionFunction = vi.fn()
 
+vi.mock('../api/attributeDefinitions', () => ({
+  listAttributeDefinitions: vi.fn().mockResolvedValue({ data: [], total: 0, page: 1, page_size: 200 }),
+}))
+
 vi.mock('../api/decisionFunctions', () => ({
   createDecisionFunction: (...args: unknown[]) => mockCreateDecisionFunction(...args),
   updateDecisionFunction: (...args: unknown[]) => mockUpdateDecisionFunction(...args),
@@ -335,6 +339,40 @@ describe('DecisionFunctionModal — error handling', () => {
 
     await waitFor(() => {
       expect(screen.getByText(/modified by someone else/)).toBeTruthy()
+    })
+  })
+
+  it('blocks save when config JSON is invalid', async () => {
+    renderModal()
+
+    const editors = screen.getAllByTestId('codemirror')
+    // Set valid code
+    fireEvent.change(editors[0], { target: { value: VALID_FN_TRUE } })
+    // Set invalid config JSON
+    fireEvent.change(editors[1], { target: { value: '{bad json' } })
+
+    await userEvent.click(screen.getByText('Create Function'))
+
+    await waitFor(() => {
+      expect(screen.getByText('Invalid JSON in Configuration')).toBeTruthy()
+    })
+    expect(mockCreateDecisionFunction).not.toHaveBeenCalled()
+  })
+
+  it('allows save when config is empty (defaults to {})', async () => {
+    const created = makeDecisionFunction()
+    mockCreateDecisionFunction.mockResolvedValue(created)
+    const onSaved = vi.fn()
+    renderModal({ onSaved })
+
+    const editors = screen.getAllByTestId('codemirror')
+    fireEvent.change(editors[0], { target: { value: VALID_FN_TRUE } })
+    // Leave config editor empty (default)
+
+    await userEvent.click(screen.getByText('Create Function'))
+
+    await waitFor(() => {
+      expect(mockCreateDecisionFunction).toHaveBeenCalledTimes(1)
     })
   })
 

@@ -1,4 +1,4 @@
-export type ValueType = 'string' | 'integer' | 'boolean'
+export type ValueType = 'string' | 'integer' | 'boolean' | 'list'
 export type EntityType = 'user' | 'table' | 'column'
 
 export interface AttributeDefinition {

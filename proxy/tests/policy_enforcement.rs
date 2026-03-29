@@ -7115,3 +7115,295 @@ async fn abac_attribute_definition_force_delete() {
         "team attribute should be removed after force delete"
     );
 }
+
+// ===========================================================================
+// ABAC: List Attribute Type
+// ===========================================================================
+
+/// ABAC row filter with list attribute: `department IN ({user.departments})`
+#[tokio::test]
+async fn abac_row_filter_list_attribute() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "abac_rf_list";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.projects;
+             CREATE TABLE {schema}.projects (id INT, department TEXT, name TEXT);
+             INSERT INTO {schema}.projects VALUES
+               (1, 'engineering', 'Backend'),
+               (2, 'security', 'Pentest'),
+               (3, 'marketing', 'Campaign'),
+               (4, 'engineering', 'Frontend'),
+               (5, 'security', 'Audit');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_abac_list", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    // Define a list attribute with allowed values
+    server
+        .create_attribute_definition(
+            "departments",
+            "user",
+            "list",
+            Some(vec!["engineering", "security", "marketing", "finance"]),
+        )
+        .await;
+
+    // Create user with departments = ["engineering", "security"]
+    let user_id = server
+        .create_user("list_alice", "AlicePass1!", "acme", ds_id)
+        .await;
+    server
+        .set_user_attributes(
+            user_id,
+            serde_json::json!({"departments": ["engineering", "security"]}),
+        )
+        .await;
+
+    // Create row filter using IN clause with list attribute
+    server
+        .create_row_filter(
+            "dept-list-filter",
+            schema,
+            "projects",
+            "department IN ({user.departments})",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("list-allow-all", schema, "projects", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("list_alice", "AlicePass1!", "ds_abac_list")
+        .await;
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT id, department FROM {schema}.projects ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    assert_eq!(
+        rows.len(),
+        4,
+        "Should see engineering and security rows (4 total)"
+    );
+    assert_eq!(rows[0][1], "engineering");
+    assert_eq!(rows[1][1], "security");
+    assert_eq!(rows[2][1], "engineering");
+    assert_eq!(rows[3][1], "security");
+}
+
+/// ABAC list attribute with empty list: no rows returned
+#[tokio::test]
+async fn abac_row_filter_list_attribute_empty() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "abac_rf_list_e";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT, category TEXT);
+             INSERT INTO {schema}.items VALUES (1, 'alpha'), (2, 'beta');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_abac_list_e", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    server
+        .create_attribute_definition("categories", "user", "list", None)
+        .await;
+
+    let user_id = server
+        .create_user("list_bob", "BobPass1!", "acme", ds_id)
+        .await;
+    // Set empty list
+    server
+        .set_user_attributes(user_id, serde_json::json!({"categories": []}))
+        .await;
+
+    server
+        .create_row_filter(
+            "cat-list-filter",
+            schema,
+            "items",
+            "category IN ({user.categories})",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("list-e-allow", schema, "items", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("list_bob", "BobPass1!", "ds_abac_list_e")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.items"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    assert_eq!(rows.len(), 0, "Empty list should return no rows");
+}
+
+/// ABAC list attribute with single element: behaves like scalar equality
+#[tokio::test]
+async fn abac_row_filter_list_attribute_single() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "abac_rf_list_s";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.docs;
+             CREATE TABLE {schema}.docs (id INT, team TEXT);
+             INSERT INTO {schema}.docs VALUES (1, 'alpha'), (2, 'beta'), (3, 'alpha');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_abac_list_s", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    server
+        .create_attribute_definition("teams", "user", "list", None)
+        .await;
+
+    let user_id = server
+        .create_user("list_carol", "CarolPass1!", "acme", ds_id)
+        .await;
+    server
+        .set_user_attributes(user_id, serde_json::json!({"teams": ["alpha"]}))
+        .await;
+
+    server
+        .create_row_filter(
+            "team-list-filter",
+            schema,
+            "docs",
+            "team IN ({user.teams})",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("list-s-allow", schema, "docs", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("list_carol", "CarolPass1!", "ds_abac_list_s")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT id, team FROM {schema}.docs ORDER BY id"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    assert_eq!(
+        rows.len(),
+        2,
+        "Single-element list should match like equality"
+    );
+    assert_eq!(rows[0][1], "alpha");
+    assert_eq!(rows[1][1], "alpha");
+}
+
+/// ABAC list attribute validation: API rejects non-array values for list type
+#[tokio::test]
+async fn abac_list_attribute_validation() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+
+    server
+        .create_attribute_definition("regions", "user", "list", None)
+        .await;
+
+    let ds_id = server.create_datasource("ds_abac_list_v", "open").await;
+    let user_id = server
+        .create_user("list_dave", "DavePass1!", "acme", ds_id)
+        .await;
+
+    // Setting a string value for a list attribute should fail
+    let resp = server
+        .admin
+        .put(&format!("/api/v1/users/{user_id}"))
+        .authorization_bearer(&server.admin_token)
+        .json(&serde_json::json!({ "attributes": {"regions": "us-east"} }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Setting a valid list should succeed
+    let resp = server
+        .admin
+        .put(&format!("/api/v1/users/{user_id}"))
+        .authorization_bearer(&server.admin_token)
+        .json(&serde_json::json!({ "attributes": {"regions": ["us-east", "eu-west"]} }))
+        .await;
+    resp.assert_status_ok();
+
+    // Verify the list is stored correctly
+    let resp = server
+        .admin
+        .get(&format!("/api/v1/users/{user_id}"))
+        .authorization_bearer(&server.admin_token)
+        .await;
+    resp.assert_status_ok();
+    let body = resp.json::<Value>();
+    let regions = &body["attributes"]["regions"];
+    assert!(regions.is_array(), "regions should be a JSON array");
+    assert_eq!(regions.as_array().unwrap().len(), 2);
+    assert_eq!(regions[0], "us-east");
+    assert_eq!(regions[1], "eu-west");
+}
+
+/// ABAC list attribute: allowed_values constrains individual elements
+#[tokio::test]
+async fn abac_list_attribute_allowed_values() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+
+    server
+        .create_attribute_definition(
+            "zones",
+            "user",
+            "list",
+            Some(vec!["us-east", "us-west", "eu-west"]),
+        )
+        .await;
+
+    let ds_id = server.create_datasource("ds_abac_list_a", "open").await;
+    let user_id = server
+        .create_user("list_eve", "EvePass1!", "acme", ds_id)
+        .await;
+
+    // Setting a list with an invalid element should fail
+    let resp = server
+        .admin
+        .put(&format!("/api/v1/users/{user_id}"))
+        .authorization_bearer(&server.admin_token)
+        .json(&serde_json::json!({ "attributes": {"zones": ["us-east", "ap-south"]} }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Setting a list with only valid elements should succeed
+    let resp = server
+        .admin
+        .put(&format!("/api/v1/users/{user_id}"))
+        .authorization_bearer(&server.admin_token)
+        .json(&serde_json::json!({ "attributes": {"zones": ["us-east", "eu-west"]} }))
+        .await;
+    resp.assert_status_ok();
+}

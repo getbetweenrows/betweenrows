@@ -37,6 +37,7 @@ impl Related<super::role_member::Entity> for Entity {
 impl ActiveModelBehavior for ActiveModel {}
 
 /// Parse the JSON attributes column into a HashMap.
-pub fn parse_attributes(json_str: &str) -> HashMap<String, String> {
+/// Values may be strings (scalar types) or arrays of strings (list type).
+pub fn parse_attributes(json_str: &str) -> HashMap<String, serde_json::Value> {
     serde_json::from_str(json_str).unwrap_or_default()
 }

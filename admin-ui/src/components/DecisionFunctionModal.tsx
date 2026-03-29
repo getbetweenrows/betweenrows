@@ -348,6 +348,10 @@ export function DecisionFunctionModal({
         }
       }
     }
+    // This mock must mirror the shape built by proxy/src/decision/context.rs
+    // (build_session_context / build_query_context). Keep in sync when the
+    // real context changes — user attributes are flattened onto the user
+    // object, NOT nested under an "attributes" key.
     setTestContextStr(
       JSON.stringify(
         {
@@ -357,7 +361,7 @@ export function DecisionFunctionModal({
               username: currentUser?.username ?? 'testuser',
               tenant: currentUser?.tenant ?? 'default',
               roles: ['analyst'],
-              attributes: testAttrs,
+              ...testAttrs, // flattened — matches build_user_object() in context.rs
             },
             time: { hour: 14, day_of_week: 'Monday' },
             datasource: { name: 'my_ds', access_mode: 'policy_required' },

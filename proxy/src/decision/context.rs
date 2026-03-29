@@ -48,6 +48,8 @@ pub struct QueryMetadata {
 /// - `admin-ui/src/pages/UserEditPage.tsx` — attributes section hint text
 /// - `docs/permission-system.md` — Decision Functions → Context modes
 /// - `proxy/src/admin/dto.rs` — `EXTRA_RESERVED_USER_KEYS` if adding a virtual field
+/// - `admin-ui/src/components/DecisionFunctionModal.tsx` — mock test context
+///   (search for "context.rs" — the mock must mirror this shape exactly)
 /// - Any CodeMirror editor in `admin-ui/` that references `ctx.session.user.*` in
 ///   autocomplete, placeholders, hints, or templates
 fn build_user_object(session: &SessionInfo) -> serde_json::Value {

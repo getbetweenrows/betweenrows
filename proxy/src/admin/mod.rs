@@ -197,6 +197,10 @@ fn api_v1() -> Router<AdminState> {
         )
         // policies
         .route(
+            "/policies/validate-expression",
+            post(policy_handlers::validate_expression_handler),
+        )
+        .route(
             "/policies",
             get(policy_handlers::list_policies).post(policy_handlers::create_policy),
         )

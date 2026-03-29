@@ -27,6 +27,10 @@ vi.mock('../api/attributeDefinitions', () => ({
   listAttributeDefinitions: vi.fn().mockResolvedValue({ data: [], total: 0, page: 1, page_size: 200 }),
 }))
 
+vi.mock('../api/policies', () => ({
+  validateExpression: vi.fn().mockResolvedValue({ valid: true }),
+}))
+
 vi.mock('../api/decisionFunctions', () => ({
   listDecisionFunctions: (...args: unknown[]) => mockListDecisionFunctions(...args),
   getDecisionFunction: (...args: unknown[]) => mockGetDecisionFunction(...args),
@@ -568,7 +572,9 @@ describe('PolicyForm — decision function validation', () => {
     // Modal should be open — fill code and save
     await waitFor(() => expect(screen.getByText('Create Function')).toBeTruthy())
     const editors = screen.getAllByTestId('codemirror')
-    fireEvent.change(editors[0], { target: { value: 'function evaluate(ctx) { return { fire: true }; }' } })
+    // editors[0] is the filter expression editor; modal JS editor follows it
+    const jsEditor = editors.length > 1 ? editors[1] : editors[0]
+    fireEvent.change(jsEditor, { target: { value: 'function evaluate(ctx) { return { fire: true }; }' } })
     await userEvent.click(screen.getByText('Create Function'))
 
     // Wait for modal to close and function to be attached

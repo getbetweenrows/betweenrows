@@ -449,6 +449,7 @@ All policy endpoints require admin (`is_admin = true`).
 | GET | `/policies/{id}` | Get policy + assignment count |
 | PUT | `/policies/{id}` | Update policy (requires `version` for optimistic concurrency → 409 on conflict) |
 | DELETE | `/policies/{id}` | Delete policy (cascades) |
+| POST | `/policies/validate-expression` | Validate a filter/mask expression `{ expression, is_mask }` → `{ valid, error? }` |
 | GET | `/policies/export` | Export all policies as YAML |
 | POST | `/policies/import` | Import YAML (`?dry_run=true` to preview) |
 | GET | `/datasources/{id}/policies` | List policy assignments for datasource |

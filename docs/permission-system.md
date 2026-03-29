@@ -298,6 +298,25 @@ The same key can exist for different entity types with different constraints (e.
 
 Reserved keys for `entity_type = "user"`: `tenant`, `username`, `id`, `user_id` — these are rejected to prevent overriding built-in identity fields.
 
+### Value types in detail
+
+| `value_type` | Storage format | Validation | Template literal | Decision function context |
+|---|---|---|---|---|
+| `string` | Raw string | Max 1024 chars | `'value'` (Utf8) | `"value"` |
+| `integer` | Numeric string | Must parse as i64 | `3` (Int64) | `3` |
+| `boolean` | `"true"` / `"false"` | Exact match, case-sensitive | `true` (Boolean) | `true` |
+| `list` | JSON array of strings | Max 100 elements, each max 1024 chars | Multiple Utf8 literals (see below) | `["a", "b"]` |
+
+**List type details:**
+
+- Always a list of strings — no nested lists, no mixed types. Stored as a JSON array in the user's `attributes` column: `{"departments": ["engineering", "security"]}`.
+- Max 100 elements. Each element max 1024 characters.
+- `allowed_values` on a list definition constrains the **individual elements**, not the array itself. For example, `allowed_values: ["engineering", "security", "finance"]` means each element in the list must be one of those values.
+- `default_value` for a list is a JSON array string: `'["engineering"]'`.
+- In template variables, `{user.departments}` expands to multiple comma-separated string literals: `'engineering', 'security'`. Use with `IN`: `department IN ({user.departments})`.
+- An empty list `[]` expands to a single `NULL` literal: `department IN (NULL)` → evaluates to false (no rows match).
+- In decision function context, list attributes appear as JSON arrays: `ctx.session.user.departments` → `["engineering", "security"]`.
+
 ### Setting attributes on users
 
 User attributes are stored as a JSON column on the user record. They are set via `PUT /api/v1/users/{id}` with an `attributes` field:
@@ -305,36 +324,79 @@ User attributes are stored as a JSON column on the user record. They are set via
 ```json
 PUT /api/v1/users/{id}
 {
-  "attributes": {"region": "us-east", "clearance": "3", "departments": ["engineering", "security"]}
+  "attributes": {
+    "region": "us-east",
+    "clearance": "3",
+    "is_internal": "true",
+    "departments": ["engineering", "security"]
+  }
 }
 ```
 
-- **Full replace semantics**: the entire attribute map is replaced. Absent field = don't touch. Empty `{}` = clear all.
-- **Validation at write time**: every key must match a defined attribute; every value must pass type and enum checks.
+- **Full replace semantics**: the entire attribute map is replaced. Absent `attributes` field = don't touch. Empty `{}` = clear all.
+- **Validation at write time**: every key must match a defined attribute definition; every value must pass type and `allowed_values` checks. Invalid attributes are rejected with a 422 error.
 - **No validation on read**: attributes are returned as-is from the JSON column.
+- **String-typed values for scalar types**: `integer` and `boolean` attributes are set as strings (`"3"`, `"true"`), not native JSON numbers/booleans. List attributes use native JSON arrays (`["a", "b"]`).
+
+### Creating attribute definitions
+
+```bash
+# String attribute with enum constraint
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  http://localhost:5435/api/v1/attribute-definitions \
+  -d '{"key": "region", "entity_type": "user", "display_name": "Region", "value_type": "string", "allowed_values": ["us-east", "us-west", "eu-west"], "default_value": "us-east", "description": "User geographic region"}'
+
+# Integer attribute (no enum)
+curl -X POST ... \
+  -d '{"key": "clearance", "entity_type": "user", "display_name": "Clearance Level", "value_type": "integer", "description": "Security clearance level (1-10)"}'
+
+# Boolean attribute
+curl -X POST ... \
+  -d '{"key": "is_internal", "entity_type": "user", "display_name": "Internal User", "value_type": "boolean", "default_value": "false"}'
+
+# List attribute with constrained elements
+curl -X POST ... \
+  -d '{"key": "departments", "entity_type": "user", "display_name": "Departments", "value_type": "list", "allowed_values": ["engineering", "security", "finance", "hr", "analytics"], "description": "Departments the user belongs to"}'
+```
 
 ### Using attributes in expressions
 
 See [Template variables](#template-variables) above. `{user.KEY}` references produce typed literals based on the attribute definition's `value_type`.
 
+**Missing attributes**: if a user does not have an attribute set (key absent from their `attributes` JSON), `{user.KEY}` produces an empty string literal (`''`). This means a filter like `region = {user.region}` becomes `region = ''` — which typically matches no rows. Design your policies to account for this, or ensure all users have required attributes set.
+
 ### Using attributes in decision functions
 
-User attributes are available in the decision function context as `ctx.session.user.attributes` with correctly typed JSON values:
+User attributes are available as first-class fields on `ctx.session.user` with correctly typed JSON values:
 
 ```json
 {
   "session": {
     "user": {
-      "attributes": {
-        "region": "us-east",
-        "clearance_level": 3,
-        "is_vip": true,
-        "departments": ["engineering", "security"]
-      }
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "username": "alice",
+      "tenant": "acme",
+      "roles": ["finance-analyst", "finance"],
+      "region": "us-east",
+      "clearance": 3,
+      "is_vip": true,
+      "departments": ["engineering", "security"]
+    },
+    "time": {
+      "now": "2026-03-28T14:30:00Z",
+      "hour": 14,
+      "day_of_week": "Saturday"
+    },
+    "datasource": {
+      "name": "production",
+      "access_mode": "policy_required"
     }
   }
 }
 ```
+
+Note: integer and boolean attributes appear as native JSON types in the decision function context (not strings). List attributes appear as JSON arrays of strings.
 
 ### Cache behavior
 
@@ -383,12 +445,12 @@ function evaluate(ctx, config) {
 
 | Value | `ctx` contains | When it can fire |
 |-------|---------------|-----------------|
-| `"session"` | `ctx.session` only: user id/username/tenant/roles/attributes, time (now, hour, day_of_week), datasource name/access_mode | Both at connect time (visibility) and query time |
+| `"session"` | `ctx.session` only: user id/username/tenant/roles + custom attributes, time (now, hour, day_of_week), datasource name/access_mode | Both at connect time (visibility) and query time |
 | `"query"` | `ctx.session` + `ctx.query`: tables, columns, join_count, has_aggregation, has_subquery, has_where, statement_type | Query time only — visibility effect skipped at connect time (policy deferred to query time) |
 
 `time.now` is an ISO 8601 / RFC 3339 timestamp representing the **evaluation time** — the moment the context is built. For visibility-level functions this is when the connection context is computed; for query-level functions it is when the query is processed. This enables time-windowed decision functions (e.g., break-glass temporary access).
 
-`user.attributes` is a JSON object containing the user's custom attributes with correctly typed values (string/number/boolean/array). List attributes appear as JSON arrays of strings. See [User Attributes (ABAC)](#user-attributes-abac) for details.
+Custom user attributes are flattened as first-class fields on the `user` object with correctly typed values (string/number/boolean/array). List attributes appear as JSON arrays of strings. Built-in fields (`id`, `username`, `tenant`, `roles`) always take priority. See [User Attributes (ABAC)](#user-attributes-abac) for details.
 
 **Visibility-level enforcement**: `column_deny`, `table_deny`, and `column_allow` policies are enforced at connect time (visibility level) by removing columns/tables from the per-user schema. Decision functions on these policy types are evaluated at visibility time when `evaluate_context = "session"`. If the decision function returns `fire: false`, the policy is skipped and the column/table remains visible. For `evaluate_context = "query"`, the policy's visibility effect is skipped entirely (deferred to query time), since query metadata is not available at connect time — the column/table stays visible in the schema and the decision function runs at query time as normal.
 
@@ -454,9 +516,12 @@ Targets and decision functions both control when a policy fires, but they answer
 
 **When to add a decision function:**
 
-- The policy should fire conditionally based on *who* is querying (roles, tenant), *when* (time of day, day of week), or *what* the query looks like (number of joins, aggregation, specific tables).
+- The policy should fire conditionally based on *who* is querying (roles, tenant, attributes), *when* (time of day, day of week), or *what* the query looks like (number of joins, aggregation, specific tables).
+- You need conditional behavior on `column_deny`, `table_deny`, or `column_allow` — these types have no expression field, so `CASE WHEN` is not available. Decision functions are the only way to make them conditional.
 - You need logic that targets can't express — e.g., "only mask SSN for users who are not in the `compliance` role" or "only apply this row filter during business hours."
 - You want to reuse the same conditional logic across multiple policies (decision functions are standalone entities, shareable via `decision_function_id`).
+
+See [Conditional policy examples](#conditional-policy-examples) below for concrete examples of each policy type gated by user attributes.
 
 **How they compose:**
 
@@ -484,6 +549,163 @@ Goal: mask the `salary` column in `hr.employees` only outside business hours.
 - **Result**: Queries to other tables skip instantly (targets don't match). Queries to `hr.employees.salary` during business hours skip (decision function returns `fire: false`). Queries outside business hours fire the mask.
 
 Without the decision function, the mask would apply 24/7. Without the targets, the decision function would run on every query to every table — wasting WASM cycles on irrelevant queries.
+
+### Conditional policy examples
+
+Decision functions are the primary mechanism for making any policy type conditional based on user attributes. The examples below show how to gate each policy type using user attributes — something that `row_filter` and `column_mask` can also achieve with `CASE WHEN {user.*}` expressions (see [ABAC expression patterns](#abac-expression-patterns)), but that `column_deny`, `table_deny`, and `column_allow` can only do via decision functions.
+
+**Hide columns from non-privileged users (`column_deny`):**
+
+Goal: deny access to the `content` column in `secret.files` only for users with clearance below 5.
+
+Decision function (`evaluate_context: "session"`):
+```js
+function evaluate(ctx) {
+  return { fire: ctx.session.user.clearance < 5 };
+}
+```
+
+Policy:
+```yaml
+- name: hide-classified-content
+  policy_type: column_deny
+  targets:
+    - schemas: [secret]
+      tables: [files]
+      columns: [content]
+```
+
+Users with `clearance >= 5` see the column normally. Users below see it removed from schema and query results.
+
+**Hide tables from non-executive users (`table_deny`):**
+
+Goal: block the entire `analytics` schema from users not on the executive team.
+
+Decision function (`evaluate_context: "session"`):
+```js
+function evaluate(ctx) {
+  return { fire: ctx.session.user.team !== 'executive' };
+}
+```
+
+Policy:
+```yaml
+- name: hide-analytics-from-non-execs
+  policy_type: table_deny
+  targets:
+    - schemas: [analytics]
+      tables: ["*"]
+```
+
+Executives see the full `analytics` schema. Everyone else sees "table not found."
+
+**Grant column access conditionally (`column_allow`):**
+
+Goal: in `policy_required` mode, grant access to `hr.employees` only for users in the HR or finance departments.
+
+Decision function (`evaluate_context: "session"`):
+```js
+function evaluate(ctx) {
+  const dept = ctx.session.user.department;
+  return { fire: dept === 'hr' || dept === 'finance' };
+}
+```
+
+Policy:
+```yaml
+- name: hr-employee-access
+  policy_type: column_allow
+  targets:
+    - schemas: [hr]
+      tables: [employees]
+      columns: [id, name, title, department, start_date]
+```
+
+HR and finance users see the allowed columns. Everyone else sees the table as nonexistent (no `column_allow` grant).
+
+**Mask salary for non-finance users (`column_mask`):**
+
+Goal: mask the `salary` column for users outside the finance department.
+
+Decision function (`evaluate_context: "session"`):
+```js
+function evaluate(ctx) {
+  return { fire: ctx.session.user.department !== 'finance' };
+}
+```
+
+Policy:
+```yaml
+- name: mask-salary-non-finance
+  policy_type: column_mask
+  targets:
+    - schemas: [hr]
+      tables: [employees]
+      columns: [salary]
+  definition:
+    mask_expression: "0"
+```
+
+Finance users see the real salary. Everyone else sees `0`. (This can also be achieved with a `CASE WHEN` in the mask expression — see [ABAC expression patterns](#abac-expression-patterns). Decision functions are useful when the same condition gates multiple policies.)
+
+**Skip row filter for admins (`row_filter`):**
+
+Goal: apply tenant isolation to all users except those with `role = 'admin'`.
+
+Decision function (`evaluate_context: "session"`):
+```js
+function evaluate(ctx) {
+  return { fire: ctx.session.user.role !== 'admin' };
+}
+```
+
+Policy:
+```yaml
+- name: tenant-isolation
+  policy_type: row_filter
+  targets:
+    - schemas: ["*"]
+      tables: ["*"]
+  definition:
+    filter_expression: "organization_id = {user.tenant}"
+```
+
+Admin users skip the filter entirely (full table access). Non-admins see only their tenant's rows. (This can also be achieved with `CASE WHEN {user.role} = 'admin' THEN true ELSE organization_id = {user.tenant} END` — see [ABAC expression patterns](#abac-expression-patterns).)
+
+**Reusable decision function across policies:**
+
+A single decision function can gate multiple policies. For example, the "non-finance" check above could be shared:
+
+```js
+// Decision function: "non-finance-gate"
+function evaluate(ctx) {
+  return { fire: ctx.session.user.department !== 'finance' };
+}
+```
+
+Attach to:
+- `column_mask` on `hr.employees.salary` → mask salary
+- `column_deny` on `hr.employees.bonus` → hide bonus entirely
+- `row_filter` on `hr.payroll` → filter to own department
+
+One function, three policies, consistent behavior. Updating the condition (e.g., adding `accounting` as an exception) only requires editing one decision function.
+
+**Parameterized decision function with config:**
+
+Instead of hardcoding department names, use the `config` parameter to make the function reusable across different teams:
+
+```js
+// Decision function: "department-gate"
+function evaluate(ctx, config) {
+  const allowed = config.allowed_departments || [];
+  return { fire: !allowed.includes(ctx.session.user.department) };
+}
+```
+
+Config for salary masking: `{ "allowed_departments": ["finance", "accounting"] }`
+Config for executive tables: `{ "allowed_departments": ["executive"] }`
+
+Same function, different configs per policy attachment.
 
 ## Known limitations
 
@@ -854,3 +1076,197 @@ Assign this policy to the datasource with `user: admin_username`.
 
 ### Policy-required lockdown (CC-01)
 Set `access_mode: "policy_required"` on the datasource. Without an assigned `column_allow` policy, all tables return empty results.
+
+## ABAC expression patterns
+
+User attributes (`{user.*}`) can be combined with `CASE WHEN` in `row_filter` and `column_mask` expressions to create conditional behavior without decision functions. The `{user.*}` variables are substituted as typed literals before the expression is parsed, so CASE branches with user attributes evaluate to constants — DataFusion optimizes away the dead branch at plan time.
+
+### row_filter patterns
+
+**Skip filter for admins** — admins see all rows, others are filtered by tenant:
+```yaml
+- name: tenant-isolation-except-admins
+  policy_type: row_filter
+  targets:
+    - schemas: ["*"]
+      tables: ["*"]
+  definition:
+    filter_expression: "CASE WHEN {user.role} = 'admin' THEN true ELSE organization_id = {user.tenant} END"
+```
+For an admin user, this becomes `WHERE true` (all rows). For a regular user with tenant `acme`, this becomes `WHERE organization_id = 'acme'`.
+
+**Department-scoped access** — users only see rows from their own department, but the `analytics` team sees everything:
+```yaml
+- name: department-scoped-orders
+  policy_type: row_filter
+  targets:
+    - schemas: [public]
+      tables: [orders]
+  definition:
+    filter_expression: "CASE WHEN {user.department} = 'analytics' THEN true ELSE department = {user.department} END"
+```
+
+**Clearance-level filtering** — users see rows up to their clearance level:
+```yaml
+- name: clearance-filter
+  policy_type: row_filter
+  targets:
+    - schemas: [classified]
+      tables: ["*"]
+  definition:
+    filter_expression: "sensitivity_level <= {user.clearance}"
+```
+For a user with `clearance = 3` (integer attribute), this becomes `WHERE sensitivity_level <= 3`. No CASE needed — the integer comparison does the work directly.
+
+**Region-based data isolation** — users only see data from their assigned region:
+```yaml
+- name: region-isolation
+  policy_type: row_filter
+  targets:
+    - schemas: [public]
+      tables: [customers, orders, transactions]
+  definition:
+    filter_expression: "region = {user.region}"
+```
+
+**Multi-department access with list attributes** — users in multiple departments see rows from any of them:
+```yaml
+- name: multi-department-access
+  policy_type: row_filter
+  targets:
+    - schemas: [public]
+      tables: [projects]
+  definition:
+    filter_expression: "department IN ({user.departments})"
+```
+For a user with `departments = ["engineering", "security"]`, this becomes `WHERE department IN ('engineering', 'security')`. For a user with an empty list, this becomes `WHERE department IN (NULL)` — effectively no rows.
+
+**Combine clearance and department** — two filters AND together when assigned as separate policies:
+```yaml
+# Policy 1: row-level department filter
+- name: department-filter
+  policy_type: row_filter
+  targets:
+    - schemas: [public]
+      tables: [projects]
+  definition:
+    filter_expression: "department IN ({user.departments})"
+
+# Policy 2: row-level clearance filter
+- name: project-clearance-filter
+  policy_type: row_filter
+  targets:
+    - schemas: [public]
+      tables: [projects]
+  definition:
+    filter_expression: "sensitivity_level <= {user.clearance}"
+```
+Both policies are AND-combined: `WHERE department IN ('engineering') AND sensitivity_level <= 3`. The user must satisfy both constraints.
+
+**VIP flag as a bypass** — boolean attribute to grant unrestricted access:
+```yaml
+- name: vip-bypass-tenant-filter
+  policy_type: row_filter
+  targets:
+    - schemas: [public]
+      tables: [analytics_events]
+  definition:
+    filter_expression: "CASE WHEN {user.is_vip} THEN true ELSE tenant_id = {user.tenant} END"
+```
+For a user with `is_vip = true`, this becomes `WHERE true`. For `is_vip = false`, this becomes `WHERE tenant_id = 'acme'`.
+
+### column_mask patterns
+
+**Conditional masking by role** — mask SSN for non-HR users, show raw value for HR:
+```yaml
+- name: mask-ssn-except-hr
+  policy_type: column_mask
+  targets:
+    - schemas: [public]
+      tables: [employees]
+      columns: [ssn]
+  definition:
+    mask_expression: "CASE WHEN {user.department} = 'hr' THEN ssn ELSE '***-**-' || RIGHT(ssn, 4) END"
+```
+HR users see `123-45-6789`. Everyone else sees `***-**-6789`.
+
+**Tiered masking by clearance** — different mask levels based on user clearance:
+```yaml
+- name: tiered-salary-mask
+  policy_type: column_mask
+  targets:
+    - schemas: [hr]
+      tables: [employees]
+      columns: [salary]
+  definition:
+    mask_expression: "CASE WHEN {user.clearance} >= 5 THEN salary WHEN {user.clearance} >= 3 THEN CAST(ROUND(salary / 1000) * 1000 AS INT) ELSE 0 END"
+```
+Clearance 5+: sees exact salary (`85432`). Clearance 3-4: sees rounded to nearest thousand (`85000`). Below 3: sees `0`.
+
+**Mask email for external users** — show full email internally, mask for partners:
+```yaml
+- name: mask-email-external
+  policy_type: column_mask
+  targets:
+    - schemas: [public]
+      tables: [customers]
+      columns: [email]
+  definition:
+    mask_expression: "CASE WHEN {user.is_internal} THEN email ELSE '***@' || SPLIT_PART(email, '@', 2) END"
+```
+Internal users see `alice@example.com`. External users see `***@example.com`.
+
+**Redact unless same region** — show phone numbers only to users in the customer's region:
+```yaml
+- name: regional-phone-mask
+  policy_type: column_mask
+  targets:
+    - schemas: [public]
+      tables: [customers]
+      columns: [phone]
+  definition:
+    mask_expression: "CASE WHEN region = {user.region} THEN phone ELSE '[REDACTED]' END"
+```
+This references both a **row column** (`region`) and a **user attribute** (`{user.region}`) in the same expression. The user sees raw phone numbers only for customers in their own region.
+
+### Choosing: `CASE WHEN` expression vs decision function
+
+For `row_filter` and `column_mask`, both approaches work. Use this to decide:
+
+| | `CASE WHEN {user.*}` in expression | Decision function |
+|---|---|---|
+| **Best for** | Single policy, self-contained logic | Same condition shared across multiple policies |
+| **Performance** | Zero overhead (constant folding at plan time) | ~1ms WASM per evaluation |
+| **Expressiveness** | SQL only, user attributes + row data | Arbitrary JS, config params, time checks |
+| **Visibility** | Logic visible in the expression itself | Logic in a separate entity |
+
+Rule of thumb: if the condition is simple and used by one policy, use `CASE WHEN`. If the same condition gates 3+ policies, use a shared decision function to keep them in sync.
+
+For `column_deny`, `table_deny`, and `column_allow`, there is no expression field — decision functions are the only option for conditional behavior.
+
+### Conditional behavior for deny/allow types
+
+`column_deny`, `table_deny`, and `column_allow` have no expression field — they are binary (the policy either applies or doesn't). For conditional behavior on these types, use a **decision function**:
+
+```js
+// Decision function: only fire for non-executive users
+function evaluate(ctx) {
+  return { fire: ctx.session.user.team !== 'executive' };
+}
+```
+
+Attach this to a `table_deny` policy targeting `executive_comp` — executives see the table, everyone else gets "not found." See [Conditional policy examples](#conditional-policy-examples) in the Decision Functions section for more examples across all five policy types.
+
+### Pattern summary
+
+| Pattern | Mechanism | Example |
+|---------|-----------|---------|
+| Filter rows by user attribute | `row_filter` expression | `region = {user.region}` |
+| Skip filter for privileged users | `CASE WHEN` in `row_filter` | `CASE WHEN {user.role} = 'admin' THEN true ELSE ... END` |
+| Filter by numeric threshold | `row_filter` with integer attribute | `sensitivity_level <= {user.clearance}` |
+| Filter by list membership | `row_filter` with list attribute | `department IN ({user.departments})` |
+| Mask column for non-privileged users | `CASE WHEN` in `column_mask` | `CASE WHEN {user.department} = 'hr' THEN val ELSE '***' END` |
+| Tiered masking by clearance | Nested `CASE WHEN` in `column_mask` | `CASE WHEN {user.clearance} >= 5 THEN val WHEN ... END` |
+| Mask using row data + user attributes | `CASE WHEN` referencing both | `CASE WHEN region = {user.region} THEN val ELSE ... END` |
+| Conditional deny/allow | Decision function | `{ fire: ctx.session.user.team !== 'x' }` |
+| Combine multiple filters | Separate policies (AND-combined) | Two `row_filter` policies on same table |

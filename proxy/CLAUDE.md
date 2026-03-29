@@ -134,7 +134,7 @@ Custom key-value attributes on users, governed by a schema-first attribute defin
 
 **Template variables**: `{user.KEY}` in filter/mask expressions. Built-in fields (`{user.tenant}`, `{user.username}`, `{user.id}`) take priority via `match` arms in `UserVars::get()`, preventing attribute override attacks. Custom attributes fall through to the attribute map.
 
-**Decision function context**: `ctx.session.user.attributes` is a JSON object with typed values. `ctx.session.time.now` is an ISO 8601 / RFC 3339 timestamp of the evaluation time (not session start).
+**Decision function context**: Custom attributes are flattened as first-class fields on `ctx.session.user` (e.g., `ctx.session.user.region`) with typed JSON values. Built-in fields (`id`, `username`, `tenant`, `roles`) always take priority. `ctx.session.time.now` is an ISO 8601 / RFC 3339 timestamp of the evaluation time (not session start).
 
 **Save-time expression validation**: `validate_expression()` in `hooks/policy.rs` dry-run parses filter/mask expressions at policy create/update time and returns 422 if the syntax is unsupported. Called from `validate_definition()` in `dto.rs`.
 

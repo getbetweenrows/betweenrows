@@ -1,9 +1,13 @@
-import { useState } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import type { PolicyResponse, PolicyType, TargetEntry } from '../types/policy'
 import type { DecisionFunctionResponse, DecisionFunctionSummary } from '../types/decisionFunction'
+import type { AttributeDefinition } from '../types/attributeDefinition'
 import { listDecisionFunctions, getDecisionFunction } from '../api/decisionFunctions'
+import { listAttributeDefinitions } from '../api/attributeDefinitions'
+import { validateExpression } from '../api/policies'
 import { validatePolicyName } from '../utils/nameValidation'
 import { DecisionFunctionModal } from './DecisionFunctionModal'
+import { ExpressionEditor } from './ExpressionEditor'
 
 const POLICY_TYPES: { value: PolicyType; label: string }[] = [
   { value: 'row_filter', label: 'Row Filter' },
@@ -266,6 +270,18 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
   )
   const [maskExpression, setMaskExpression] = useState(
     initial?.definition?.mask_expression ?? '',
+  )
+
+  // Attribute definitions for {user.*} autocomplete in expression editors
+  const [attrDefs, setAttrDefs] = useState<AttributeDefinition[]>([])
+  useEffect(() => {
+    listAttributeDefinitions({ entity_type: 'user', page_size: 200 })
+      .then((res) => setAttrDefs(res.data))
+      .catch(() => {})
+  }, [])
+  const templateItems = useMemo(
+    () => attrDefs.map((def) => ({ key: def.key, valueType: def.value_type })),
+    [attrDefs],
   )
 
   // Decision function state.
@@ -593,17 +609,17 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
         {needsFilter && (
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Filter Expression</label>
-            <input
-              type="text"
+            <ExpressionEditor
               value={filterExpression}
-              onChange={(e) => setFilterExpression(e.target.value)}
+              onChange={setFilterExpression}
               placeholder="organization_id = {user.tenant}"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+              templateItems={templateItems}
+              onValidate={(expr) => validateExpression(expr, false)}
             />
             <p className="text-xs text-gray-400 mt-1">
-              Use <code className="bg-gray-100 px-1 rounded">{'{user.tenant}'}</code>,{' '}
-              <code className="bg-gray-100 px-1 rounded">{'{user.username}'}</code>, or{' '}
-              <code className="bg-gray-100 px-1 rounded">{'{user.id}'}</code> as placeholders.
+              Type <code className="bg-gray-100 px-1 rounded">{'{user.'}</code> for attribute autocomplete.
+              Use <code className="bg-gray-100 px-1 rounded">{'IN ({user.LIST_KEY})'}</code> for list attributes.
+              Use <code className="bg-gray-100 px-1 rounded">{'CASE WHEN'}</code> for conditional filters.
             </p>
           </div>
         )}
@@ -611,15 +627,17 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
         {needsMask && (
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Mask Expression</label>
-            <input
-              type="text"
+            <ExpressionEditor
               value={maskExpression}
-              onChange={(e) => setMaskExpression(e.target.value)}
-              placeholder="CONCAT('***-**-', RIGHT(ssn, 4))"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+              onChange={setMaskExpression}
+              placeholder="'***-**-' || RIGHT(ssn, 4)"
+              templateItems={templateItems}
+              onValidate={(expr) => validateExpression(expr, true)}
             />
             <p className="text-xs text-gray-400 mt-1">
               SQL expression to replace the column value. Reference the column by name.
+              Type <code className="bg-gray-100 px-1 rounded">{'{user.'}</code> for attribute autocomplete.
+              Use <code className="bg-gray-100 px-1 rounded">{'CASE WHEN'}</code> for conditional masking.
             </p>
           </div>
         )}

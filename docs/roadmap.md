@@ -3,8 +3,8 @@
 ## MVP Checklist
 
 - [x] **Roles (RBAC)** — DAG-based role hierarchy for policy assignment and datasource access. `role`, `role_member`, `role_inheritance` tables. Policy assignments can target a role (`assignment_scope='role'`), and users in the role (including via inheritance) receive those policies. Includes cycle detection, depth cap (10), soft delete, admin audit log, effective policy preview, and immediate cache invalidation for active connections.
-- [x] **User Attributes (ABAC)** — Schema-first attribute system: `attribute_definition` table defines allowed keys with types (`string`/`integer`/`boolean`), entity type scoping, and optional enum constraints. User attribute values stored as JSON column on `proxy_user`. Available as typed `{user.*}` template variables in filter/mask expressions. Available in decision function context as `ctx.session.user.attributes` with typed JSON values. `time.now` (RFC 3339 evaluation timestamp) added to decision context for time-windowed access. ABAC and TBAC (resource tags) unified as "attributes" — same concept applied to different entity types. Resource-level attributes planned for future. No IDP sync for MVP.
-- [ ] **Conditional Policies** — Optional `condition` field on all policy types. Policy only applies when condition evaluates to true. Uses same expression syntax and `{user.*}` substitution as filter/mask expressions. Enables attribute-based policy activation (e.g., `user.role != 'admin'`).
+- [x] **User Attributes (ABAC)** — Schema-first attribute system: `attribute_definition` table defines allowed keys with types (`string`/`integer`/`boolean`), entity type scoping, and optional enum constraints. User attribute values stored as JSON column on `proxy_user`. Available as typed `{user.*}` template variables in filter/mask expressions. Available in decision function context as first-class fields on `ctx.session.user` (e.g., `ctx.session.user.region`) with typed JSON values. `time.now` (RFC 3339 evaluation timestamp) added to decision context for time-windowed access. ABAC and TBAC (resource tags) unified as "attributes" — same concept applied to different entity types. Resource-level attributes planned for future. No IDP sync for MVP. **Tech debt**: reserved attribute key list is derived from ORM columns + manual extras; consider unifying ORM/DTO/context layers into a formal user identity schema if aliasing diverges.
+- [x] **Conditional Policies** — ~~Dropped as a separate feature.~~ Covered by existing mechanisms: `CASE WHEN {user.*}` expressions handle conditional logic in `row_filter` and `column_mask`; decision functions handle conditional gating for all five policy types (including `column_deny`, `table_deny`, `column_allow` which have no expression field). Adding a dedicated `condition` field would duplicate what decision functions already do with no new capabilities — see "ABAC expression patterns" in `docs/permission-system.md` for examples.
 - [ ] **Shadow Mode** — Per-policy dry-run state. Instead of blocking/masking, log what would have happened. Removes "fear of breaking prod" adoption blocker. Each policy gets an `action_status` field: `enforce` (default) or `shadow`.
 - [ ] **YAML Import/Export** — Export all policies for a datasource as YAML. Import YAML to create/update policies. Enables version-controlled policy-as-code workflows and easy promotion between environments (dev → staging → prod).
 
@@ -190,109 +190,18 @@ The custom expression converter in `PolicyHook` (`proxy/src/hooks/policy.rs`) ma
 
 > **See also:** DM-05 (verbose mode to explain why row filtered/masked), DM-04 (canary rollout for testing policies on subset of users)
 
-### Conditional Column Masking
+### Conditional Policies — Resolved (No Dedicated Feature Needed)
 
-- **Use case**: Mask sensitive columns only when certain user attributes match a condition. For example:
-  - Mask `salary` when `user.team != 'finance'`
-  - Mask `ssn` when `user.role != 'admin'`
-  - Mask `customer_email` when `user.region != user.customer_region`
-- **Proposed syntax**:
-  ```json
-  {
-    "schema": "hr",
-    "table": "employees",
-    "column": "salary",
-    "mask_expression": "'***'",
-    "condition": "user.team != 'finance'"
-  }
-  ```
-- **Behavior**: If the condition evaluates to true, apply the mask. If false, return the original column value.
-- **Implementation**: Extend `ColumnMaskDef` with an optional `condition` field. At query time, evaluate the condition (similar to how `{user.*}` variables are substituted) and only apply the mask expression if true.
-- **Alternative**: Could also support "mask else original" semantics where a different mask is applied when condition is false, but the simple conditional masking covers most use cases.
+Conditional policy behavior is fully covered by existing mechanisms without a dedicated `condition` field:
 
-### Conditional Policies (All Types)
+**For `row_filter` and `column_mask`** — embed `CASE WHEN {user.*}` directly in the expression. User attribute variables are substituted before parsing, so CASE branches evaluate to constants and DataFusion optimizes away the dead branch. See "ABAC expression patterns" in `docs/permission-system.md` for examples.
 
-Should every policy type support conditional application? This would allow policies that activate only under certain conditions:
+**For `column_deny`, `table_deny`, `column_allow`** — these have no expression field, so conditional behavior requires a decision function. Decision functions are a strict superset of what a `condition` field would provide (arbitrary JS logic, time checks, multi-attribute combinations).
 
-| Policy Type | Conditional Use Case | Complexity |
-|-------------|---------------------|------------|
-| `row_filter` | Filter rows only for non-admin users | Low - filter_expression IS the condition |
-| `column_mask` | Mask sensitive data for non-permissioned users | Medium - proposed above |
-| `column_deny` | Hide columns from non-admin users | Medium |
-| `table_deny` | Hide schemas/tables from certain teams | Medium |
-
-**Option A: Per-policy condition field (recommended)**
-
-Each policy type gets an optional `condition` field:
-
-```json
-// Row filter - condition is redundant, filter_expression IS the condition
-{
-  "policy_type": "row_filter",
-  "condition": "user.role != 'admin'",  // redundant, but consistent
-  "targets": [{ "schemas": ["orders"], "tables": ["*"] }],
-  "definition": { "filter_expression": "tenant_id = {user.tenant}" }
-}
-
-// Column mask - condition adds fine-grained control
-{
-  "policy_type": "column_mask",
-  "condition": "user.role != 'admin'",
-  "targets": [{ "schemas": ["hr"], "tables": ["employees"], "columns": ["ssn"] }],
-  "definition": { "mask_expression": "'***-**-****'" }
-}
-
-// Column deny - hide columns conditionally
-{
-  "policy_type": "column_deny",
-  "condition": "user.clearance_level < 5",
-  "targets": [{ "schemas": ["secret"], "tables": ["files"], "columns": ["content"] }]
-}
-
-// Table deny - hide tables conditionally
-{
-  "policy_type": "table_deny",
-  "condition": "user.team != 'executive'",
-  "targets": [{ "schemas": ["analytics"], "tables": ["*"] }]
-}
-```
-
-**Option B: Condition IN the policy definition**
-
-Embed the condition inside the definition object rather than as a top-level field. More compact but less consistent across types.
-
-**Option C: Split into two policies**
-
-Current workaround: Create separate policies for each condition. For example:
-- Policy 1: `row_filter` for regular users
-- Policy 2: No policies for admins (implicit allow)
-
-This works but creates policy explosion when combining multiple conditions.
-
-**Recommendation**: Go with **Option A** - add optional `condition` field to all policy types. This provides:
-- Consistency across all policy types
-- Clear semantics: policy only applies when condition is true
-- Future-proof: easy to extend with more complex condition expressions
-- Backward compatible: condition is optional, existing policies work unchanged
-
-**Condition expression syntax**:
-- Reuse same expression parser as `filter_expression` / `mask_expression`
-- Available variables: `{user.*}` substitutions (tenant, username, id, role, team, etc.)
-- Operators: `=`, `!=`, `<`, `>`, `<=`, `>=`, `AND`, `OR`, `NOT`, `IN`
-- Examples: `user.role = 'admin'`, `user.team NOT IN ('sales', 'marketing')`, `user.clearance_level >= 3`
-
-**Priority when multiple conditions match**:
-- If multiple policies have conditions that all evaluate to true, apply all policies (AND semantics, same as now)
-- If a condition evaluates to false, that policy is skipped
-- Order: evaluate all conditions first, then apply matching policies
-
-**Implementation plan**:
-1. Add `condition` field to policy struct (optional, nullable)
-2. Add condition evaluation helper (reuses existing `{user.*}` substitution logic)
-3. Update `PolicyEffects::collect()` to check condition before including each policy
-4. Update tests to cover conditional policies
-
-> **See also:** Related to DM-03 (mask vs. hide decision), DM-04 (canary rollout for testing policies on subset of users)
+A dedicated `condition` field was considered but rejected because:
+- It adds a second gating mechanism alongside decision functions with no new capabilities
+- The ~1ms WASM overhead of decision functions is negligible for real deployments
+- Admin UX can be improved by offering simple decision function templates instead
 
 ## AI Integration & Model Context Protocol (MCP)
 

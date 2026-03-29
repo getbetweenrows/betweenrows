@@ -51,7 +51,7 @@ function buildCtxCompletions(evaluateContext: EvaluateContext, configStr: string
     { label: 'ctx.session.user.username', type: 'variable' as const },
     { label: 'ctx.session.user.tenant', type: 'variable' as const },
     { label: 'ctx.session.user.roles', type: 'variable' as const, detail: 'string[]' },
-    { label: 'ctx.session.user.attributes', type: 'variable' as const, detail: 'object' },
+    { label: 'ctx.session.time.now', type: 'variable' as const, detail: 'ISO 8601 timestamp' },
     { label: 'ctx.session.time.hour', type: 'variable' as const, detail: '0-23' },
     { label: 'ctx.session.time.day_of_week', type: 'variable' as const, detail: 'Monday-Sunday' },
     { label: 'ctx.session.datasource.name', type: 'variable' as const },
@@ -62,7 +62,7 @@ function buildCtxCompletions(evaluateContext: EvaluateContext, configStr: string
   for (const def of attrDefs) {
     const detail = def.value_type === 'list' ? 'string[]' : def.value_type
     items.push({
-      label: `ctx.session.user.attributes.${def.key}`,
+      label: `ctx.session.user.${def.key}`,
       type: 'variable' as const,
       detail,
     })

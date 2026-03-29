@@ -1,4 +1,7 @@
+use std::sync::LazyLock;
+
 use chrono::NaiveDateTime;
+use sea_orm::{Iden, Iterable};
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
@@ -219,7 +222,31 @@ pub fn validate_attribute_key(key: &str) -> Result<(), String> {
     Ok(())
 }
 
-const RESERVED_USER_ATTRIBUTE_KEYS: &[&str] = &["tenant", "username", "id", "user_id"];
+/// Additional reserved names that aren't ORM columns but should still be blocked.
+/// Virtual context fields and confusable aliases.
+const EXTRA_RESERVED_USER_KEYS: &[&str] = &["roles", "user_id"];
+
+/// Reserved attribute keys for user entities — ORM columns + extra reserved names.
+/// Computed once on first access via `LazyLock`.
+///
+/// We derive from the ORM layer (`proxy_user::Column`) to automatically catch DB-level
+/// names, plus `EXTRA_RESERVED_USER_KEYS` for virtual fields (`roles`) and aliases
+/// (`user_id`). This intentionally over-reserves (e.g. `password_hash`, `created_at`)
+/// which is harmless. A more precise approach would derive from the DTO layer
+/// (`UserResponse` fields + decision context fields), but risks missing DB-level names
+/// if DTO fields are aliased differently from columns. Revisit if we add a formal
+/// user identity schema that unifies both layers.
+static RESERVED_USER_ATTRIBUTE_KEYS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    let mut keys: Vec<String> = proxy_user::Column::iter()
+        .map(|c| {
+            let mut buf = String::new();
+            c.unquoted(&mut buf);
+            buf
+        })
+        .collect();
+    keys.extend(EXTRA_RESERVED_USER_KEYS.iter().map(|s| String::from(*s)));
+    keys
+});
 const VALID_ENTITY_TYPES: &[&str] = &["user", "table", "column"];
 const VALID_VALUE_TYPES: &[&str] = &["string", "integer", "boolean", "list"];
 
@@ -239,7 +266,7 @@ pub fn validate_attribute_definition(
         ));
     }
 
-    if entity_type == "user" && RESERVED_USER_ATTRIBUTE_KEYS.contains(&key) {
+    if entity_type == "user" && RESERVED_USER_ATTRIBUTE_KEYS.iter().any(|k| k == key) {
         return Err(format!(
             "'{key}' is a reserved attribute key for user entities"
         ));
@@ -913,6 +940,21 @@ pub struct JobStatusResponse {
     pub error: Option<String>,
 }
 
+// ---------- expression validation ----------
+
+#[derive(Debug, Deserialize)]
+pub struct ValidateExpressionRequest {
+    pub expression: String,
+    pub is_mask: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ValidateExpressionResponse {
+    pub valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -964,10 +1006,17 @@ mod tests {
 
     #[test]
     fn reserved_key_for_user() {
+        // Built-in context fields
         assert!(validate_attribute_definition("tenant", "user", "string", None, None).is_err());
         assert!(validate_attribute_definition("username", "user", "string", None, None).is_err());
         assert!(validate_attribute_definition("id", "user", "string", None, None).is_err());
         assert!(validate_attribute_definition("user_id", "user", "string", None, None).is_err());
+        assert!(validate_attribute_definition("roles", "user", "string", None, None).is_err());
+        // ORM columns are also reserved
+        assert!(validate_attribute_definition("is_admin", "user", "string", None, None).is_err());
+        assert!(
+            validate_attribute_definition("password_hash", "user", "string", None, None).is_err()
+        );
     }
 
     #[test]

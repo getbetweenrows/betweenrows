@@ -220,6 +220,24 @@ async fn create_snapshot<C: sea_orm::ConnectionTrait>(
     Ok(())
 }
 
+// ---------- POST /policies/validate-expression ----------
+
+pub async fn validate_expression_handler(
+    AdminClaims(_): AdminClaims,
+    Json(body): Json<super::dto::ValidateExpressionRequest>,
+) -> Json<super::dto::ValidateExpressionResponse> {
+    match crate::hooks::policy::validate_expression(&body.expression, body.is_mask) {
+        Ok(()) => Json(super::dto::ValidateExpressionResponse {
+            valid: true,
+            error: None,
+        }),
+        Err(e) => Json(super::dto::ValidateExpressionResponse {
+            valid: false,
+            error: Some(e),
+        }),
+    }
+}
+
 // ---------- GET /policies ----------
 
 pub async fn list_policies(

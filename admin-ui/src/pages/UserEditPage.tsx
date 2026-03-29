@@ -161,7 +161,7 @@ export function UserEditPage() {
         <h2 className="text-base font-semibold text-gray-900 mb-1">Attributes</h2>
         <p className="text-sm text-gray-500 mb-4">
           Custom key-value pairs available as {'{'}user.KEY{'}'} in filter and mask expressions,
-          and as <code className="text-xs bg-gray-100 px-1 rounded">ctx.session.user.attributes</code> in decision functions.
+          and as <code className="text-xs bg-gray-100 px-1 rounded">ctx.session.user.KEY</code> in decision functions.
         </p>
         <UserAttributeEditor
           attributes={pendingAttributes ?? user.attributes}

@@ -65,3 +65,14 @@ export async function removeAssignment(
 ): Promise<void> {
   await client.delete(`/datasources/${datasourceId}/policies/${assignmentId}`)
 }
+
+export async function validateExpression(
+  expression: string,
+  isMask: boolean,
+): Promise<{ valid: boolean; error?: string }> {
+  const { data } = await client.post<{ valid: boolean; error?: string }>(
+    '/policies/validate-expression',
+    { expression, is_mask: isMask },
+  )
+  return data
+}

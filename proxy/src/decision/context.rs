@@ -38,18 +38,38 @@ pub struct QueryMetadata {
     pub statement_type: String,
 }
 
+/// Build the `user` JSON object with attributes flattened as first-class fields.
+///
+/// Built-in fields (`id`, `username`, `tenant`, `roles`) always win on collision
+/// (defense-in-depth alongside API reserved-name validation).
+///
+/// IMPORTANT: If you add or rename fields here, also update:
+/// - `admin-ui/src/components/DecisionFunctionModal.tsx` (`buildCtxCompletions`) — autocomplete
+/// - `admin-ui/src/pages/UserEditPage.tsx` — attributes section hint text
+/// - `docs/permission-system.md` — Decision Functions → Context modes
+/// - `proxy/src/admin/dto.rs` — `EXTRA_RESERVED_USER_KEYS` if adding a virtual field
+/// - Any CodeMirror editor in `admin-ui/` that references `ctx.session.user.*` in
+///   autocomplete, placeholders, hints, or templates
+fn build_user_object(session: &SessionInfo) -> serde_json::Value {
+    let mut user = json!({
+        "id": session.user_id.to_string(),
+        "username": session.username,
+        "tenant": session.tenant,
+        "roles": session.roles,
+    });
+    let map = user.as_object_mut().unwrap();
+    for (k, v) in &session.attributes {
+        map.entry(k.clone()).or_insert(v.clone());
+    }
+    user
+}
+
 /// Build session-only context JSON (`evaluate_context = "session"`).
 pub fn build_session_context(session: &SessionInfo) -> serde_json::Value {
     let now = Utc::now();
     json!({
         "session": {
-            "user": {
-                "id": session.user_id.to_string(),
-                "username": session.username,
-                "tenant": session.tenant,
-                "roles": session.roles,
-                "attributes": session.attributes,
-            },
+            "user": build_user_object(session),
             "time": {
                 "now": now.to_rfc3339(),
                 "hour": now.format("%H").to_string().parse::<u32>().unwrap_or(0),
@@ -68,13 +88,7 @@ pub fn build_query_context(session: &SessionInfo, query: &QueryMetadata) -> serd
     let now = Utc::now();
     json!({
         "session": {
-            "user": {
-                "id": session.user_id.to_string(),
-                "username": session.username,
-                "tenant": session.tenant,
-                "roles": session.roles,
-                "attributes": session.attributes,
-            },
+            "user": build_user_object(session),
             "time": {
                 "now": now.to_rfc3339(),
                 "hour": now.format("%H").to_string().parse::<u32>().unwrap_or(0),
@@ -139,15 +153,22 @@ mod tests {
     }
 
     #[test]
-    fn session_context_has_empty_attributes() {
+    fn session_context_no_nested_attributes_key() {
         let ctx = build_session_context(&test_session());
-        let attrs = &ctx["session"]["user"]["attributes"];
-        assert!(attrs.is_object());
-        assert_eq!(attrs.as_object().unwrap().len(), 0);
+        let user = ctx["session"]["user"].as_object().unwrap();
+        assert!(
+            user.get("attributes").is_none(),
+            "attributes should be flattened, not nested"
+        );
+        // Built-in fields present
+        assert!(user.contains_key("id"));
+        assert!(user.contains_key("username"));
+        assert!(user.contains_key("tenant"));
+        assert!(user.contains_key("roles"));
     }
 
     #[test]
-    fn session_context_has_typed_attributes() {
+    fn session_context_has_typed_attributes_flat() {
         let mut attrs = HashMap::new();
         attrs.insert("region".to_string(), serde_json::json!("us-east"));
         attrs.insert("clearance".to_string(), serde_json::json!(3));
@@ -163,14 +184,14 @@ mod tests {
             attributes: attrs,
         };
         let ctx = build_session_context(&session);
-        let user_attrs = &ctx["session"]["user"]["attributes"];
-        assert_eq!(user_attrs["region"].as_str().unwrap(), "us-east");
-        assert_eq!(user_attrs["clearance"].as_i64().unwrap(), 3);
-        assert_eq!(user_attrs["is_vip"].as_bool().unwrap(), true);
+        let user = &ctx["session"]["user"];
+        assert_eq!(user["region"].as_str().unwrap(), "us-east");
+        assert_eq!(user["clearance"].as_i64().unwrap(), 3);
+        assert_eq!(user["is_vip"].as_bool().unwrap(), true);
     }
 
     #[test]
-    fn query_context_has_attributes() {
+    fn query_context_has_attributes_flat() {
         let mut attrs = HashMap::new();
         attrs.insert("dept".to_string(), serde_json::json!("engineering"));
         let session = SessionInfo {
@@ -184,10 +205,31 @@ mod tests {
         };
         let ctx = build_query_context(&session, &QueryMetadata::default());
         assert_eq!(
-            ctx["session"]["user"]["attributes"]["dept"]
-                .as_str()
-                .unwrap(),
+            ctx["session"]["user"]["dept"].as_str().unwrap(),
             "engineering"
         );
+    }
+
+    #[test]
+    fn builtin_fields_win_over_attributes() {
+        let mut attrs = HashMap::new();
+        attrs.insert("username".to_string(), serde_json::json!("attacker"));
+        attrs.insert("tenant".to_string(), serde_json::json!("evil"));
+        attrs.insert("roles".to_string(), serde_json::json!("admin"));
+
+        let session = SessionInfo {
+            user_id: Uuid::nil(),
+            username: "alice".to_string(),
+            tenant: "acme".to_string(),
+            roles: vec!["analyst".to_string()],
+            datasource_name: "prod".to_string(),
+            access_mode: "open".to_string(),
+            attributes: attrs,
+        };
+        let ctx = build_session_context(&session);
+        let user = &ctx["session"]["user"];
+        assert_eq!(user["username"].as_str().unwrap(), "alice");
+        assert_eq!(user["tenant"].as_str().unwrap(), "acme");
+        assert!(user["roles"].is_array());
     }
 }

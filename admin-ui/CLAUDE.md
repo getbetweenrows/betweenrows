@@ -33,11 +33,21 @@ React 19, Vite 7, Tailwind 4, TanStack Query 5, react-router-dom 7, Vitest 4, @t
 - `src/pages/AttributeDefinitionEditPage.tsx` — Create/edit attribute definitions (exports `AttributeDefinitionCreatePage` and `AttributeDefinitionEditPage`). Uses `AttributeDefinitionForm` component with standard card wrapper + back button layout.
 - `src/components/AttributeDefinitionForm.tsx` — Reusable form for attribute definition create/edit (matches `RoleForm`/`DataSourceForm` pattern). Supports value types: string, integer, boolean, list.
 - `src/components/UserAttributeEditor.tsx` — Inline editor for user attributes on UserEditPage. Loads attribute definitions to show type-appropriate inputs (text, number, boolean toggle, enum dropdown, tag/chip input for lists, multi-select checkboxes for lists with allowed values). Shows `{user.KEY}` syntax hint per attribute.
+- `src/components/ExpressionEditor.tsx` — CodeMirror-based expression editor for filter/mask expressions
+- `src/components/PolicyCodeView.tsx` — Read-only policy code preview
+- `src/components/UserAssignmentPanel.tsx` — User-scoped policy assignment panel
+- `src/components/UserForm.tsx` — Reusable user create/edit form
+- `src/components/Layout.tsx` — App shell layout with sidebar navigation
+- `src/pages/PoliciesListPage.tsx` — Paginated policy list
+- `src/pages/PolicyCreatePage.tsx` — Policy creation page
+- `src/pages/PolicyEditPage.tsx` — Policy edit page with form + assignment panel
+- `src/pages/QueryAuditPage.tsx` — Query audit log viewer
 - `src/test/test-utils.tsx` — `renderWithProviders` (QueryClient + AuthProvider + MemoryRouter)
 - `src/test/factories.ts` — `makeUser`, `makeDataSource`, `makeDataSourceType`, `makeDiscoveredSchema/Table/Column`, `makeDecisionFunction`, `makePolicy`, `makePolicyAssignment`
 
-## Running Tests
+## Running
 ```bash
+npm run dev        # start dev server (proxies /api → localhost:5435)
 npm run test:run   # single run (CI)
 npm test           # watch mode
 ```

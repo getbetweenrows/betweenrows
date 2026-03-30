@@ -25,7 +25,7 @@ pgwire 0.38, DataFusion 52, axum 0.8, SeaORM 1, tokio-postgres 0.7, argon2 0.5, 
 - `src/entity/attribute_definition.rs` — SeaORM entity for the `attribute_definition` table (id, key, entity_type, display_name, value_type, default_value, allowed_values, description). Includes `validate_value()` and `parse_allowed_values()`.
 - `src/admin/attribute_definition_handlers.rs` — CRUD endpoints for attribute definitions (`GET/POST /attribute-definitions`, `GET/PUT/DELETE /attribute-definitions/{id}`). Supports `?entity_type=user` filter and `?force=true` cascade delete via database-specific JSON operations (SQLite `json_remove()`, PostgreSQL `jsonb -`). Includes `validate_json_path_key()` defense-in-depth before SQL interpolation. Update handler invalidates caches when `value_type` changes.
 - `src/crypto.rs` — AES-256-GCM `encrypt_json` / `decrypt_json`
-- `../migration/src/lib.rs` — `Migrator` (54 migrations)
+- `../migration/src/lib.rs` — `Migrator`
 
 ## Critical Gotchas
 
@@ -131,6 +131,8 @@ Custom key-value attributes on users, governed by a schema-first attribute defin
 **Attribute definitions**: `attribute_definition` table defines allowed keys with types. One row per `(key, entity_type)` pair. `UNIQUE(key, entity_type)` index. For now only `entity_type = "user"` is wired up; `"table"` and `"column"` are accepted but not used in policy evaluation yet. Reserved keys for users: `tenant`, `username`, `id`, `user_id` — rejected at the API.
 
 **Value types**: `"string"` (→ Utf8 literal), `"integer"` (→ Int64), `"boolean"` (→ Boolean), `"list"` (→ list of strings, max 100 elements). Type-safe substitution in both template variables and decision function context. List attributes expand into multiple comma-separated string literals in `mangle_vars()` for use with `IN` clauses: `department IN ({user.departments})`. Empty lists expand to a NULL sentinel (effectively false). `parse_attributes()` returns `HashMap<String, serde_json::Value>` (not `HashMap<String, String>`).
+
+**Namespace design**: Attributes are nested under `attributes` in the API (`PUT /users/{id}` payload and response) but flat in expressions (`{user.KEY}`) and decision context (`ctx.session.user.KEY`). This is intentional — API nesting separates user-defined from built-in fields; expression flattening keeps policy authoring concise. Reserved key validation prevents collisions. See `docs/permission-system.md` § "Namespace design" for the full rationale.
 
 **Template variables**: `{user.KEY}` in filter/mask expressions. Built-in fields (`{user.tenant}`, `{user.username}`, `{user.id}`) take priority via `match` arms in `UserVars::get()`, preventing attribute override attacks. Custom attributes fall through to the attribute map.
 

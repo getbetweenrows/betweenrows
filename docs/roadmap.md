@@ -433,39 +433,31 @@ Given complexity of new policy system (interaction with DataFusion and PostgreSQ
 - Proposed: Modify hook to only check staged changes using `git diff --staged` or `git diff --cached`
 - This preserves ability to have WIP changes without them interfering with the commit process
 
-## Frontend Architecture Guideline: Future-Proofing UI
+## Frontend Architecture: Tailwind Plus Catalyst Adoption
 
-### 1. Decouple Logic from Presentation
+### Approach
 
-Pattern: Use Custom Hooks (e.g., useAuth, useCart) to handle all API calls, state management, and business logic.
+Adopt Tailwind Plus Catalyst as the UI component foundation. Catalyst provides accessible, well-designed React components built on Headless UI + Tailwind CSS v4. Components are copied into the project as source code — no runtime dependency on Catalyst itself.
 
-Rule: Components should only receive data and functions via props. If we want to swap a "List View" for a "Card View" later, the logic hook remains untouched.
+### Setup
 
-### 2. Implement a "Headless" Design System
+- **Full kit**: `admin-ui/catalyst-kit/` (gitignored) — complete Catalyst download for reference
+- **Active components**: `admin-ui/src/components/ui/` — only components in use, copied from the kit as needed
+- **Dependencies**: `@headlessui/react`, `motion`, `clsx`, `@heroicons/react`
+- **Router integration**: `src/components/ui/link.tsx` — wraps `react-router-dom` `Link` for Catalyst compatibility
+- **Docs**: https://catalyst.tailwindui.com/docs/{component-name}
 
-Tooling: Use CVA (Class Variance Authority) to manage Tailwind variants.
+### Migration Strategy
 
-Rule: Avoid hardcoding "messy" Tailwind strings directly in feature components. Define styles as Variants (e.g., intent: "primary", size: "lg") in a central UI folder.
+Incremental, page-by-page — no big-bang rewrite. Swap raw HTML elements for Catalyst components alongside feature work:
+1. Core primitives first: Button, Input, Select, Textarea, Checkbox
+2. Layout: Sidebar layout, Navbar (replaces current `Layout.tsx`)
+3. Data display: Table, Badge, Description list, Dialog
+4. Forms: Fieldset, Radio, Switch, Combobox, Listbox
 
-Goal: Changing the "Look" of the app should involve editing one tailwind.config.js or a few CVA files, not hunting through 50 feature components.
+### What This Replaces
 
-### 3. Strict Design Token Usage
-
-Rule: Zero Hex Codes in components. All colors, spacing, and border-radii must come from the tailwind.config.js theme.
-
-Standard: Use semantic naming. Instead of text-blue-600, use text-brand-primary. When v2 arrives, we change the value of brand-primary in one place.
-
-### 4. Component Categorization (Atomic Design)
-
-UI Components (/components/ui): Low-level, stateless elements (Buttons, Inputs, Modals). Use libraries like Radix UI or Headless UI for accessibility logic so we only have to worry about the CSS.
-
-Feature Components (/features/): High-level components that use the UI pieces to solve a business need (e.g., PaymentForm).
-
-### 5. Utility for Class Merging
-
-Requirement: Use a cn() helper function (combining clsx and tailwind-merge).
-
-Benefit: This ensures that if we need to override a "v1" style for a specific edge case, the classes merge correctly without CSS conflicts.
+The previous plan (CVA, Atomic Design, strict design tokens, `cn()` helper) is superseded. Catalyst provides variant management, accessible primitives, and consistent design out of the box. No additional abstraction layers needed at the current scale (~25 pages, ~29 components).
 
 ## Policy History & Audit Improvements
 

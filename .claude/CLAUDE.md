@@ -32,6 +32,11 @@ git config core.hooksPath .githooks
 
 Use `/release` to prepare the changelog, bump versions, commit, and tag. Use `/commit` for day-to-day commits.
 
+## General Rules
+- **Never hardcode secrets** — API keys, passwords, credentials, and tokens must come from environment variables or encrypted config, never literals in source code.
+- **Run the full test suite before considering a task complete** — `cargo test` for proxy, `npm run test:run` for admin-ui. Don't declare done until tests pass.
+- **TDD for all new code** — write failing tests first, then implement until they pass. This applies to new features and bug fixes alike, not just the bug fix protocol.
+
 ## Planning & Feature Design
 
 ### Design-First, Discuss Before Building

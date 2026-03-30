@@ -14,4 +14,9 @@ description: Create a git commit
 
 Based on the above changes, create a single git commit.
 
+Use conventional commit format: `type(scope): description`
+- Types: feat, fix, refactor, test, docs, chore, ci, perf, style
+- Scope is optional but preferred (e.g., `proxy`, `admin-ui`, `migration`)
+- Description should be lowercase, imperative, no period
+
 You have the capability to call multiple tools in a single response. Stage and create the commit using a single message. Do not use any other tools or do anything else. Do not send any other text or messages besides these tool calls.

@@ -317,6 +317,25 @@ Reserved keys for `entity_type = "user"`: `tenant`, `username`, `id`, `user_id` 
 - An empty list `[]` expands to a single `NULL` literal: `department IN (NULL)` → evaluates to false (no rows match).
 - In decision function context, list attributes appear as JSON arrays: `ctx.session.user.departments` → `["engineering", "security"]`.
 
+### Namespace design: flat in expressions, nested in API
+
+User attributes live at two different levels depending on the context:
+
+| Surface | How attributes appear | Example |
+|---|---|---|
+| **API payloads** (create/update/response) | Nested under `attributes` | `{ "attributes": { "region": "us-east" } }` |
+| **Template variables** (filter/mask expressions) | Flat under `user` | `{user.region}` |
+| **Decision function context** | Flat under `user` | `ctx.session.user.region` |
+| **CLI config (future YAML)** | Nested under `attributes` | `attributes: { region: us-east }` |
+
+This is intentional:
+
+- **API/storage nests** because attributes are a distinct concern from built-in fields (`username`, `tenant`, `is_admin`). They have different validation rules, full-replace semantics, and are governed by attribute definitions. Nesting makes the API self-documenting about what is user-defined vs. built-in.
+- **Expressions/context flatten** because policy authors write these constantly and brevity matters. `{user.region}` and `ctx.session.user.region` are cleaner than `{user.attributes.region}`.
+- **Reserved key validation** prevents collisions — attribute keys cannot shadow built-in fields, and built-in fields always take priority at runtime.
+
+The rule is simple: **define attributes under `attributes`, reference them as `{user.KEY}`**.
+
 ### Setting attributes on users
 
 User attributes are stored as a JSON column on the user record. They are set via `PUT /api/v1/users/{id}` with an `attributes` field:
@@ -450,7 +469,7 @@ function evaluate(ctx, config) {
 
 `time.now` is an ISO 8601 / RFC 3339 timestamp representing the **evaluation time** — the moment the context is built. For visibility-level functions this is when the connection context is computed; for query-level functions it is when the query is processed. This enables time-windowed decision functions (e.g., break-glass temporary access).
 
-Custom user attributes are flattened as first-class fields on the `user` object with correctly typed values (string/number/boolean/array). List attributes appear as JSON arrays of strings. Built-in fields (`id`, `username`, `tenant`, `roles`) always take priority. See [User Attributes (ABAC)](#user-attributes-abac) for details.
+Custom user attributes are flattened as first-class fields on the `user` object with correctly typed values (string/number/boolean/array) — e.g., `ctx.session.user.region`, not `ctx.session.user.attributes.region`. This matches the flat `{user.KEY}` namespace used in template variables. In the API, the same attributes are nested under `attributes` (see [Namespace design](#namespace-design-flat-in-expressions-nested-in-api)). List attributes appear as JSON arrays of strings. Built-in fields (`id`, `username`, `tenant`, `roles`) always take priority. See [User Attributes (ABAC)](#user-attributes-abac) for details.
 
 **Visibility-level enforcement**: `column_deny`, `table_deny`, and `column_allow` policies are enforced at connect time (visibility level) by removing columns/tables from the per-user schema. Decision functions on these policy types are evaluated at visibility time when `evaluate_context = "session"`. If the decision function returns `fire: false`, the policy is skipped and the column/table remains visible. For `evaluate_context = "query"`, the policy's visibility effect is skipped entirely (deferred to query time), since query metadata is not available at connect time — the column/table stays visible in the schema and the decision function runs at query time as normal.
 

@@ -32,3 +32,6 @@ target/
 # local files
 mydocs/
 pythonpoc/
+
+# playwright mcp temp files
+.playwright-mcp/

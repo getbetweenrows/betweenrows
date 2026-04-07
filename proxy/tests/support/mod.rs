@@ -442,12 +442,7 @@ impl ProxyTestServer {
     }
 
     /// Create a non-admin user via the admin API and assign them to a datasource.
-    pub async fn create_user(
-        &self,
-        username: &str,
-        password: &str,
-        ds_id: Uuid,
-    ) -> Uuid {
+    pub async fn create_user(&self, username: &str, password: &str, ds_id: Uuid) -> Uuid {
         // Create user
         let resp = self
             .admin
@@ -728,11 +723,7 @@ impl ProxyTestServer {
     /// Create a non-admin user via the admin API WITHOUT assigning them to any datasource.
     /// Used for testing that unassigned users cannot access a datasource.
     #[allow(dead_code)]
-    pub async fn create_user_unassigned(
-        &self,
-        username: &str,
-        password: &str,
-    ) -> Uuid {
+    pub async fn create_user_unassigned(&self, username: &str, password: &str) -> Uuid {
         let resp = self
             .admin
             .post("/api/v1/users")
@@ -954,11 +945,7 @@ impl ProxyTestServer {
     /// This creates a user via the admin API but does NOT add them to the datasource
     /// user list. They can still connect if they have role-based access.
     #[allow(dead_code)]
-    pub async fn create_user_no_direct_access(
-        &self,
-        username: &str,
-        password: &str,
-    ) -> Uuid {
+    pub async fn create_user_no_direct_access(&self, username: &str, password: &str) -> Uuid {
         self.create_user_unassigned(username, password).await
     }
 

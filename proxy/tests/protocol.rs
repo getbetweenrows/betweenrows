@@ -35,9 +35,7 @@ async fn setup_open_datasource(
         .await;
     server.discover(ds_id, &[schema]).await;
 
-    let user_id = server
-        .create_user("testuser", TEST_PASS, ds_id)
-        .await;
+    let user_id = server.create_user("testuser", TEST_PASS, ds_id).await;
 
     // In open mode, add a basic column_allow policy so queries work
     server

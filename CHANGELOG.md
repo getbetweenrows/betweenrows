@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-04-06
+
+### Added
+- **Tenant as custom attribute** — the built-in `tenant` column on `proxy_user` has been removed; tenant is now managed entirely through the ABAC attribute definition system
+  - Migration 055 drops the `tenant` column from `proxy_user`
+  - `{user.tenant}` template variable still works — resolves from the user's custom attributes
+  - `BR_ADMIN_TENANT` env var removed (was already deprecated)
+  - `tenant` is no longer a reserved attribute key — can be created/deleted like any other custom attribute
+  - Admin UI tenant field removed from user forms and list pages
+
 ## [0.12.0] - 2026-04-06
 
 ### Added

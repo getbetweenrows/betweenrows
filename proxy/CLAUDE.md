@@ -76,7 +76,7 @@ A single shared WASM runtime created once at startup in `main.rs` and passed to 
 
 `PolicyHook` replaces the old hardcoded `RLSHook`. It loads policies from the DB, caches per `(datasource_id, username)` for 60 seconds, and applies five policy types:
 
-- **row_filter** — `Filter(expr)` node injected below the matching `TableScan` via `transform_up`. Three built-in template variables (`{user.tenant}`, `{user.username}`, `{user.id}`) plus custom user attributes (`{user.KEY}`) are substituted as typed `Expr::Literal` after parsing — never interpolated as raw SQL. Custom attributes produce typed literals based on their attribute definition's `value_type` (string→Utf8, integer→Int64, boolean→Boolean). Multiple `row_filter` policies are AND-combined (intersection, not union).
+- **row_filter** — `Filter(expr)` node injected below the matching `TableScan` via `transform_up`. Two built-in template variables (`{user.username}`, `{user.id}`) plus custom user attributes (`{user.KEY}`, e.g., `{user.tenant}`) are substituted as typed `Expr::Literal` after parsing — never interpolated as raw SQL. Custom attributes produce typed literals based on their attribute definition's `value_type` (string→Utf8, integer→Int64, boolean→Boolean). Multiple `row_filter` policies are AND-combined (intersection, not union).
 - **column_mask** — mask `Projection` injected above each matching `TableScan` via `apply_column_mask_at_scan` (`transform_up`). Replaces the masked column with the mask expression, aliased with `alias_qualified` to preserve the table qualifier. Parsed synchronously via `sql_ast_to_df_expr(..., Some(ctx))` — sqlparser converts the mask template to a DataFusion `Expr` using the session's `FunctionRegistry` for built-in function lookup (RIGHT, LEFT, UPPER, LOWER, CONCAT, COALESCE, etc.). Scan-level enforcement prevents CTE/subquery alias bypass. Masks are cleared from `column_masks` after scan-level application to prevent double-masking.
 - **column_allow** — specifies which columns a user may see for matching tables. In `policy_required` mode, a `column_allow` policy is the only type that grants table access; without one, the table receives `Filter(lit(false))`.
 - **column_deny** — enforced at two levels: (1) visibility-level via `compute_user_visibility` / `build_user_context` — denied columns removed from per-user schema at connect time; (2) defense-in-depth via top-level `Projection` in `apply_projection_qualified`. Does NOT short-circuit the query. If all selected columns are stripped, returns SQLSTATE `42501` (insufficient_privilege).
@@ -86,7 +86,7 @@ A single shared WASM runtime created once at startup in `main.rs` and passed to 
 
 **access_mode**: If the datasource is `"policy_required"`, tables with no matching `column_allow` policy get `Filter(lit(false))` injected → empty results, no upstream round-trip.
 
-**Cache invalidation**: call `policy_hook.invalidate_datasource(&name)` after any policy or datasource mutation. Call `policy_hook.invalidate_user(user_id)` after user tenant/deactivation changes. Also call `proxy_handler.rebuild_contexts_for_datasource(&name)` after policy mutations so active connections immediately see the updated schema (column visibility changes without reconnect). For role changes, call `proxy_handler.rebuild_contexts_for_user(user_id)` for each affected user (resolved via `role_resolver::resolve_all_role_members`).
+**Cache invalidation**: call `policy_hook.invalidate_datasource(&name)` after any policy or datasource mutation. Call `policy_hook.invalidate_user(user_id)` after user attribute/deactivation changes. Also call `proxy_handler.rebuild_contexts_for_datasource(&name)` after policy mutations so active connections immediately see the updated schema (column visibility changes without reconnect). For role changes, call `proxy_handler.rebuild_contexts_for_user(user_id)` for each affected user (resolved via `role_resolver::resolve_all_role_members`).
 
 **Enforcement order in `apply_policies`**: (1) `apply_column_mask_at_scan` — mask Projection above TableScan, (2) `apply_row_filters` — Filter below mask Projection but above TableScan, (3) `apply_projection_qualified` — top-level Projection for allow/deny. Masks must run before filters so that `transform_up` places the Filter between TableScan and the mask Projection. This ensures row filters evaluate against raw (unmasked) data. Swapping this order is a security bug — see vector 32 in `docs/security-vectors.md`.
 
@@ -128,21 +128,21 @@ Custom key-value attributes on users, governed by a schema-first attribute defin
 
 **Storage**: JSON column `attributes TEXT DEFAULT '{}'` on `proxy_user`. Loads for free with the user model — zero extra queries on the hot path.
 
-**Attribute definitions**: `attribute_definition` table defines allowed keys with types. One row per `(key, entity_type)` pair. `UNIQUE(key, entity_type)` index. For now only `entity_type = "user"` is wired up; `"table"` and `"column"` are accepted but not used in policy evaluation yet. Reserved keys for users: `tenant`, `username`, `id`, `user_id` — rejected at the API.
+**Attribute definitions**: `attribute_definition` table defines allowed keys with types. One row per `(key, entity_type)` pair. `UNIQUE(key, entity_type)` index. For now only `entity_type = "user"` is wired up; `"table"` and `"column"` are accepted but not used in policy evaluation yet. Reserved keys for users: `username`, `id`, `user_id`, `roles` — rejected at the API.
 
 **Value types**: `"string"` (→ Utf8 literal), `"integer"` (→ Int64), `"boolean"` (→ Boolean), `"list"` (→ list of strings, max 100 elements). Type-safe substitution in both template variables and decision function context. List attributes expand into multiple comma-separated string literals in `mangle_vars()` for use with `IN` clauses: `department IN ({user.departments})`. Empty lists expand to a NULL sentinel (effectively false). `parse_attributes()` returns `HashMap<String, serde_json::Value>` (not `HashMap<String, String>`).
 
 **Namespace design**: Attributes are nested under `attributes` in the API (`PUT /users/{id}` payload and response) but flat in expressions (`{user.KEY}`) and decision context (`ctx.session.user.KEY`). This is intentional — API nesting separates user-defined from built-in fields; expression flattening keeps policy authoring concise. Reserved key validation prevents collisions. See `docs/permission-system.md` § "Namespace design" for the full rationale.
 
-**Template variables**: `{user.KEY}` in filter/mask expressions. Built-in fields (`{user.tenant}`, `{user.username}`, `{user.id}`) take priority via `match` arms in `UserVars::get()`, preventing attribute override attacks. Custom attributes fall through to the attribute map.
+**Template variables**: `{user.KEY}` in filter/mask expressions. Built-in fields (`{user.username}`, `{user.id}`) take priority via `match` arms in `UserVars::get()`, preventing attribute override attacks. Custom attributes (including `tenant`) fall through to the attribute map.
 
-**Decision function context**: Custom attributes are flattened as first-class fields on `ctx.session.user` (e.g., `ctx.session.user.region`) with typed JSON values. Built-in fields (`id`, `username`, `tenant`, `roles`) always take priority. `ctx.session.time.now` is an ISO 8601 / RFC 3339 timestamp of the evaluation time (not session start).
+**Decision function context**: Custom attributes are flattened as first-class fields on `ctx.session.user` (e.g., `ctx.session.user.region`, `ctx.session.user.tenant`) with typed JSON values. Built-in fields (`id`, `username`, `roles`) always take priority. `ctx.session.time.now` is an ISO 8601 / RFC 3339 timestamp of the evaluation time (not session start).
 
 **Save-time expression validation**: `validate_expression()` in `hooks/policy.rs` dry-run parses filter/mask expressions at policy create/update time and returns 422 if the syntax is unsupported. Called from `validate_definition()` in `dto.rs`.
 
 **API endpoints**: `GET/POST /attribute-definitions`, `GET/PUT/DELETE /attribute-definitions/{id}`. User attributes are set via `PUT /users/{id}` with an `attributes` field (full-replace semantics, validated against definitions). DELETE supports `?force=true` for cascade cleanup via database-specific JSON operations (SQLite `json_remove()`, PostgreSQL `jsonb -`).
 
-**Cache invalidation**: attribute changes trigger `policy_hook.invalidate_user()` + `proxy_handler.rebuild_contexts_for_user()`. This fires on attribute changes, tenant changes, and is_active changes in `update_user`. Attribute definition `value_type` changes also trigger cache invalidation for all users with that attribute.
+**Cache invalidation**: attribute changes trigger `policy_hook.invalidate_user()` + `proxy_handler.rebuild_contexts_for_user()`. This fires on attribute changes and is_active changes in `update_user`. Attribute definition `value_type` changes also trigger cache invalidation for all users with that attribute.
 
 ## RBAC (Role-Based Access Control)
 
@@ -195,7 +195,7 @@ Run with `cargo test --test policy_enforcement` or `cargo test --test protocol`.
 **Conventions:**
 - Each test uses a unique upstream schema name (e.g. `"t1_rowfilt"`, `"tc_rf01"`) to avoid collisions during parallel execution.
 - TC-prefixed tests map to security vector numbers in `docs/security-vectors.md`.
-- Template vars in `filter_expression` must not be quoted: `tenant = {user.tenant}` ✓, `tenant = '{user.tenant}'` ✗.
+- Template vars in `filter_expression` must not be quoted: `tenant = {user.tenant}` (correct), `tenant = '{user.tenant}'` (wrong).
 
 ### Documentation requirements (non-optional)
 After completing any feature or adding tests, always update:

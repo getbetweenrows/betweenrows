@@ -1082,7 +1082,6 @@ mod tests {
             id: Set(id),
             username: Set(username.to_string()),
             password_hash: Set("hash".to_string()),
-            tenant: Set("default".to_string()),
             is_admin: Set(false),
             is_active: Set(true),
             email: Set(None),

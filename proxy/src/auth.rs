@@ -123,7 +123,6 @@ impl Auth {
         &self,
         username: &str,
         password: &str,
-        tenant: &str,
         is_admin: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let password_hash = Self::hash_password(password)?;
@@ -132,7 +131,6 @@ impl Auth {
             id: Set(Uuid::now_v7()),
             username: Set(username.to_owned()),
             password_hash: Set(password_hash),
-            tenant: Set(tenant.to_owned()),
             is_admin: Set(is_admin),
             is_active: Set(true),
             created_at: Set(now),
@@ -216,18 +214,16 @@ mod tests {
     #[tokio::test]
     async fn test_create_user_increments_count() {
         let auth = setup().await;
-        auth.create_user("alice", "pw1", "acme", false)
-            .await
-            .unwrap();
+        auth.create_user("alice", "pw1", false).await.unwrap();
         assert_eq!(auth.count_users().await.unwrap(), 1);
-        auth.create_user("bob", "pw2", "acme", true).await.unwrap();
+        auth.create_user("bob", "pw2", true).await.unwrap();
         assert_eq!(auth.count_users().await.unwrap(), 2);
     }
 
     #[tokio::test]
     async fn test_create_user_stores_hash_not_plaintext() {
         let auth = setup().await;
-        auth.create_user("alice", "supersecret", "acme", false)
+        auth.create_user("alice", "supersecret", false)
             .await
             .unwrap();
 
@@ -251,9 +247,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_user_stores_correct_fields() {
         let auth = setup().await;
-        auth.create_user("charlie", "pw", "widgets-inc", true)
-            .await
-            .unwrap();
+        auth.create_user("charlie", "pw", true).await.unwrap();
 
         let row = proxy_user::Entity::find()
             .filter(proxy_user::Column::Username.eq("charlie"))
@@ -263,7 +257,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(row.username, "charlie");
-        assert_eq!(row.tenant, "widgets-inc");
         assert!(row.is_admin);
         assert!(row.is_active);
         assert!(row.email.is_none());
@@ -273,10 +266,8 @@ mod tests {
     #[tokio::test]
     async fn test_create_user_duplicate_username_errors() {
         let auth = setup().await;
-        auth.create_user("alice", "pw", "acme", false)
-            .await
-            .unwrap();
-        let result = auth.create_user("alice", "other", "other", false).await;
+        auth.create_user("alice", "pw", false).await.unwrap();
+        let result = auth.create_user("alice", "other", false).await;
         assert!(result.is_err(), "Duplicate username must fail");
     }
 
@@ -285,22 +276,17 @@ mod tests {
     #[tokio::test]
     async fn test_authenticate_success_returns_model() {
         let auth = setup().await;
-        auth.create_user("alice", "correct", "acme", false)
-            .await
-            .unwrap();
+        auth.create_user("alice", "correct", false).await.unwrap();
 
         let user = auth.authenticate("alice", "correct").await.unwrap();
         assert_eq!(user.username, "alice");
-        assert_eq!(user.tenant, "acme");
         assert!(!user.is_admin);
     }
 
     #[tokio::test]
     async fn test_authenticate_updates_last_login_at() {
         let auth = setup().await;
-        auth.create_user("alice", "pw", "acme", false)
-            .await
-            .unwrap();
+        auth.create_user("alice", "pw", false).await.unwrap();
 
         // Before auth: last_login_at is None
         let before = proxy_user::Entity::find()
@@ -329,9 +315,7 @@ mod tests {
     #[tokio::test]
     async fn test_authenticate_wrong_password_rejected() {
         let auth = setup().await;
-        auth.create_user("alice", "correct", "acme", false)
-            .await
-            .unwrap();
+        auth.create_user("alice", "correct", false).await.unwrap();
 
         let err = auth.authenticate("alice", "wrong").await.unwrap_err();
         assert!(
@@ -352,9 +336,7 @@ mod tests {
     #[tokio::test]
     async fn test_authenticate_inactive_user_rejected() {
         let auth = setup().await;
-        auth.create_user("alice", "pw", "acme", false)
-            .await
-            .unwrap();
+        auth.create_user("alice", "pw", false).await.unwrap();
 
         // Deactivate the user
         let row = proxy_user::Entity::find()
@@ -374,7 +356,7 @@ mod tests {
     #[tokio::test]
     async fn test_authenticate_admin_flag_preserved() {
         let auth = setup().await;
-        auth.create_user("root", "pw", "sys", true).await.unwrap();
+        auth.create_user("root", "pw", true).await.unwrap();
 
         let user = auth.authenticate("root", "pw").await.unwrap();
         assert!(user.is_admin);

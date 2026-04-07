@@ -115,7 +115,6 @@ export function UserEditPage() {
           mode="edit"
           initialValues={{
             username: user.username,
-            tenant: user.tenant,
             is_admin: user.is_admin,
             is_active: user.is_active,
             email: user.email ?? '',

@@ -9,7 +9,7 @@ BetweenRows sits between your users and your data sources, applying security pol
 ## Why
 
 - **No application changes** — policies are enforced at the proxy layer, not in your app code
-- **Row-level filtering** — automatically filter rows based on user identity (tenant, role, department)
+- **Row-level filtering** — automatically filter rows based on user identity (role, department, tenant)
 - **Column masking** — mask sensitive columns (SSN, email, salary) with expressions, not views
 - **Column & table deny** — hide columns or entire tables from specific users or roles
 - **Full audit trail** — every query is logged with the original SQL, rewritten SQL, and policies applied
@@ -71,9 +71,9 @@ Open **http://localhost:5435** and log in with your admin credentials.
 
 1. **Add a data source** — Go to Data Sources → Create. Enter your data source connection details and test the connection.
 2. **Discover the schema** — Click "Discover Catalog" on your new data source. Select which schemas, tables, and columns to expose through the proxy.
-3. **Create a user** — Go to Users → Create. Set a username, password, and tenant.
+3. **Create a user** — Go to Users → Create. Set a username and password.
 4. **Grant access** — On the data source page, assign the user (or a role) access to the data source.
-5. **Create a policy** — Go to Policies → Create. For example, a `row_filter` policy with expression `tenant = {user.tenant}` to isolate rows by tenant.
+5. **Create a policy** — Go to Policies → Create. For example, a `row_filter` policy with expression `tenant = {user.tenant}` to isolate rows by tenant. (The `tenant` attribute must be defined as a custom attribute definition first.)
 6. **Assign the policy** — On the data source page, assign the policy to a user, role, or all users.
 7. **Connect through the proxy** — The user can now query through BetweenRows:
    ```bash
@@ -127,7 +127,7 @@ Key concepts:
 - **ABAC** — define custom user attributes (e.g., department, region, clearance level) and use them in policy expressions via `{user.<key>}` template variables
 - **Decision functions** — optional JavaScript functions compiled to WASM that gate policy evaluation based on arbitrary logic (time windows, multi-attribute conditions, external state)
 - **Assignment scopes** — policies can be assigned to individual users, roles, or all users on a data source
-- **Template variables** — `{user.tenant}`, `{user.username}`, `{user.id}`, and custom attributes are substituted at query time, making policies dynamic per user
+- **Template variables** — `{user.username}`, `{user.id}` (built-in), and custom attributes like `{user.tenant}`, `{user.region}` are substituted at query time, making policies dynamic per user
 - **Access modes** — data sources can be set to `open` (all tables accessible by default) or `policy_required` (tables are hidden unless a `column_allow` policy grants access)
 - **Deny wins** — deny policies are evaluated before permit policies and cannot be overridden
 - **Visibility follows access** — denied columns and tables are removed from the user's schema at connection time, so they don't appear in client tools like TablePlus or DBeaver
@@ -157,11 +157,11 @@ Create users without the UI — useful for scripting and automation. If you're l
 
 ```bash
 # Docker
-docker exec -it <container> proxy user create --username alice --password secret --tenant acme
-docker exec -it <container> proxy user create --username rescue --password secret --tenant default --admin
+docker exec -it <container> proxy user create --username alice --password secret
+docker exec -it <container> proxy user create --username rescue --password secret --admin
 
 # From source
-cargo run -p proxy -- user create --username alice --password secret --tenant acme
+cargo run -p proxy -- user create --username alice --password secret
 ```
 
 ## Roadmap

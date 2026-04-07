@@ -204,7 +204,7 @@ impl ProxyTestServer {
 
         // 2. Create admin user
         let auth = Arc::new(Auth::new(db.clone()));
-        auth.create_user(ADMIN_USER, ADMIN_PASS, "default", true)
+        auth.create_user(ADMIN_USER, ADMIN_PASS, true)
             .await
             .unwrap();
 
@@ -446,7 +446,6 @@ impl ProxyTestServer {
         &self,
         username: &str,
         password: &str,
-        tenant: &str,
         ds_id: Uuid,
     ) -> Uuid {
         // Create user
@@ -457,7 +456,6 @@ impl ProxyTestServer {
             .json(&json!({
                 "username": username,
                 "password": password,
-                "tenant": tenant,
                 "is_admin": false,
             }))
             .await;
@@ -734,7 +732,6 @@ impl ProxyTestServer {
         &self,
         username: &str,
         password: &str,
-        tenant: &str,
     ) -> Uuid {
         let resp = self
             .admin
@@ -743,7 +740,6 @@ impl ProxyTestServer {
             .json(&json!({
                 "username": username,
                 "password": password,
-                "tenant": tenant,
                 "is_admin": false,
             }))
             .await;
@@ -962,10 +958,8 @@ impl ProxyTestServer {
         &self,
         username: &str,
         password: &str,
-        tenant: &str,
     ) -> Uuid {
-        self.create_user_unassigned(username, password, tenant)
-            .await
+        self.create_user_unassigned(username, password).await
     }
 
     // -- ABAC helpers --

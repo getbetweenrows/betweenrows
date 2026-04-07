@@ -39,8 +39,6 @@ enum UserAction {
         username: String,
         #[arg(long)]
         password: String,
-        #[arg(long)]
-        tenant: String,
         #[arg(long, action = clap::ArgAction::SetTrue)]
         admin: bool,
     },
@@ -374,16 +372,11 @@ async fn serve(
                 std::process::exit(1);
             }
         };
-        let admin_tenant =
-            std::env::var("BR_ADMIN_TENANT").unwrap_or_else(|_| "default".to_string());
-
         tracing::warn!(
             username = %admin_user,
-            tenant = %admin_tenant,
             "No users found — seeding default admin."
         );
-        auth.create_user(&admin_user, &admin_pass, &admin_tenant, true)
-            .await?;
+        auth.create_user(&admin_user, &admin_pass, true).await?;
     }
 
     // ── WASM runtime (single shared instance for all decision function evaluation) ──
@@ -501,12 +494,10 @@ async fn handle_user_action(
         UserAction::Create {
             username,
             password,
-            tenant,
             admin,
         } => {
-            auth.create_user(&username, &password, &tenant, admin)
-                .await?;
-            tracing::info!(username = %username, tenant = %tenant, is_admin = admin, "Created user");
+            auth.create_user(&username, &password, admin).await?;
+            tracing::info!(username = %username, is_admin = admin, "Created user");
         }
     }
     Ok(())

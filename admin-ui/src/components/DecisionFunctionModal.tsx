@@ -49,7 +49,6 @@ function buildCtxCompletions(evaluateContext: EvaluateContext, configStr: string
   const items = [
     { label: 'ctx.session.user.id', type: 'variable' as const, detail: 'UUID' },
     { label: 'ctx.session.user.username', type: 'variable' as const },
-    { label: 'ctx.session.user.tenant', type: 'variable' as const },
     { label: 'ctx.session.user.roles', type: 'variable' as const, detail: 'string[]' },
     { label: 'ctx.session.time.now', type: 'variable' as const, detail: 'ISO 8601 timestamp' },
     { label: 'ctx.session.time.hour', type: 'variable' as const, detail: '0-23' },
@@ -359,7 +358,6 @@ export function DecisionFunctionModal({
             user: {
               id: currentUser?.id ?? '00000000-0000-0000-0000-000000000000',
               username: currentUser?.username ?? 'testuser',
-              tenant: currentUser?.tenant ?? 'default',
               roles: ['analyst'],
               ...testAttrs, // flattened — matches build_user_object() in context.rs
             },

@@ -43,18 +43,17 @@ describe('UserEditPage', () => {
   })
 
   it('renders form with user data', async () => {
-    const userObj = makeUser({ id: 'u-1', username: 'alice', tenant: 'acme' })
+    const userObj = makeUser({ id: 'u-1', username: 'alice' })
     mockGetUser.mockResolvedValue(userObj)
 
     renderEditPage()
 
     await waitFor(() => expect(screen.getByText(/@alice/i)).toBeInTheDocument())
-    expect(screen.getByDisplayValue('acme')).toBeInTheDocument()
   })
 
   it('submits update on save', async () => {
     const user = userEvent.setup()
-    const userObj = makeUser({ id: 'u-1', username: 'alice', tenant: 'acme' })
+    const userObj = makeUser({ id: 'u-1', username: 'alice' })
     mockGetUser.mockResolvedValue(userObj)
     mockUpdateUser.mockResolvedValue(userObj)
 
@@ -68,7 +67,7 @@ describe('UserEditPage', () => {
   })
 
   it('shows password change section', async () => {
-    const userObj = makeUser({ id: 'u-1', username: 'alice', tenant: 'acme' })
+    const userObj = makeUser({ id: 'u-1', username: 'alice' })
     mockGetUser.mockResolvedValue(userObj)
 
     renderEditPage()
@@ -79,7 +78,7 @@ describe('UserEditPage', () => {
 
   it('calls changePassword and shows success message', async () => {
     const user = userEvent.setup()
-    const userObj = makeUser({ id: 'u-1', username: 'alice', tenant: 'acme' })
+    const userObj = makeUser({ id: 'u-1', username: 'alice' })
     mockGetUser.mockResolvedValue(userObj)
     mockChangePassword.mockResolvedValue(userObj)
 

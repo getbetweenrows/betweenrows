@@ -29,22 +29,22 @@ describe('ExpressionEditor', () => {
       <ExpressionEditor
         value=""
         onChange={() => {}}
-        placeholder="organization_id = {user.tenant}"
+        placeholder="organization_id = {user.username}"
         templateItems={[]}
       />,
     )
-    expect(screen.getByPlaceholderText('organization_id = {user.tenant}')).toBeTruthy()
+    expect(screen.getByPlaceholderText('organization_id = {user.username}')).toBeTruthy()
   })
 
   it('renders with initial value', () => {
     renderWithProviders(
       <ExpressionEditor
-        value="tenant = {user.tenant}"
+        value="owner = {user.username}"
         onChange={() => {}}
         templateItems={[]}
       />,
     )
-    expect(screen.getByDisplayValue('tenant = {user.tenant}')).toBeTruthy()
+    expect(screen.getByDisplayValue('owner = {user.username}')).toBeTruthy()
   })
 
   it('calls onChange when value changes', () => {

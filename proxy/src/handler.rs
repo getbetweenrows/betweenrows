@@ -352,9 +352,6 @@ impl StartupHandler for ProxyHandler {
                         client
                             .metadata_mut()
                             .insert("user_id".to_owned(), user.id.to_string());
-                        client
-                            .metadata_mut()
-                            .insert("tenant".to_owned(), user.tenant.clone());
 
                         // Read requested database name (= data source name)
                         let datasource_name = client
@@ -447,7 +444,6 @@ impl StartupHandler for ProxyHandler {
 
                         tracing::info!(
                             username = %username,
-                            tenant = %user.tenant,
                             datasource = %datasource_name,
                             conn_id = conn_id,
                             addr = %peer_addr,

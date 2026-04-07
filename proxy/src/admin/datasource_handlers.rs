@@ -463,7 +463,6 @@ mod tests {
             id: Set(Uuid::now_v7()),
             username: Set(username.to_string()),
             password_hash: Set("$argon2id$v=19$m=19456,t=2,p=1$fake".to_string()),
-            tenant: Set("default".to_string()),
             is_admin: Set(is_admin),
             is_active: Set(true),
             created_at: Set(now),

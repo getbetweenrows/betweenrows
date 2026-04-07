@@ -24,8 +24,8 @@ const mockListUsers = listUsers as ReturnType<typeof vi.fn>
 beforeEach(() => vi.clearAllMocks())
 
 describe('UserAssignmentPanel', () => {
-  const alice = makeUser({ id: 'u-alice', username: 'alice', tenant: 'acme' })
-  const bob = makeUser({ id: 'u-bob', username: 'bob', tenant: 'acme', is_admin: true })
+  const alice = makeUser({ id: 'u-alice', username: 'alice' })
+  const bob = makeUser({ id: 'u-bob', username: 'bob', is_admin: true })
 
   it('renders loading state initially', () => {
     mockListUsers.mockReturnValue(new Promise(() => {}))

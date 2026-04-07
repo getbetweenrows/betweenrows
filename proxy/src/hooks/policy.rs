@@ -80,7 +80,6 @@ pub struct TypedAttribute {
 
 #[derive(Clone)]
 struct UserVars {
-    tenant: String,
     username: String,
     user_id: String,
     attributes: HashMap<String, TypedAttribute>,
@@ -90,7 +89,6 @@ impl UserVars {
     fn get(&self, key: &str) -> Option<&str> {
         match key {
             // Built-in fields take priority — prevents attribute override attacks
-            "user.tenant" => Some(&self.tenant),
             "user.username" => Some(&self.username),
             "user.id" => Some(&self.user_id),
             _ => {
@@ -102,7 +100,7 @@ impl UserVars {
 
     fn get_type(&self, key: &str) -> &str {
         match key {
-            "user.tenant" | "user.username" | "user.id" => "string",
+            "user.username" | "user.id" => "string",
             _ => {
                 if let Some(attr_key) = key.strip_prefix("user.") {
                     self.attributes
@@ -138,7 +136,7 @@ fn mangle_vars(template: &str, vars: &UserVars) -> (String, Vec<VarMapping>) {
     let mut mappings = Vec::new();
 
     // Built-in keys first (stable placeholders)
-    for key in ["user.tenant", "user.username", "user.id"] {
+    for key in ["user.username", "user.id"] {
         let placeholder = format!("__br_{}__", key.replace('.', "_"));
         let needle = format!("{{{}}}", key);
         if result.contains(&needle) {
@@ -571,7 +569,6 @@ fn parse_mask_expr(
 /// The goal is to catch unsupported SQL syntax, not to evaluate the expression.
 pub fn validate_expression(expression: &str, is_mask: bool) -> Result<(), String> {
     let dummy_vars = UserVars {
-        tenant: "__validate__".to_string(),
         username: "__validate__".to_string(),
         user_id: "__validate__".to_string(),
         attributes: HashMap::new(),
@@ -1867,7 +1864,6 @@ impl QueryHook for PolicyHook {
                 )))));
             }
         };
-        let tenant = metadata.get("tenant").cloned().unwrap_or_default();
         let username = metadata.get("user").cloned().unwrap_or_default();
         let datasource = metadata.get("datasource").cloned().unwrap_or_default();
         let client_ip = Some(client.socket_addr().ip().to_string());
@@ -1885,7 +1881,6 @@ impl QueryHook for PolicyHook {
         };
 
         let user_vars = UserVars {
-            tenant,
             username: username.clone(),
             user_id: user_id.to_string(),
             attributes: session.user_attributes.clone(),
@@ -1949,7 +1944,6 @@ impl QueryHook for PolicyHook {
             let session_info = crate::decision::context::SessionInfo {
                 user_id,
                 username: username.clone(),
-                tenant: user_vars.tenant.clone(),
                 roles: session.roles.clone(),
                 datasource_name: session.datasource_name.clone(),
                 access_mode: session.access_mode.clone(),
@@ -2284,11 +2278,18 @@ mod tests {
     }
 
     fn default_vars() -> UserVars {
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "tenant".to_string(),
+            TypedAttribute {
+                value: "acme".to_string(),
+                value_type: "string".to_string(),
+            },
+        );
         UserVars {
-            tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "00000000-0000-0000-0000-000000000001".to_string(),
-            attributes: HashMap::new(),
+            attributes: attrs,
         }
     }
 
@@ -2342,11 +2343,18 @@ mod tests {
 
     #[test]
     fn test_parse_filter_simple_eq() {
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "tenant".to_string(),
+            TypedAttribute {
+                value: "acme".to_string(),
+                value_type: "string".to_string(),
+            },
+        );
         let vars = UserVars {
-            tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "test-id".to_string(),
-            attributes: HashMap::new(),
+            attributes: attrs,
         };
         let expr = parse_filter_expr("organization_id = {user.tenant}", &vars).unwrap();
         let expr_str = format!("{expr:?}");
@@ -2359,7 +2367,6 @@ mod tests {
     #[test]
     fn test_parse_filter_always_true() {
         let vars = UserVars {
-            tenant: "any".to_string(),
             username: "u".to_string(),
             user_id: "i".to_string(),
             attributes: HashMap::new(),
@@ -2374,11 +2381,18 @@ mod tests {
 
     #[test]
     fn test_mangle_vars() {
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "tenant".to_string(),
+            TypedAttribute {
+                value: "my-tenant".to_string(),
+                value_type: "string".to_string(),
+            },
+        );
         let vars = UserVars {
-            tenant: "my-tenant".to_string(),
             username: "alice".to_string(),
             user_id: "uid-1".to_string(),
-            attributes: HashMap::new(),
+            attributes: attrs,
         };
         let (mangled, mappings) =
             mangle_vars("org = {user.tenant} AND user = {user.username}", &vars);
@@ -2389,11 +2403,18 @@ mod tests {
 
     #[test]
     fn test_parse_filter_and() {
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "tenant".to_string(),
+            TypedAttribute {
+                value: "acme".to_string(),
+                value_type: "string".to_string(),
+            },
+        );
         let vars = UserVars {
-            tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "uid".to_string(),
-            attributes: HashMap::new(),
+            attributes: attrs,
         };
         let expr = parse_filter_expr(
             "organization_id = {user.tenant} AND is_active = true",
@@ -4210,7 +4231,6 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             &crate::decision::context::SessionInfo {
                 user_id: Uuid::nil(),
                 username: "alice".to_string(),
-                tenant: "acme".to_string(),
                 roles: vec!["analyst".to_string()],
                 datasource_name: "test_ds".to_string(),
                 access_mode: "open".to_string(),
@@ -4289,7 +4309,6 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             &crate::decision::context::SessionInfo {
                 user_id: Uuid::nil(),
                 username: "alice".to_string(),
-                tenant: "acme".to_string(),
                 roles: vec![],
                 datasource_name: "test_ds".to_string(),
                 access_mode: "open".to_string(),
@@ -4486,7 +4505,6 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             },
         );
         let vars = UserVars {
-            tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
@@ -4505,6 +4523,13 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
     fn test_mangle_vars_mixed_builtin_and_custom() {
         let mut attrs = HashMap::new();
         attrs.insert(
+            "tenant".to_string(),
+            TypedAttribute {
+                value: "acme".to_string(),
+                value_type: "string".to_string(),
+            },
+        );
+        attrs.insert(
             "dept".to_string(),
             TypedAttribute {
                 value: "eng".to_string(),
@@ -4512,7 +4537,6 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             },
         );
         let vars = UserVars {
-            tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
@@ -4527,7 +4551,6 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
     #[test]
     fn test_mangle_vars_unknown_attribute_empty() {
         let vars = UserVars {
-            tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: HashMap::new(),
@@ -4553,7 +4576,6 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             },
         );
         let vars = UserVars {
-            tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
@@ -4579,7 +4601,6 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             },
         );
         let vars = UserVars {
-            tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
@@ -4601,7 +4622,6 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             },
         );
         let vars = UserVars {
-            tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
@@ -4635,7 +4655,6 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             },
         );
         let vars = UserVars {
-            tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
@@ -4661,7 +4680,6 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             },
         );
         let vars = UserVars {
-            tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
@@ -4673,22 +4691,21 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
     // ---------- ABAC: UserVars::get priority ----------
 
     #[test]
-    fn test_user_vars_builtin_priority() {
+    fn test_user_vars_tenant_from_attributes() {
         let mut attrs = HashMap::new();
         attrs.insert(
             "tenant".to_string(),
             TypedAttribute {
-                value: "evil".to_string(),
+                value: "acme".to_string(),
                 value_type: "string".to_string(),
             },
         );
         let vars = UserVars {
-            tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
         };
-        // Built-in "tenant" must win over the attribute
+        // tenant is now a custom attribute, resolved from attributes map
         assert_eq!(vars.get("user.tenant"), Some("acme"));
     }
 
@@ -4703,7 +4720,6 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             },
         );
         let vars = UserVars {
-            tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
@@ -4768,7 +4784,6 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             },
         );
         let vars = UserVars {
-            tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
@@ -4806,7 +4821,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
         attributes.insert(
             "tenant".to_string(),
             TypedAttribute {
-                value: "evil_override".to_string(),
+                value: "from_attribute".to_string(),
                 value_type: "string".to_string(),
             },
         );
@@ -4826,35 +4841,34 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
         );
 
         let vars = UserVars {
-            tenant: "real_tenant".to_string(),
             username: "real_user".to_string(),
             user_id: "real_id".to_string(),
             attributes,
         };
 
-        // Built-in fields must always win over attribute overrides
-        assert_eq!(vars.get("user.tenant"), Some("real_tenant"));
+        // Built-in username and id must always win over attribute overrides
         assert_eq!(vars.get("user.username"), Some("real_user"));
         assert_eq!(vars.get("user.id"), Some("real_id"));
 
-        // Type should also return the builtin type
-        assert_eq!(vars.get_type("user.tenant"), "string");
+        // tenant is now a regular attribute (no longer built-in)
+        assert_eq!(vars.get("user.tenant"), Some("from_attribute"));
+
+        // Type should return the builtin type for username/id
         assert_eq!(vars.get_type("user.username"), "string");
         assert_eq!(vars.get_type("user.id"), "string");
     }
 
     #[test]
-    fn test_filter_expr_builtin_overrides_attribute() {
+    fn test_filter_expr_uses_tenant_attribute() {
         let mut attributes = HashMap::new();
         attributes.insert(
             "tenant".to_string(),
             TypedAttribute {
-                value: "evil".to_string(),
+                value: "acme".to_string(),
                 value_type: "string".to_string(),
             },
         );
         let vars = UserVars {
-            tenant: "acme".to_string(),
             username: "alice".to_string(),
             user_id: "test-id".to_string(),
             attributes,
@@ -4863,11 +4877,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
         let debug = format!("{expr:?}");
         assert!(
             debug.contains("acme"),
-            "Should use builtin tenant, not attribute: {debug}"
-        );
-        assert!(
-            !debug.contains("evil"),
-            "Should NOT use attribute override: {debug}"
+            "Should use tenant from attributes: {debug}"
         );
     }
 }

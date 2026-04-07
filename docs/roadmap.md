@@ -590,13 +590,6 @@ Given complexity of new policy system (interaction with DataFusion and PostgreSQ
 - Forget password and reset password
 - 2FA or OTP support
 
-### Remove `BR_ADMIN_TENANT` env var
-
-- The admin seed user's tenant defaults to `"default"` silently — there's no reason for this to be a documented env var
-- Admin users typically manage the system, not query through the proxy with tenant-scoped policies
-- Tenant can be set through the UI when editing the user
-- Plan: remove the env var entirely, hardcode `"default"` as the seed tenant
-
 ## Bugs
 
 - 2026-03-04: DataFusion query error - Invalid function 'pg_get_function_identity_arguments'. Did you mean 'pg_get_statisticsobjdef_columns'?

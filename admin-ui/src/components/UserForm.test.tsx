@@ -15,9 +15,9 @@ describe('UserForm – create mode', () => {
     const { container } = renderWithProviders(
       <UserForm mode="create" onSubmit={vi.fn()} onCancel={vi.fn()} />,
     )
-    // create mode: textboxes are [username, tenant, email, display_name]
+    // create mode: textboxes are [username, email, display_name]
     const textboxes = screen.getAllByRole('textbox')
-    expect(textboxes.length).toBeGreaterThanOrEqual(2) // at least username + tenant
+    expect(textboxes.length).toBeGreaterThanOrEqual(1) // at least username
     expect(getPasswordInput(container)).toBeTruthy()
     expect(screen.getByRole('button', { name: /create user/i })).toBeInTheDocument()
   })
@@ -38,11 +38,10 @@ describe('UserForm – create mode', () => {
       <UserForm mode="create" onSubmit={onSubmit} onCancel={vi.fn()} />,
     )
 
-    // create mode textboxes: [0]=username, [1]=tenant, [2]=email, [3]=displayName
+    // create mode textboxes: [0]=username, [1]=email, [2]=displayName
     const textboxes = screen.getAllByRole('textbox')
     await user.type(textboxes[0], 'alice')   // username
     await user.type(getPasswordInput(container), 'Test@123!') // password
-    await user.type(textboxes[1], 'acme')   // tenant
 
     // Submit via button
     await user.click(screen.getByRole('button', { name: /create user/i }))
@@ -51,7 +50,6 @@ describe('UserForm – create mode', () => {
       expect.objectContaining({
         username: 'alice',
         password: 'Test@123!',
-        tenant: 'acme',
         is_admin: false,
       }),
     )
@@ -73,14 +71,14 @@ describe('UserForm – edit mode', () => {
     const { container } = renderWithProviders(
       <UserForm
         mode="edit"
-        initialValues={{ username: 'bob', tenant: 'acme', is_admin: false, is_active: true }}
+        initialValues={{ username: 'bob', is_admin: false, is_active: true }}
         onSubmit={vi.fn()}
         onCancel={vi.fn()}
       />,
     )
     // In edit mode, no password field
     expect(getPasswordInput(container)).toBeNull()
-    // In edit mode, the username textbox is NOT rendered; textboxes are [tenant, email, displayName]
+    // In edit mode, the username textbox is NOT rendered; textboxes are [email, displayName]
     const textboxes = screen.getAllByRole('textbox')
     // No input should have the username value in edit mode (username is not shown)
     expect(textboxes.some((t) => (t as HTMLInputElement).value === 'bob')).toBe(false)
@@ -90,7 +88,7 @@ describe('UserForm – edit mode', () => {
     renderWithProviders(
       <UserForm
         mode="edit"
-        initialValues={{ tenant: 'acme', is_active: true }}
+        initialValues={{ is_active: true }}
         onSubmit={vi.fn()}
         onCancel={vi.fn()}
       />,
@@ -106,7 +104,7 @@ describe('UserForm – edit mode', () => {
     const { container } = renderWithProviders(
       <UserForm
         mode="edit"
-        initialValues={{ tenant: 'acme', is_admin: false, is_active: true }}
+        initialValues={{ is_admin: false, is_active: true }}
         onSubmit={onSubmit}
         onCancel={vi.fn()}
       />,

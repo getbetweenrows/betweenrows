@@ -26,15 +26,15 @@ Integration tests live in `proxy/tests/policy_enforcement.rs`. They use `testcon
 
 ### 2. Template variable injection
 
-**Vector**: User registers with a tenant string containing SQL syntax:
+**Vector**: User has a tenant attribute containing SQL syntax:
 
 ```
 tenant = "acme' OR '1'='1"
 ```
 
-**Defense**: Template variable substitution uses `Expr::Literal(ScalarValue::Utf8(...))` — the value is inserted as a typed literal, never parsed as SQL. The user's tenant value cannot escape the string literal context.
+**Defense**: Template variable substitution uses `Expr::Literal(ScalarValue::Utf8(...))` — the value is inserted as a typed literal, never parsed as SQL. The user's tenant attribute value cannot escape the string literal context.
 
-**Test**: Create a user with `tenant = "x' OR '1'='1"`. Run `SELECT * FROM orders`. Verify the rewritten filter is `organization_id = 'x'' OR ''1''=''1'` (escaped) and returns 0 rows (not all rows).
+**Test**: Create a user with tenant attribute `"x' OR '1'='1"`. Run `SELECT * FROM orders`. Verify the rewritten filter is `organization_id = 'x'' OR ''1''=''1'` (escaped) and returns 0 rows (not all rows).
 
 ---
 
@@ -496,11 +496,11 @@ There is no ambiguous per-definition `action` field. `compute_user_visibility()`
 
 ### 42. Template variables resolve from user, not role
 
-**Vector**: `row_filter` with `{user.tenant}` assigned to a role. Attacker expects the filter to use the role's properties instead of the connecting user's tenant.
+**Vector**: `row_filter` with `{user.tenant}` assigned to a role. Attacker expects the filter to use the role's properties instead of the connecting user's tenant attribute.
 
-**Defense**: Template variable substitution happens in `PolicyHook` using the authenticated user's metadata, not role metadata. Roles have no tenant/username properties.
+**Defense**: Template variable substitution happens in `PolicyHook` using the authenticated user's identity and attributes, not role metadata. Roles have no attributes of their own.
 
-**Test**: `rbac_24_row_filter_via_role` — filter uses the connecting user's tenant, not any role property.
+**Test**: `rbac_24_row_filter_via_role` — filter uses the connecting user's tenant attribute, not any role property.
 
 ---
 
@@ -820,15 +820,17 @@ Additional fixes:
 
 ### 67. Attribute-based built-in field override
 
-**Vector**: Admin defines a user attribute named `tenant` and sets it to `evil` on a user, hoping to override `{user.tenant}` in row filter expressions and gain access to another tenant's data.
+**Vector**: Admin defines a user attribute named `username` or `id` and sets it to a different value, hoping to override `{user.username}` or `{user.id}` in policy expressions and impersonate another user.
 
 **Defense**: Two layers of protection:
-1. **API validation**: `validate_attribute_definition` rejects reserved key names (`tenant`, `username`, `id`, `user_id`) for `entity_type = "user"`. The attribute definition cannot be created.
-2. **Runtime priority**: `UserVars::get()` uses a `match` statement where built-in fields are checked first. Even if a `tenant` attribute somehow existed in the JSON column (bypassing the API), `{user.tenant}` would resolve to the built-in tenant value, not the attribute.
+1. **API validation**: `validate_attribute_definition` rejects reserved key names (`username`, `id`, `user_id`, `roles`) for `entity_type = "user"`. The attribute definition cannot be created.
+2. **Runtime priority**: `UserVars::get()` uses a `match` statement where built-in fields (`username`, `id`) are checked first. Even if a reserved-name attribute somehow existed in the JSON column (bypassing the API), `{user.username}` and `{user.id}` would resolve to the built-in values, not the attribute.
+
+Note: `tenant` is no longer a reserved key — it is a regular custom attribute. `{user.tenant}` resolves from the user's attributes via the attribute definition system. The security control for tenant isolation is that only admins can set user attributes.
 
 **Test**:
-- **API layer**: `abac_builtin_field_override_security` — API rejects `tenant` as attribute key with 422.
-- **Runtime layer**: `test_user_vars_builtin_priority_over_attributes` — `UserVars::get()` returns builtin value even when conflicting attribute exists. `test_filter_expr_builtin_overrides_attribute` — filter expression substitutes builtin tenant, not the attribute override.
+- **API layer**: `abac_builtin_field_override_security` — API rejects `username` as attribute key with 422.
+- **Runtime layer**: `test_user_vars_builtin_priority_over_attributes` — `UserVars::get()` returns builtin value even when conflicting attribute exists.
 
 ---
 

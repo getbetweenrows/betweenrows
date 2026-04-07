@@ -90,7 +90,6 @@ export function UsersListPage() {
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Username</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-600">Tenant</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Role</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Status</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Last login</th>
@@ -101,7 +100,6 @@ export function UsersListPage() {
               {data?.data.map((user) => (
                 <tr key={user.id} className="hover:bg-gray-50">
                   <td className="px-4 py-3 font-medium text-gray-900">{user.username}</td>
-                  <td className="px-4 py-3 text-gray-600">{user.tenant}</td>
                   <td className="px-4 py-3">
                     <span
                       className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${

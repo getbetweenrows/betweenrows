@@ -20,7 +20,6 @@ export function renderWithProviders(
     localStorage.setItem('user', JSON.stringify({
       id: 'user-1',
       username: 'admin',
-      tenant: 'default',
       is_admin: true,
       is_active: true,
       email: null,

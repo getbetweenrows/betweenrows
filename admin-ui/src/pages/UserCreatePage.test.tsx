@@ -33,13 +33,12 @@ describe('UserCreatePage', () => {
       container.querySelector('input[type="password"]') as HTMLInputElement,
       'Test@123!',
     )
-    await user.type(textboxes[1], 'acme')  // tenant
 
     await user.click(screen.getByRole('button', { name: /create user/i }))
 
     await waitFor(() =>
       expect(mockCreateUser).toHaveBeenCalledWith(
-        expect.objectContaining({ username: 'newuser', tenant: 'acme' }),
+        expect.objectContaining({ username: 'newuser' }),
       ),
     )
   })

@@ -126,7 +126,7 @@ The shared pool is safe for all authorized users of a datasource: Pool = "how to
 
 `PolicyHook` injects row filters and column transforms at the DataFusion logical plan level via `transform_up`. The filter is applied below the `TableScan` node — it cannot be bypassed by table aliases, CTEs, or subqueries, since DataFusion inlines those into the plan before transformation.
 
-Template variable substitution (`{user.tenant}`, etc.) uses parse-then-substitute: the filter expression is parsed into a `DataFusion Expr` tree first, then placeholder identifiers are replaced with typed `Expr::Literal` values. The user's tenant/username never passes through the SQL parser, preventing injection even if the value contains SQL syntax.
+Template variable substitution (`{user.username}`, `{user.id}`, custom attributes like `{user.tenant}`, etc.) uses parse-then-substitute: the filter expression is parsed into a `DataFusion Expr` tree first, then placeholder identifiers are replaced with typed `Expr::Literal` values. The user's values never pass through the SQL parser, preventing injection even if the value contains SQL syntax.
 
 ### Permissions Model
 
@@ -136,7 +136,7 @@ BetweenRows enforces a two-layer access control model:
 
 **Data plane** — controlled by two independent mechanisms:
 1. *Connection access* — `data_source_access` entries. A user can connect to a datasource via direct assignment, role membership (including inherited roles), or all-user scope. Being an admin does **not** automatically grant data plane access.
-2. *Query policy* — `PolicyHook` applies row filters, column masks, and column access controls per-query based on assigned policies (direct, role-based, or all-scoped). If the datasource `access_mode` is `"policy_required"`, tables with no matching permit policy return empty results. Policies can reference built-in identity fields (`{user.tenant}`, `{user.username}`, `{user.id}`) and custom user attributes (`{user.KEY}`) for attribute-based access control (ABAC). Optional decision functions (JavaScript/WASM) provide programmable policy gates.
+2. *Query policy* — `PolicyHook` applies row filters, column masks, and column access controls per-query based on assigned policies (direct, role-based, or all-scoped). If the datasource `access_mode` is `"policy_required"`, tables with no matching permit policy return empty results. Policies can reference built-in identity fields (`{user.username}`, `{user.id}`) and custom user attributes (`{user.KEY}`, e.g., `{user.tenant}`) for attribute-based access control (ABAC). Optional decision functions (JavaScript/WASM) provide programmable policy gates.
 
 See `docs/permission-system.md` for the full policy system user guide.
 
@@ -189,7 +189,7 @@ There is currently no automated performance regression suite. Meaningful regress
 All primary keys are UUIDs. The admin store uses SQLite by default (configurable via `DATABASE_URL`).
 
 ```
-proxy_user         (id UUID, username, password_hash, tenant, is_admin, is_active, …)
+proxy_user         (id UUID, username, password_hash, is_admin, is_active, attributes JSON, …)
 data_source        (id UUID, name, ds_type, config JSON, secure_config encrypted,
                     is_active, access_mode, last_sync_at, last_sync_result, …)
 data_source_access (id UUID, user_id?, role_id?, data_source_id, assignment_scope, …)

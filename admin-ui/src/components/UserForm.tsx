@@ -11,7 +11,6 @@ interface Props {
   mode: Mode
   initialValues?: {
     username?: string
-    tenant?: string
     is_admin?: boolean
     is_active?: boolean
     email?: string
@@ -26,7 +25,6 @@ interface Props {
 export function UserForm({ mode, initialValues = {}, onSubmit, onCancel, loading, error }: Props) {
   const [username, setUsername] = useState(initialValues.username ?? '')
   const [password, setPassword] = useState('')
-  const [tenant, setTenant] = useState(initialValues.tenant ?? '')
   const [isAdmin, setIsAdmin] = useState(initialValues.is_admin ?? false)
   const [isActive, setIsActive] = useState(initialValues.is_active ?? true)
   const [email, setEmail] = useState(initialValues.email ?? '')
@@ -48,14 +46,12 @@ export function UserForm({ mode, initialValues = {}, onSubmit, onCancel, loading
       await onSubmit({
         username,
         password,
-        tenant,
         is_admin: isAdmin,
         email: email || undefined,
         display_name: displayName || undefined,
       } satisfies CreateUserPayload)
     } else {
       await onSubmit({
-        tenant: tenant || undefined,
         is_admin: isAdmin,
         is_active: isActive,
         email: email || undefined,
@@ -101,16 +97,6 @@ export function UserForm({ mode, initialValues = {}, onSubmit, onCancel, loading
           </>
         </Field>
       )}
-
-      <Field label="Tenant" required>
-        <input
-          type="text"
-          value={tenant}
-          onChange={(e) => setTenant(e.target.value)}
-          required={mode === 'create'}
-          className={inputCls}
-        />
-      </Field>
 
       <Field label="Email">
         <input

@@ -16,7 +16,6 @@ export function makeUser(overrides: Partial<User> = {}): User {
   return {
     id: id(),
     username: `user_${counter}`,
-    tenant: 'default',
     is_admin: false,
     is_active: true,
     email: null,

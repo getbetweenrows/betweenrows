@@ -128,7 +128,6 @@ Filter and mask expressions can reference the authenticated user's identity and 
 
 | Placeholder | Value | Type |
 |---|---|---|
-| `{user.tenant}` | The user's tenant string | string |
 | `{user.username}` | The user's username | string |
 | `{user.id}` | The user's UUID | string |
 
@@ -143,7 +142,7 @@ Any attribute defined via Attribute Definitions (see below) can be referenced as
 | `boolean` | `{user.is_vip}` | `true` (Boolean) |
 | `list` | `{user.departments}` | `'eng', 'sec'` (multiple Utf8 — use with `IN`) |
 
-Built-in variables (`tenant`, `username`, `id`) always take priority over custom attributes with the same name. This prevents attribute-based override of identity fields.
+Built-in variables (`username`, `id`) always take priority over custom attributes with the same name. This prevents attribute-based override of identity fields.
 
 ### Parse-then-substitute pattern
 
@@ -153,7 +152,7 @@ Example:
 ```
 organization_id = {user.tenant}
 ```
-becomes (at query time, for a user with tenant `acme`):
+becomes (at query time, for a user with a `tenant` attribute value of `acme`):
 ```
 organization_id = 'acme'
 ```
@@ -258,7 +257,7 @@ With only this policy, the user sees the `customers` table with exactly three co
 ]
 ```
 
-Result: only `id` and `name` columns, filtered to the user's tenant rows.
+Result: only `id` and `name` columns, filtered to the user's tenant attribute value.
 
 ### `column_deny` does not grant access
 
@@ -280,7 +279,7 @@ Column qualifiers from DataFusion's query planner identify which table each outp
 
 ## User Attributes (ABAC)
 
-User attributes are custom key-value properties on users that drive policy evaluation. They extend the built-in identity fields (`tenant`, `username`, `id`) with arbitrary, admin-defined metadata like `region`, `department`, or `clearance_level`.
+User attributes are custom key-value properties on users that drive policy evaluation. They extend the built-in identity fields (`username`, `id`) with arbitrary, admin-defined metadata like `region`, `department`, `tenant`, or `clearance_level`.
 
 ### Attribute definitions (schema-first)
 
@@ -296,7 +295,7 @@ Before setting attributes on users, admins must define the allowed keys via Attr
 
 The same key can exist for different entity types with different constraints (e.g., user `region` as enum vs table `region` as free-text).
 
-Reserved keys for `entity_type = "user"`: `tenant`, `username`, `id`, `user_id` — these are rejected to prevent overriding built-in identity fields.
+Reserved keys for `entity_type = "user"`: `username`, `id`, `user_id`, `roles` — these are rejected to prevent overriding built-in identity fields.
 
 ### Value types in detail
 
@@ -330,7 +329,7 @@ User attributes live at two different levels depending on the context:
 
 This is intentional:
 
-- **API/storage nests** because attributes are a distinct concern from built-in fields (`username`, `tenant`, `is_admin`). They have different validation rules, full-replace semantics, and are governed by attribute definitions. Nesting makes the API self-documenting about what is user-defined vs. built-in.
+- **API/storage nests** because attributes are a distinct concern from built-in fields (`username`, `is_admin`). They have different validation rules, full-replace semantics, and are governed by attribute definitions. Nesting makes the API self-documenting about what is user-defined vs. built-in.
 - **Expressions/context flatten** because policy authors write these constantly and brevity matters. `{user.region}` and `ctx.session.user.region` are cleaner than `{user.attributes.region}`.
 - **Reserved key validation** prevents collisions — attribute keys cannot shadow built-in fields, and built-in fields always take priority at runtime.
 
@@ -395,8 +394,8 @@ User attributes are available as first-class fields on `ctx.session.user` with c
     "user": {
       "id": "550e8400-e29b-41d4-a716-446655440000",
       "username": "alice",
-      "tenant": "acme",
       "roles": ["finance-analyst", "finance"],
+      "tenant": "acme",
       "region": "us-east",
       "clearance": 3,
       "is_vip": true,
@@ -464,12 +463,12 @@ function evaluate(ctx, config) {
 
 | Value | `ctx` contains | When it can fire |
 |-------|---------------|-----------------|
-| `"session"` | `ctx.session` only: user id/username/tenant/roles + custom attributes, time (now, hour, day_of_week), datasource name/access_mode | Both at connect time (visibility) and query time |
+| `"session"` | `ctx.session` only: user id/username/roles + custom attributes (e.g., tenant), time (now, hour, day_of_week), datasource name/access_mode | Both at connect time (visibility) and query time |
 | `"query"` | `ctx.session` + `ctx.query`: tables, columns, join_count, has_aggregation, has_subquery, has_where, statement_type | Query time only — visibility effect skipped at connect time (policy deferred to query time) |
 
 `time.now` is an ISO 8601 / RFC 3339 timestamp representing the **evaluation time** — the moment the context is built. For visibility-level functions this is when the connection context is computed; for query-level functions it is when the query is processed. This enables time-windowed decision functions (e.g., break-glass temporary access).
 
-Custom user attributes are flattened as first-class fields on the `user` object with correctly typed values (string/number/boolean/array) — e.g., `ctx.session.user.region`, not `ctx.session.user.attributes.region`. This matches the flat `{user.KEY}` namespace used in template variables. In the API, the same attributes are nested under `attributes` (see [Namespace design](#namespace-design-flat-in-expressions-nested-in-api)). List attributes appear as JSON arrays of strings. Built-in fields (`id`, `username`, `tenant`, `roles`) always take priority. See [User Attributes (ABAC)](#user-attributes-abac) for details.
+Custom user attributes are flattened as first-class fields on the `user` object with correctly typed values (string/number/boolean/array) — e.g., `ctx.session.user.region`, not `ctx.session.user.attributes.region`. This matches the flat `{user.KEY}` namespace used in template variables. In the API, the same attributes are nested under `attributes` (see [Namespace design](#namespace-design-flat-in-expressions-nested-in-api)). List attributes appear as JSON arrays of strings. Built-in fields (`id`, `username`, `roles`) always take priority. See [User Attributes (ABAC)](#user-attributes-abac) for details.
 
 **Visibility-level enforcement**: `column_deny`, `table_deny`, and `column_allow` policies are enforced at connect time (visibility level) by removing columns/tables from the per-user schema. Decision functions on these policy types are evaluated at visibility time when `evaluate_context = "session"`. If the decision function returns `fire: false`, the policy is skipped and the column/table remains visible. For `evaluate_context = "query"`, the policy's visibility effect is skipped entirely (deferred to query time), since query metadata is not available at connect time — the column/table stays visible in the schema and the decision function runs at query time as normal.
 
@@ -892,7 +891,7 @@ If no matching entry is found, the connection is rejected with a "not assigned t
 
 ### Template variables resolve from the user
 
-Template variables (`{user.tenant}`, `{user.username}`, `{user.id}`) always resolve from the connecting user's attributes, not the role. A `row_filter` policy with `{user.tenant}` assigned to a role will filter by each member's individual tenant.
+Template variables (`{user.username}`, `{user.id}`, and custom attributes like `{user.tenant}`) always resolve from the connecting user's identity and attributes, not the role. A `row_filter` policy with `{user.tenant}` assigned to a role will filter by each member's individual tenant attribute value.
 
 ### Immediate effect
 

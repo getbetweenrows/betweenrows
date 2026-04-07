@@ -78,7 +78,7 @@ describe('createUser', () => {
   it('POSTs payload to /users', async () => {
     const user = makeUser()
     mockClient.post.mockResolvedValue({ data: user })
-    const payload = { username: 'newuser', password: 'pw', tenant: 'acme', is_admin: false }
+    const payload = { username: 'newuser', password: 'pw', is_admin: false }
     const result = await createUser(payload)
     expect(mockClient.post).toHaveBeenCalledWith('/users', payload)
     expect(result).toEqual(user)
@@ -89,7 +89,7 @@ describe('updateUser', () => {
   it('PUTs payload to /users/:id', async () => {
     const user = makeUser()
     mockClient.put.mockResolvedValue({ data: user })
-    const payload = { tenant: 'new-tenant', is_admin: true }
+    const payload = { is_admin: true }
     const result = await updateUser('u-1', payload)
     expect(mockClient.put).toHaveBeenCalledWith('/users/u-1', payload)
     expect(result).toEqual(user)

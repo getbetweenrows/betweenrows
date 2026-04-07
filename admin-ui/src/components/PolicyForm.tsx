@@ -612,7 +612,7 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
             <ExpressionEditor
               value={filterExpression}
               onChange={setFilterExpression}
-              placeholder="organization_id = {user.tenant}"
+              placeholder="department = {user.department}"
               templateItems={templateItems}
               onValidate={(expr) => validateExpression(expr, false)}
             />

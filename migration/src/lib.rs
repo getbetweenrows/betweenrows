@@ -48,6 +48,7 @@ mod m20260325_000051_clear_static_wasm;
 mod m20260328_000052_create_attribute_definition;
 mod m20260328_000053_idx_attribute_definition_key_entity;
 mod m20260328_000054_add_user_attributes;
+mod m20260406_000055_drop_tenant_from_proxy_user;
 
 pub struct Migrator;
 
@@ -103,6 +104,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260328_000052_create_attribute_definition::Migration),
             Box::new(m20260328_000053_idx_attribute_definition_key_entity::Migration),
             Box::new(m20260328_000054_add_user_attributes::Migration),
+            Box::new(m20260406_000055_drop_tenant_from_proxy_user::Migration),
         ]
     }
 }

@@ -114,7 +114,6 @@ pub async fn create_user(
         id: Set(id),
         username: Set(body.username.clone()),
         password_hash: Set(password_hash),
-        tenant: Set(body.tenant.clone()),
         is_admin: Set(body.is_admin),
         is_active: Set(true),
         email: Set(body.email.clone()),
@@ -142,7 +141,6 @@ pub async fn create_user(
         serde_json::json!({
             "after": {
                 "username": model.username,
-                "tenant": model.tenant,
                 "is_admin": model.is_admin,
             }
         }),
@@ -192,7 +190,6 @@ pub async fn update_user(
 
     // Capture before-state for audit
     let before_snapshot = serde_json::json!({
-        "tenant": user.tenant,
         "is_admin": user.is_admin,
         "is_active": user.is_active,
         "email": user.email,
@@ -202,12 +199,8 @@ pub async fn update_user(
 
     let mut active: proxy_user::ActiveModel = user.into();
 
-    let tenant_changed = body.tenant.is_some();
     let is_active_changed = body.is_active.is_some();
 
-    if let Some(tenant) = body.tenant {
-        active.tenant = Set(tenant);
-    }
     if let Some(is_admin) = body.is_admin {
         active.is_admin = Set(is_admin);
     }
@@ -336,7 +329,6 @@ pub async fn update_user(
         serde_json::json!({
             "before": before_snapshot,
             "after": {
-                "tenant": updated.tenant,
                 "is_admin": updated.is_admin,
                 "is_active": updated.is_active,
                 "email": updated.email,
@@ -348,7 +340,7 @@ pub async fn update_user(
     txn.commit().await.map_err(ApiErr::internal)?;
 
     // Cache invalidation after commit
-    if attributes_changed || tenant_changed || is_active_changed {
+    if attributes_changed || is_active_changed {
         if let Some(hook) = &state.policy_hook {
             hook.invalidate_user(id).await;
         }
@@ -426,7 +418,6 @@ pub async fn delete_user(
         serde_json::json!({
             "before": {
                 "username": user.username,
-                "tenant": user.tenant,
                 "is_admin": user.is_admin,
             }
         }),
@@ -510,7 +501,6 @@ mod tests {
             id: Set(id),
             username: Set(username.to_string()),
             password_hash: Set("hash".to_string()),
-            tenant: Set("default".to_string()),
             is_admin: Set(is_admin),
             is_active: Set(true),
             email: Set(None),
@@ -726,7 +716,7 @@ mod tests {
                     .uri(format!("/users/{admin_id}"))
                     .header("Authorization", format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
-                    .body(json_body(serde_json::json!({"tenant": "new_tenant"})))
+                    .body(json_body(serde_json::json!({"email": "new@example.com"})))
                     .unwrap(),
             )
             .await

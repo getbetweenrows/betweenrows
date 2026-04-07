@@ -1126,7 +1126,6 @@ impl EngineCache {
             let session_info = crate::decision::context::SessionInfo {
                 user_id,
                 username: user.username,
-                tenant: user.tenant,
                 roles: role_names,
                 datasource_name: ds.name,
                 access_mode: catalog.access_mode.clone(),
@@ -2260,7 +2259,6 @@ mod tests {
             id: sea_orm::Set(user_id),
             username: sea_orm::Set(format!("user-{user_id}")),
             password_hash: sea_orm::Set("hash".to_string()),
-            tenant: sea_orm::Set("test".to_string()),
             is_admin: sea_orm::Set(false),
             is_active: sea_orm::Set(true),
             email: sea_orm::Set(None),

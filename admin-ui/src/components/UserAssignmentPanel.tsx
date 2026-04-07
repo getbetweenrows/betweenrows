@@ -94,7 +94,6 @@ export function UserAssignmentPanel({ datasourceId }: UserAssignmentPanelProps) 
               />
               <div className="flex-1 min-w-0">
                 <span className="text-sm font-medium text-gray-900">{user.username}</span>
-                <span className="text-xs text-gray-500 ml-2">{user.tenant}</span>
               </div>
               {user.is_admin && (
                 <span className="text-xs bg-purple-100 text-purple-700 rounded-full px-2 py-0.5 font-medium">

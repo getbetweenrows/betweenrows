@@ -64,19 +64,22 @@ curl -X POST \
 
 ### 4. Create test users
 
-Create proxy users with different tenants:
+Create proxy users and set their tenant attribute:
 
 ```bash
 cargo run -p proxy -- user create \
-  --username alice --password secret --tenant "Acme Corp"
+  --username alice --password secret
 
 cargo run -p proxy -- user create \
-  --username bob --password secret --tenant "Widgets Inc"
+  --username bob --password secret
 ```
 
-### 5. Assign users to the datasource
+### 5. Assign users to the datasource and set tenant attributes
 
-In the admin UI, go to the datasource edit page and assign Alice and Bob.
+In the admin UI:
+1. Create a `tenant` attribute definition (Attributes → Create, key: `tenant`, entity type: `user`, value type: `string`)
+2. Go to the datasource edit page and assign Alice and Bob
+3. On each user's edit page, set their `tenant` attribute: Alice → `Acme Corp`, Bob → `Widgets Inc`
 
 ### 6. Assign policies
 
@@ -85,7 +88,7 @@ Assign the demo policies to the datasource in the admin UI. For per-user assignm
 ### 7. Verify policies via psql
 
 ```bash
-# Connect as Alice (tenant: Acme Corp)
+# Connect as Alice (tenant attribute: Acme Corp)
 psql "postgresql://alice:secret@localhost:5434/betweenrows"
 
 -- Should return only Acme Corp's orders

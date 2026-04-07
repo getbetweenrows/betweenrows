@@ -42,8 +42,12 @@ async fn row_filter_tenant_isolation() {
     let ds_id = server.create_datasource("ds_t1", "open").await;
     server.discover(ds_id, &[schema]).await;
 
-    let _user_id = server
-        .create_user("alice", "AlicePass1!", "acme", ds_id)
+    let user_id = server.create_user("alice", "AlicePass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     server
@@ -101,8 +105,12 @@ async fn template_variable_injection() {
     server.discover(ds_id, &[schema]).await;
 
     // User tenant is the injection attempt literal
-    let _user_id = server
-        .create_user("injector", "Inject1Pass!", "x' OR '1'='1", ds_id)
+    let user_id = server.create_user("injector", "Inject1Pass!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "x' OR '1'='1"}))
         .await;
 
     server
@@ -156,8 +164,12 @@ async fn table_alias_bypass() {
 
     let ds_id = server.create_datasource("ds_t3", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("alice3", "AlicePass1!", "acme", ds_id)
+    let user_id = server.create_user("alice3", "AlicePass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     server
@@ -208,8 +220,12 @@ async fn cte_bypass() {
 
     let ds_id = server.create_datasource("ds_t4", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("alice4", "AlicePass1!", "acme", ds_id)
+    let user_id = server.create_user("alice4", "AlicePass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     server
@@ -262,8 +278,12 @@ async fn subquery_bypass() {
 
     let ds_id = server.create_datasource("ds_t5", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("alice5", "AlicePass1!", "acme", ds_id)
+    let user_id = server.create_user("alice5", "AlicePass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     server
@@ -316,9 +336,7 @@ async fn star_expansion_column_deny() {
 
     let ds_id = server.create_datasource("ds_t6", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("viewer6", "ViewPass1!", "default", ds_id)
-        .await;
+    let _user_id = server.create_user("viewer6", "ViewPass1!", ds_id).await;
 
     // Deny policy that blocks ssn and salary columns
     server
@@ -382,9 +400,7 @@ async fn column_mask() {
 
     let ds_id = server.create_datasource("ds_t7", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("viewer7", "ViewPass1!", "default", ds_id)
-        .await;
+    let _user_id = server.create_user("viewer7", "ViewPass1!", ds_id).await;
 
     server
         .create_column_allow("allow-all-t7", schema, "customers", &["*"], ds_id, None)
@@ -436,8 +452,12 @@ async fn join_both_tables_filtered() {
 
     let ds_id = server.create_datasource("ds_t8", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("alice8", "AlicePass1!", "acme", ds_id)
+    let user_id = server.create_user("alice8", "AlicePass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     // Row filter on both tables — single policy with multi-table targets
@@ -498,9 +518,7 @@ async fn policy_required_no_policy_table_not_found() {
 
     let ds_id = server.create_datasource("ds_t9", "policy_required").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("user9", "UserPass1!", "default", ds_id)
-        .await;
+    let _user_id = server.create_user("user9", "UserPass1!", ds_id).await;
 
     // No policies assigned — in policy_required mode, the table is not visible
     // in the user's context, so querying it should error (table not found).
@@ -537,9 +555,7 @@ async fn denied_column_error() {
 
     let ds_id = server.create_datasource("ds_t10", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("user10", "UserPass1!", "default", ds_id)
-        .await;
+    let _user_id = server.create_user("user10", "UserPass1!", ds_id).await;
 
     server
         .create_column_deny("deny-ssn-t10", schema, "employees", &["ssn"], ds_id, None)
@@ -582,8 +598,12 @@ async fn disabled_policy_not_enforced() {
 
     let ds_id = server.create_datasource("ds_t11", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("user11", "UserPass1!", "acme", ds_id)
+    let user_id = server.create_user("user11", "UserPass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     // A disabled row_filter should NOT filter rows
@@ -642,9 +662,7 @@ async fn object_access_deny_schema() {
     server
         .discover(ds_id, &[public_schema, analytics_schema])
         .await;
-    let _user_id = server
-        .create_user("user12", "UserPass1!", "default", ds_id)
-        .await;
+    let _user_id = server.create_user("user12", "UserPass1!", ds_id).await;
 
     // Deny access to analytics schema (table_deny with wildcard table)
     server
@@ -698,8 +716,12 @@ async fn two_permits_and_semantics() {
 
     let ds_id = server.create_datasource("ds_t13", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("user13", "UserPass1!", "acme", ds_id)
+    let user_id = server.create_user("user13", "UserPass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     // Policy 1: filter by org = user.tenant + column allow
@@ -765,9 +787,7 @@ async fn deny_policy_row_filter_rejected() {
 
     let ds_id = server.create_datasource("ds_c1", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("user_c1", "UserPass1!", "acme", ds_id)
-        .await;
+    let _user_id = server.create_user("user_c1", "UserPass1!", ds_id).await;
 
     // table_deny short-circuits to an access-denied error.
     server
@@ -819,9 +839,7 @@ async fn policy_required_column_access_limits_select_star() {
 
     let ds_id = server.create_datasource("ds_c3", "policy_required").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("user_c3", "UserPass1!", "default", ds_id)
-        .await;
+    let _user_id = server.create_user("user_c3", "UserPass1!", ds_id).await;
 
     // Only allow id and name — ssn and salary are not in the allow list
     server
@@ -887,9 +905,7 @@ async fn deny_overrides_allow_columns() {
 
     let ds_id = server.create_datasource("ds_c4", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("user_c4", "UserPass1!", "default", ds_id)
-        .await;
+    let _user_id = server.create_user("user_c4", "UserPass1!", ds_id).await;
 
     // Permit policy allows all columns (including ssn via wildcard)
     server
@@ -951,9 +967,7 @@ async fn object_access_deny_table() {
 
     let ds_id = server.create_datasource("ds_i1", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("user_i1", "UserPass1!", "default", ds_id)
-        .await;
+    let _user_id = server.create_user("user_i1", "UserPass1!", ds_id).await;
 
     // Deny access to the payments table specifically
     server
@@ -1006,9 +1020,7 @@ async fn deny_overrides_mask() {
 
     let ds_id = server.create_datasource("ds_i2", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("user_i2", "UserPass1!", "default", ds_id)
-        .await;
+    let _user_id = server.create_user("user_i2", "UserPass1!", ds_id).await;
 
     // Deny policy — ssn column is denied
     server
@@ -1080,9 +1092,7 @@ async fn template_variable_username() {
 
     let ds_id = server.create_datasource("ds_i3a", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("alice_u", "AlicePass1!", "default", ds_id)
-        .await;
+    let _user_id = server.create_user("alice_u", "AlicePass1!", ds_id).await;
 
     server
         .create_row_filter(
@@ -1137,9 +1147,7 @@ async fn template_variable_user_id() {
 
     // We create a placeholder user first (will be used to seed data with their UUID).
     // The UUID comes back from create_user so we can use it to seed the table.
-    let user_id = server
-        .create_user("uid_user", "UidPass1!", "default", ds_id)
-        .await;
+    let user_id = server.create_user("uid_user", "UidPass1!", ds_id).await;
     let other_id = uuid::Uuid::new_v4(); // fake UUID for another user's row
 
     server
@@ -1207,8 +1215,12 @@ async fn aggregate_with_row_filter() {
 
     let ds_id = server.create_datasource("ds_i4", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("alice_i4", "AlicePass1!", "acme", ds_id)
+    let user_id = server.create_user("alice_i4", "AlicePass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     server
@@ -1275,7 +1287,7 @@ async fn user_not_assigned_to_datasource() {
 
     // Create a user that is NOT assigned to ds_i5
     let _unassigned_id = server
-        .create_user_unassigned("unassigned_user", "UnassignedPass1!", "default")
+        .create_user_unassigned("unassigned_user", "UnassignedPass1!")
         .await;
 
     // This user was never added to ds_i5's user list
@@ -1313,8 +1325,12 @@ async fn single_policy_multiple_row_filters_same_table() {
 
     let ds_id = server.create_datasource("ds_i7", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("user_i7", "UserPass1!", "acme", ds_id)
+    let user_id = server.create_user("user_i7", "UserPass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     // Two separate row_filter policies — AND-combined across policies.
@@ -1382,12 +1398,8 @@ async fn user_specific_vs_wildcard_policy() {
     let ds_id = server.create_datasource("ds_i8", "open").await;
     server.discover(ds_id, &[schema]).await;
 
-    let alice_id = server
-        .create_user("alice_i8", "AlicePass1!", "acme", ds_id)
-        .await;
-    let _bob_id = server
-        .create_user("bob_i8", "BobPass1!", "acme", ds_id)
-        .await;
+    let alice_id = server.create_user("alice_i8", "AlicePass1!", ds_id).await;
+    let _bob_id = server.create_user("bob_i8", "BobPass1!", ds_id).await;
 
     // Wildcard policy: allow all columns (applies to all users)
     server
@@ -1452,9 +1464,7 @@ async fn column_glob_pattern_deny() {
 
     let ds_id = server.create_datasource("ds_n1", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("user_n1", "UserPass1!", "default", ds_id)
-        .await;
+    let _user_id = server.create_user("user_n1", "UserPass1!", ds_id).await;
 
     // Deny all columns matching "secret_*"
     server
@@ -1523,9 +1533,7 @@ async fn live_policy_update_without_reconnect() {
 
     let ds_id = server.create_datasource("ds_n4", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("user_n4", "UserPass1!", "default", ds_id)
-        .await;
+    let _user_id = server.create_user("user_n4", "UserPass1!", ds_id).await;
 
     // Initial policy: allow all columns so queries work
     server
@@ -1595,9 +1603,7 @@ async fn policy_required_with_allow_table_visible() {
 
     let ds_id = server.create_datasource("ds_n6", "policy_required").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("user_n6", "UserPass1!", "default", ds_id)
-        .await;
+    let _user_id = server.create_user("user_n6", "UserPass1!", ds_id).await;
 
     // Only grant access to the orders table; secrets has no permit policy
     server
@@ -1656,9 +1662,7 @@ async fn tc_join_01_join_column_collision() {
         .create_datasource("ds_join01", "policy_required")
         .await;
     server.discover(ds_id, &[schema]).await;
-    let _user = server
-        .create_user("user_join01", "UserPass1!", "default", ds_id)
-        .await;
+    let _user = server.create_user("user_join01", "UserPass1!", ds_id).await;
 
     // Allow all columns on orders, allow only name (not email) on customers
     server
@@ -1727,8 +1731,12 @@ async fn tc_zt_01_implicit_blackout() {
 
     let ds_id = server.create_datasource("ds_zt01", "policy_required").await;
     server.discover(ds_id, &[schema]).await;
-    let _user = server
-        .create_user("user_zt01", "UserPass1!", "acme", ds_id)
+    let user = server.create_user("user_zt01", "UserPass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user, json!({"tenant": "acme"}))
         .await;
 
     // row_filter only — no column_allow policy
@@ -1777,9 +1785,7 @@ async fn tc_zt_02_explicit_whitelist() {
 
     let ds_id = server.create_datasource("ds_zt02", "policy_required").await;
     server.discover(ds_id, &[schema]).await;
-    let _user = server
-        .create_user("user_zt02", "UserPass1!", "default", ds_id)
-        .await;
+    let _user = server.create_user("user_zt02", "UserPass1!", ds_id).await;
 
     server
         .create_column_allow(
@@ -1834,8 +1840,12 @@ async fn tc_zt_03_wildcard_whitelist() {
 
     let ds_id = server.create_datasource("ds_zt03", "policy_required").await;
     server.discover(ds_id, &[schema]).await;
-    let _user = server
-        .create_user("user_zt03", "UserPass1!", "acme", ds_id)
+    let user = server.create_user("user_zt03", "UserPass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user, json!({"tenant": "acme"}))
         .await;
 
     server
@@ -1903,9 +1913,7 @@ async fn tc_deny_01_deny_wins() {
         .create_datasource("ds_deny01", "policy_required")
         .await;
     server.discover(ds_id, &[schema]).await;
-    let _user = server
-        .create_user("user_deny01", "UserPass1!", "default", ds_id)
-        .await;
+    let _user = server.create_user("user_deny01", "UserPass1!", ds_id).await;
 
     // Policy A: allow id, email, name
     server
@@ -1973,9 +1981,7 @@ async fn tc_deny_02_absolute_veto() {
         .create_datasource("ds_deny02", "policy_required")
         .await;
     server.discover(ds_id, &[schema]).await;
-    let _user = server
-        .create_user("user_deny02", "UserPass1!", "default", ds_id)
-        .await;
+    let _user = server.create_user("user_deny02", "UserPass1!", ds_id).await;
 
     // Policy A: allow id
     server
@@ -2022,9 +2028,7 @@ async fn tc_glob_01_suffix_glob() {
         .create_datasource("ds_glob01", "policy_required")
         .await;
     server.discover(ds_id, &[schema]).await;
-    let _user = server
-        .create_user("user_glob01", "UserPass1!", "default", ds_id)
-        .await;
+    let _user = server.create_user("user_glob01", "UserPass1!", ds_id).await;
 
     // Allow all columns
     server
@@ -2084,9 +2088,7 @@ async fn tc_glob_03_case_sensitivity() {
         .create_datasource("ds_glob03", "policy_required")
         .await;
     server.discover(ds_id, &[schema]).await;
-    let _user = server
-        .create_user("user_glob03", "UserPass1!", "default", ds_id)
-        .await;
+    let _user = server.create_user("user_glob03", "UserPass1!", ds_id).await;
 
     // Allow all columns
     server
@@ -2152,9 +2154,7 @@ async fn tc_rf_01_neq_operator_quoted_column() {
 
     let ds_id = server.create_datasource("ds_rf01", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user = server
-        .create_user("user_rf01", "UserPass1!", "default", ds_id)
-        .await;
+    let _user = server.create_user("user_rf01", "UserPass1!", ds_id).await;
 
     // row_filter using != and a double-quoted column identifier — mirrors
     // the "state-filter" policy stored in the admin DB.
@@ -2218,7 +2218,13 @@ async fn tc_audit_01_success_audit_status() {
     let ds_id = server.create_datasource("ds_audit01", "open").await;
     server.discover(ds_id, &[schema]).await;
     let user_id = server
-        .create_user("user_audit01", "UserPass1!", "acme", ds_id)
+        .create_user("user_audit01", "UserPass1!", ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     server
@@ -2314,7 +2320,7 @@ async fn tc_audit_02_denied_audit_status() {
     let ds_id = server.create_datasource("ds_audit02", "open").await;
     server.discover(ds_id, &[schema]).await;
     let user_id = server
-        .create_user("user_audit02", "UserPass1!", "default", ds_id)
+        .create_user("user_audit02", "UserPass1!", ds_id)
         .await;
 
     // table_deny policy that blocks queries on this table
@@ -2393,7 +2399,7 @@ async fn tc_audit_03_error_audit_status() {
     let ds_id = server.create_datasource("ds_audit03", "open").await;
     server.discover(ds_id, &[schema]).await;
     let _user_id = server
-        .create_user("user_audit03", "UserPass1!", "default", ds_id)
+        .create_user("user_audit03", "UserPass1!", ds_id)
         .await;
 
     let client = server
@@ -2463,7 +2469,7 @@ async fn tc_audit_04_status_filter() {
     let ds_id = server.create_datasource("ds_audit04", "open").await;
     server.discover(ds_id, &[schema]).await;
     let user_id = server
-        .create_user("user_audit04", "UserPass1!", "default", ds_id)
+        .create_user("user_audit04", "UserPass1!", ds_id)
         .await;
 
     // table_deny policy
@@ -2565,7 +2571,7 @@ async fn tc_audit_05_write_rejected_audit_status() {
     let ds_id = server.create_datasource("ds_audit05", "open").await;
     server.discover(ds_id, &[schema]).await;
     let _user_id = server
-        .create_user("user_audit05", "UserPass1!", "default", ds_id)
+        .create_user("user_audit05", "UserPass1!", ds_id)
         .await;
 
     let client = server
@@ -2644,9 +2650,7 @@ async fn tc_join_02_multi_table_join_shared_name() {
 
     let ds_id = server.create_datasource("ds_join02", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user = server
-        .create_user("user_join02", "UserPass1!", "default", ds_id)
-        .await;
+    let _user = server.create_user("user_join02", "UserPass1!", ds_id).await;
 
     // Deny `name` on tables a and c — only b.name should survive in projection
     server
@@ -2721,7 +2725,7 @@ async fn tc_join_03a_alias_column_deny() {
     let ds_id = server.create_datasource("ds_join03a", "open").await;
     server.discover(ds_id, &[schema]).await;
     let _user = server
-        .create_user("user_join03a", "UserPass1!", "default", ds_id)
+        .create_user("user_join03a", "UserPass1!", ds_id)
         .await;
 
     // Deny email on customers
@@ -2793,7 +2797,7 @@ async fn tc_join_03b_alias_column_mask() {
     let ds_id = server.create_datasource("ds_join03b", "open").await;
     server.discover(ds_id, &[schema]).await;
     let _user = server
-        .create_user("user_join03b", "UserPass1!", "default", ds_id)
+        .create_user("user_join03b", "UserPass1!", ds_id)
         .await;
 
     // Mask email on customers
@@ -2858,8 +2862,12 @@ async fn tc_zt_04_sidebar_sync_row_filter_only() {
 
     let ds_id = server.create_datasource("ds_zt04", "policy_required").await;
     server.discover(ds_id, &[schema]).await;
-    let _user = server
-        .create_user("user_zt04", "UserPass1!", "acme", ds_id)
+    let user = server.create_user("user_zt04", "UserPass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user, json!({"tenant": "acme"}))
         .await;
 
     // row_filter only — NO column_allow. In policy_required mode, this should
@@ -2950,7 +2958,7 @@ async fn tc_plan_01a_cte_column_deny() {
     let ds_id = server.create_datasource("ds_plan01a", "open").await;
     server.discover(ds_id, &[schema]).await;
     let _user = server
-        .create_user("user_plan01a", "UserPass1!", "default", ds_id)
+        .create_user("user_plan01a", "UserPass1!", ds_id)
         .await;
 
     // Deny ssn
@@ -3018,7 +3026,7 @@ async fn tc_plan_01b_cte_column_mask() {
     let ds_id = server.create_datasource("ds_plan01b", "open").await;
     server.discover(ds_id, &[schema]).await;
     let _user = server
-        .create_user("user_plan01b", "UserPass1!", "default", ds_id)
+        .create_user("user_plan01b", "UserPass1!", ds_id)
         .await;
 
     // Mask ssn
@@ -3076,7 +3084,7 @@ async fn tc_plan_01c_cte_column_allow() {
         .await;
     server.discover(ds_id, &[schema]).await;
     let _user = server
-        .create_user("user_plan01c", "UserPass1!", "default", ds_id)
+        .create_user("user_plan01c", "UserPass1!", ds_id)
         .await;
 
     // Allow only id and name (NOT ssn)
@@ -3129,7 +3137,7 @@ async fn tc_plan_02a_subquery_column_deny() {
     let ds_id = server.create_datasource("ds_plan02a", "open").await;
     server.discover(ds_id, &[schema]).await;
     let _user = server
-        .create_user("user_plan02a", "UserPass1!", "default", ds_id)
+        .create_user("user_plan02a", "UserPass1!", ds_id)
         .await;
 
     // Deny ssn
@@ -3194,7 +3202,7 @@ async fn tc_plan_02b_subquery_column_mask() {
     let ds_id = server.create_datasource("ds_plan02b", "open").await;
     server.discover(ds_id, &[schema]).await;
     let _user = server
-        .create_user("user_plan02b", "UserPass1!", "default", ds_id)
+        .create_user("user_plan02b", "UserPass1!", ds_id)
         .await;
 
     // Mask ssn
@@ -3252,7 +3260,7 @@ async fn tc_plan_02c_subquery_column_allow() {
         .await;
     server.discover(ds_id, &[schema]).await;
     let _user = server
-        .create_user("user_plan02c", "UserPass1!", "default", ds_id)
+        .create_user("user_plan02c", "UserPass1!", ds_id)
         .await;
 
     // Allow only id and name (NOT ssn)
@@ -3307,9 +3315,7 @@ async fn row_filter_and_column_mask_same_column() {
 
     let ds_id = server.create_datasource("ds_fm01", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("user_fm01", "UserPass1!", "acme", ds_id)
-        .await;
+    let _user_id = server.create_user("user_fm01", "UserPass1!", ds_id).await;
 
     // Row filter: exclude the row where ssn = '000-00-0000'
     server
@@ -3392,7 +3398,7 @@ async fn rbac_01_direct_user_access_connect_succeeds() {
 
     // create_user assigns direct access
     let _user_id = server
-        .create_user("u_rbac01", support::TEST_PASS, "default", ds_id)
+        .create_user("u_rbac01", support::TEST_PASS, ds_id)
         .await;
 
     server
@@ -3431,7 +3437,7 @@ async fn rbac_02_role_based_access_connect_succeeds() {
 
     // Create user without direct datasource access
     let user_id = server
-        .create_user_no_direct_access("u_rbac02", support::TEST_PASS, "default")
+        .create_user_no_direct_access("u_rbac02", support::TEST_PASS)
         .await;
 
     // Create role and give it datasource access
@@ -3474,7 +3480,7 @@ async fn rbac_03_inherited_role_access_connect_succeeds() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user_no_direct_access("u_rbac03", support::TEST_PASS, "default")
+        .create_user_no_direct_access("u_rbac03", support::TEST_PASS)
         .await;
 
     // Parent role has datasource access, child role has user
@@ -3522,7 +3528,7 @@ async fn rbac_04_no_access_connection_rejected() {
 
     // User with no direct or role-based access
     let _user_id = server
-        .create_user_no_direct_access("u_rbac04", support::TEST_PASS, "default")
+        .create_user_no_direct_access("u_rbac04", support::TEST_PASS)
         .await;
 
     let result = server
@@ -3554,7 +3560,7 @@ async fn rbac_05_removed_from_role_loses_access() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user_no_direct_access("u_rbac05", support::TEST_PASS, "default")
+        .create_user_no_direct_access("u_rbac05", support::TEST_PASS)
         .await;
 
     let role_id = server.create_role("analysts-rbac05").await;
@@ -3616,7 +3622,7 @@ async fn rbac_06_role_access_revoked_connection_rejected() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user_no_direct_access("u_rbac06", support::TEST_PASS, "default")
+        .create_user_no_direct_access("u_rbac06", support::TEST_PASS)
         .await;
 
     let role_id = server.create_role("analysts-rbac06").await;
@@ -3682,10 +3688,19 @@ async fn rbac_07_policy_assigned_to_role_applies_to_members() {
     server.discover(ds_id, &[schema]).await;
 
     let user1_id = server
-        .create_user("u1_rbac07", support::TEST_PASS, "acme", ds_id)
+        .create_user("u1_rbac07", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user1_id, json!({"tenant": "acme"}))
         .await;
     let user2_id = server
-        .create_user("u2_rbac07", support::TEST_PASS, "acme", ds_id)
+        .create_user("u2_rbac07", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .set_user_attributes(user2_id, json!({"tenant": "acme"}))
         .await;
 
     let role_id = server.create_role("analysts-rbac07").await;
@@ -3750,7 +3765,13 @@ async fn rbac_08_inherited_policy_applies_to_child_members() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user("u_rbac08", support::TEST_PASS, "acme", ds_id)
+        .create_user("u_rbac08", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     let parent_role = server.create_role("parent-rbac08").await;
@@ -3811,10 +3832,19 @@ async fn rbac_09_user_scoped_assignment_only_affects_target() {
     server.discover(ds_id, &[schema]).await;
 
     let user_a = server
-        .create_user("ua_rbac09", support::TEST_PASS, "acme", ds_id)
+        .create_user("ua_rbac09", support::TEST_PASS, ds_id)
         .await;
-    let _user_b = server
-        .create_user("ub_rbac09", support::TEST_PASS, "globex", ds_id)
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_a, json!({"tenant": "acme"}))
+        .await;
+    let user_b = server
+        .create_user("ub_rbac09", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .set_user_attributes(user_b, json!({"tenant": "globex"}))
         .await;
 
     // Assign row filter only to user_a
@@ -3878,10 +3908,19 @@ async fn rbac_10_role_scoped_assignment_only_affects_members() {
     server.discover(ds_id, &[schema]).await;
 
     let user_member = server
-        .create_user("umem_rbac10", support::TEST_PASS, "acme", ds_id)
+        .create_user("umem_rbac10", support::TEST_PASS, ds_id)
         .await;
-    let _user_nonmember = server
-        .create_user("unon_rbac10", support::TEST_PASS, "globex", ds_id)
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_member, json!({"tenant": "acme"}))
+        .await;
+    let user_nonmember = server
+        .create_user("unon_rbac10", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .set_user_attributes(user_nonmember, json!({"tenant": "globex"}))
         .await;
 
     let role_id = server.create_role("analysts-rbac10").await;
@@ -3952,11 +3991,20 @@ async fn rbac_11_all_scoped_assignment_applies_to_everyone() {
     let ds_id = server.create_datasource("ds_rbac11", "open").await;
     server.discover(ds_id, &[schema]).await;
 
-    let _user1 = server
-        .create_user("u1_rbac11", support::TEST_PASS, "acme", ds_id)
+    let user1 = server
+        .create_user("u1_rbac11", support::TEST_PASS, ds_id)
         .await;
-    let _user2 = server
-        .create_user("u2_rbac11", support::TEST_PASS, "globex", ds_id)
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user1, json!({"tenant": "acme"}))
+        .await;
+    let user2 = server
+        .create_user("u2_rbac11", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .set_user_attributes(user2, json!({"tenant": "globex"}))
         .await;
 
     let policy_id = server
@@ -4021,7 +4069,13 @@ async fn rbac_12_multiple_filters_and_combined() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user("u_rbac12", support::TEST_PASS, "acme", ds_id)
+        .create_user("u_rbac12", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     let role_id = server.create_role("analysts-rbac12").await;
@@ -4095,7 +4149,13 @@ async fn rbac_13_same_policy_multiple_roles_dedup() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user("u_rbac13", support::TEST_PASS, "acme", ds_id)
+        .create_user("u_rbac13", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     let role_a = server.create_role("role-a-rbac13").await;
@@ -4162,7 +4222,7 @@ async fn rbac_14_deny_wins_over_allow_from_different_roles() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user("u_rbac14", support::TEST_PASS, "default", ds_id)
+        .create_user("u_rbac14", support::TEST_PASS, ds_id)
         .await;
 
     let role_allow = server.create_role("allow-role-rbac14").await;
@@ -4315,7 +4375,13 @@ async fn rbac_18_diamond_no_duplicate_policy() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user("u_rbac18", support::TEST_PASS, "acme", ds_id)
+        .create_user("u_rbac18", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     // Diamond: user → A → C, user → B → C
@@ -4382,7 +4448,7 @@ async fn rbac_19_role_delete_cascades() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user_no_direct_access("u_rbac19", support::TEST_PASS, "default")
+        .create_user_no_direct_access("u_rbac19", support::TEST_PASS)
         .await;
 
     let role_id = server.create_role("analysts-rbac19").await;
@@ -4479,7 +4545,7 @@ async fn rbac_21_column_deny_via_role_hides_columns() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user("u_rbac21", support::TEST_PASS, "default", ds_id)
+        .create_user("u_rbac21", support::TEST_PASS, ds_id)
         .await;
 
     let role_id = server.create_role("restricted-rbac21").await;
@@ -4541,7 +4607,7 @@ async fn rbac_22_column_allow_via_role_restricts() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user("u_rbac22", support::TEST_PASS, "default", ds_id)
+        .create_user("u_rbac22", support::TEST_PASS, ds_id)
         .await;
 
     let role_id = server.create_role("restricted-rbac22").await;
@@ -4604,7 +4670,7 @@ async fn rbac_23_table_deny_via_role_hides_tables() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user("u_rbac23", support::TEST_PASS, "default", ds_id)
+        .create_user("u_rbac23", support::TEST_PASS, ds_id)
         .await;
 
     let role_id = server.create_role("restricted-rbac23").await;
@@ -4665,7 +4731,13 @@ async fn rbac_24_row_filter_via_role_template_vars() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user("u_rbac24", support::TEST_PASS, "acme", ds_id)
+        .create_user("u_rbac24", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     let role_id = server.create_role("tenants-rbac24").await;
@@ -4722,7 +4794,7 @@ async fn rbac_25_column_mask_via_role() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user("u_rbac25", support::TEST_PASS, "default", ds_id)
+        .create_user("u_rbac25", support::TEST_PASS, ds_id)
         .await;
 
     let role_id = server.create_role("masked-rbac25").await;
@@ -4906,7 +4978,13 @@ async fn rbac_42_deactivate_role_loses_policies() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user("u_rbac42", support::TEST_PASS, "acme", ds_id)
+        .create_user("u_rbac42", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     let role_id = server.create_role("analysts-rbac42").await;
@@ -4987,7 +5065,13 @@ async fn rbac_43_deactivate_middle_role_breaks_chain() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user("u_rbac43", support::TEST_PASS, "acme", ds_id)
+        .create_user("u_rbac43", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     // Chain: child → middle → grandparent
@@ -5074,7 +5158,13 @@ async fn rbac_44_reactivate_role_regains_policies() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user("u_rbac44", support::TEST_PASS, "acme", ds_id)
+        .create_user("u_rbac44", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     let role_id = server.create_role("analysts-rbac44").await;
@@ -5163,7 +5253,7 @@ async fn rbac_45_deactivated_role_no_datasource_access() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user_no_direct_access("u_rbac45", support::TEST_PASS, "default")
+        .create_user_no_direct_access("u_rbac45", support::TEST_PASS)
         .await;
 
     let role_id = server.create_role("analysts-rbac45").await;
@@ -5229,7 +5319,7 @@ async fn rbac_70_both_user_and_role_rejected() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user("u_rbac70", support::TEST_PASS, "default", ds_id)
+        .create_user("u_rbac70", support::TEST_PASS, ds_id)
         .await;
     let role_id = server.create_role("role-rbac70").await;
 
@@ -5278,7 +5368,7 @@ async fn rbac_71_scope_user_with_role_id_rejected() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user("u_rbac71", support::TEST_PASS, "default", ds_id)
+        .create_user("u_rbac71", support::TEST_PASS, ds_id)
         .await;
     let role_id = server.create_role("role-rbac71").await;
 
@@ -5326,7 +5416,7 @@ async fn rbac_72_scope_role_with_user_id_rejected() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user("u_rbac72", support::TEST_PASS, "default", ds_id)
+        .create_user("u_rbac72", support::TEST_PASS, ds_id)
         .await;
     let role_id = server.create_role("role-rbac72").await;
 
@@ -5374,7 +5464,7 @@ async fn rbac_73_scope_all_with_ids_rejected() {
     server.discover(ds_id, &[schema]).await;
 
     let user_id = server
-        .create_user("u_rbac73", support::TEST_PASS, "default", ds_id)
+        .create_user("u_rbac73", support::TEST_PASS, ds_id)
         .await;
 
     let policy_id = server
@@ -5559,8 +5649,14 @@ async fn df_fire_true_row_filter_applied() {
 
     let ds_id = server.create_datasource("ds_df_t1", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("alice_df1", support::TEST_PASS, "acme", ds_id)
+    let user_id = server
+        .create_user("alice_df1", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     let decision_fn_id = create_decision_fn(
@@ -5625,8 +5721,14 @@ async fn df_fire_false_row_filter_skipped() {
 
     let ds_id = server.create_datasource("ds_df_t2", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("alice_df2", support::TEST_PASS, "acme", ds_id)
+    let user_id = server
+        .create_user("alice_df2", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     let decision_fn_id = create_decision_fn(
@@ -5694,8 +5796,14 @@ async fn df_on_error_deny_fires() {
 
     let ds_id = server.create_datasource("ds_df_t3", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("alice_df3", support::TEST_PASS, "acme", ds_id)
+    let user_id = server
+        .create_user("alice_df3", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     let decision_fn_id = create_decision_fn(
@@ -5764,8 +5872,14 @@ async fn df_on_error_skip_does_not_fire() {
 
     let ds_id = server.create_datasource("ds_df_t4", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("alice_df4", support::TEST_PASS, "acme", ds_id)
+    let user_id = server
+        .create_user("alice_df4", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     let decision_fn_id = create_decision_fn(
@@ -5833,8 +5947,14 @@ async fn df_disabled_always_fires() {
 
     let ds_id = server.create_datasource("ds_df_t5", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("alice_df5", support::TEST_PASS, "acme", ds_id)
+    let user_id = server
+        .create_user("alice_df5", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     // Create a DF that returns fire:false ...
@@ -5914,7 +6034,7 @@ async fn df_table_deny_conditional() {
     let ds_id = server.create_datasource("ds_df_t6", "open").await;
     server.discover(ds_id, &[schema]).await;
     let _user_id = server
-        .create_user("alice_df6", support::TEST_PASS, "acme", ds_id)
+        .create_user("alice_df6", support::TEST_PASS, ds_id)
         .await;
 
     let decision_fn_id = create_decision_fn(
@@ -5982,8 +6102,14 @@ async fn df_delete_blocked_by_policy_reference() {
 
     let ds_id = server.create_datasource("ds_df_t7", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("alice_df7", support::TEST_PASS, "acme", ds_id)
+    let user_id = server
+        .create_user("alice_df7", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     let df_id = create_decision_fn(
@@ -6065,8 +6191,14 @@ async fn df_policy_without_decision_fn_fires_normally() {
 
     let ds_id = server.create_datasource("ds_df_t8", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("alice_df8", support::TEST_PASS, "acme", ds_id)
+    let user_id = server
+        .create_user("alice_df8", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     // Create a row_filter policy WITHOUT decision_function_id
@@ -6142,8 +6274,14 @@ async fn df_update_takes_effect_on_next_query() {
 
     let ds_id = server.create_datasource("ds_df_t9", "open").await;
     server.discover(ds_id, &[schema]).await;
-    let _user_id = server
-        .create_user("alice_df9", support::TEST_PASS, "acme", ds_id)
+    let user_id = server
+        .create_user("alice_df9", support::TEST_PASS, ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
         .await;
 
     // Create DF that fires (filter applied)
@@ -6300,7 +6438,7 @@ async fn df_column_deny_visibility_fire_false() {
     let ds_id = server.create_datasource("ds_df_vis1", "open").await;
     server.discover(ds_id, &[schema]).await;
     let _user_id = server
-        .create_user("alice_vis1", support::TEST_PASS, "acme", ds_id)
+        .create_user("alice_vis1", support::TEST_PASS, ds_id)
         .await;
 
     // Decision fn that returns fire:false → column_deny should NOT apply
@@ -6367,7 +6505,7 @@ async fn df_column_deny_visibility_fire_true() {
     let ds_id = server.create_datasource("ds_df_vis2", "open").await;
     server.discover(ds_id, &[schema]).await;
     let _user_id = server
-        .create_user("alice_vis2", support::TEST_PASS, "acme", ds_id)
+        .create_user("alice_vis2", support::TEST_PASS, ds_id)
         .await;
 
     // Decision fn that returns fire:true → column_deny SHOULD apply
@@ -6436,7 +6574,7 @@ async fn df_column_deny_query_ctx_skipped_at_visibility() {
     let ds_id = server.create_datasource("ds_df_vis3", "open").await;
     server.discover(ds_id, &[schema]).await;
     let _user_id = server
-        .create_user("alice_vis3", support::TEST_PASS, "acme", ds_id)
+        .create_user("alice_vis3", support::TEST_PASS, ds_id)
         .await;
 
     // Decision fn with evaluate_context="query" and fire:false
@@ -6516,7 +6654,7 @@ async fn df_column_deny_query_ctx_username_check_deferred() {
     let ds_id = server.create_datasource("ds_df_vis_prod1", "open").await;
     server.discover(ds_id, &[schema]).await;
     let _user_id = server
-        .create_user("regular_user", support::TEST_PASS, "acme", ds_id)
+        .create_user("regular_user", support::TEST_PASS, ds_id)
         .await;
 
     // Exact JS from production — evaluate_context="query", fires only for admin
@@ -6590,10 +6728,10 @@ async fn df_column_deny_session_ctx_username_check_conditional() {
     let ds_id = server.create_datasource("ds_df_vis_prod2", "open").await;
     server.discover(ds_id, &[schema]).await;
     let _regular_id = server
-        .create_user("regular_user2", support::TEST_PASS, "acme", ds_id)
+        .create_user("regular_user2", support::TEST_PASS, ds_id)
         .await;
     let _admin_id = server
-        .create_user("admin_user2", support::TEST_PASS, "acme", ds_id)
+        .create_user("admin_user2", support::TEST_PASS, ds_id)
         .await;
 
     // Same JS but with evaluate_context="session" — the correct setting
@@ -6700,9 +6838,7 @@ async fn abac_row_filter_string_attribute() {
         .await;
 
     // Create user and set region attribute
-    let user_id = server
-        .create_user("abac_alice", "AlicePass1!", "acme", ds_id)
-        .await;
+    let user_id = server.create_user("abac_alice", "AlicePass1!", ds_id).await;
     server
         .set_user_attributes(user_id, serde_json::json!({"region": "us-east"}))
         .await;
@@ -6769,9 +6905,7 @@ async fn abac_row_filter_integer_attribute() {
         .await;
 
     // Create user with clearance=3
-    let user_id = server
-        .create_user("abac_bob", "BobPass123!", "acme", ds_id)
-        .await;
+    let user_id = server.create_user("abac_bob", "BobPass123!", ds_id).await;
     server
         .set_user_attributes(user_id, serde_json::json!({"clearance": "3"}))
         .await;
@@ -6835,9 +6969,7 @@ async fn abac_column_mask_with_attribute() {
         .create_attribute_definition("mask_label", "user", "string", None)
         .await;
 
-    let user_id = server
-        .create_user("abac_carol", "CarolPass1!", "acme", ds_id)
-        .await;
+    let user_id = server.create_user("abac_carol", "CarolPass1!", ds_id).await;
     server
         .set_user_attributes(user_id, serde_json::json!({"mask_label": "REDACTED"}))
         .await;
@@ -6906,9 +7038,7 @@ async fn abac_column_mask_case_when() {
         .await;
 
     // User with low access level
-    let user_id = server
-        .create_user("abac_dan", "DanPass123!", "acme", ds_id)
-        .await;
+    let user_id = server.create_user("abac_dan", "DanPass123!", ds_id).await;
     server
         .set_user_attributes(user_id, serde_json::json!({"access_level": "1"}))
         .await;
@@ -6951,29 +7081,28 @@ async fn abac_column_mask_case_when() {
     );
 }
 
-/// Security: built-in field {user.tenant} cannot be overridden by an attribute
+/// Security: built-in fields (username, id) cannot be overridden by attributes,
+/// but tenant is now a regular custom attribute (no longer a built-in column).
 #[tokio::test]
 async fn abac_builtin_field_override_security() {
     let _pg = require_postgres!();
     let server = support::ProxyTestServer::start().await;
-    let schema = "abac_override";
 
-    server
-        .seed_upstream(&format!(
-            "CREATE SCHEMA IF NOT EXISTS {schema};
-             DROP TABLE IF EXISTS {schema}.data;
-             CREATE TABLE {schema}.data (id INT, tenant TEXT);
-             INSERT INTO {schema}.data VALUES
-               (1, 'acme'),
-               (2, 'evil'),
-               (3, 'acme');"
-        ))
+    // "username" is a reserved built-in — should be rejected
+    let resp = server
+        .admin
+        .post("/api/v1/attribute-definitions")
+        .authorization_bearer(&server.admin_token)
+        .json(&serde_json::json!({
+            "key": "username",
+            "entity_type": "user",
+            "display_name": "Username Override",
+            "value_type": "string",
+        }))
         .await;
+    resp.assert_status(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
 
-    let ds_id = server.create_datasource("ds_abac_sec", "open").await;
-    server.discover(ds_id, &[schema]).await;
-
-    // Try to define "tenant" as a user attribute — should be rejected
+    // "tenant" is no longer a built-in — should succeed as a custom attribute
     let resp = server
         .admin
         .post("/api/v1/attribute-definitions")
@@ -6981,15 +7110,11 @@ async fn abac_builtin_field_override_security() {
         .json(&serde_json::json!({
             "key": "tenant",
             "entity_type": "user",
-            "display_name": "Tenant Override",
+            "display_name": "Tenant",
             "value_type": "string",
         }))
         .await;
-    resp.assert_status(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
-
-    // Even if somehow an attribute named "tenant" existed, {user.tenant}
-    // should resolve to the built-in tenant, not the attribute.
-    // The API validation already blocks this, so this test confirms the API guard.
+    resp.assert_status(axum::http::StatusCode::CREATED);
 }
 
 /// Attribute definition CRUD and validation
@@ -7077,9 +7202,7 @@ async fn abac_attribute_definition_force_delete() {
         .create_attribute_definition("team", "user", "string", None)
         .await;
 
-    let user_id = server
-        .create_user("abac_dan", "DanPass123!", "acme", ds_id)
-        .await;
+    let user_id = server.create_user("abac_dan", "DanPass123!", ds_id).await;
     server
         .set_user_attributes(user_id, serde_json::json!({"team": "alpha"}))
         .await;
@@ -7155,9 +7278,7 @@ async fn abac_row_filter_list_attribute() {
         .await;
 
     // Create user with departments = ["engineering", "security"]
-    let user_id = server
-        .create_user("list_alice", "AlicePass1!", "acme", ds_id)
-        .await;
+    let user_id = server.create_user("list_alice", "AlicePass1!", ds_id).await;
     server
         .set_user_attributes(
             user_id,
@@ -7225,9 +7346,7 @@ async fn abac_row_filter_list_attribute_empty() {
         .create_attribute_definition("categories", "user", "list", None)
         .await;
 
-    let user_id = server
-        .create_user("list_bob", "BobPass1!", "acme", ds_id)
-        .await;
+    let user_id = server.create_user("list_bob", "BobPass1!", ds_id).await;
     // Set empty list
     server
         .set_user_attributes(user_id, serde_json::json!({"categories": []}))
@@ -7282,9 +7401,7 @@ async fn abac_row_filter_list_attribute_single() {
         .create_attribute_definition("teams", "user", "list", None)
         .await;
 
-    let user_id = server
-        .create_user("list_carol", "CarolPass1!", "acme", ds_id)
-        .await;
+    let user_id = server.create_user("list_carol", "CarolPass1!", ds_id).await;
     server
         .set_user_attributes(user_id, serde_json::json!({"teams": ["alpha"]}))
         .await;
@@ -7332,9 +7449,7 @@ async fn abac_list_attribute_validation() {
         .await;
 
     let ds_id = server.create_datasource("ds_abac_list_v", "open").await;
-    let user_id = server
-        .create_user("list_dave", "DavePass1!", "acme", ds_id)
-        .await;
+    let user_id = server.create_user("list_dave", "DavePass1!", ds_id).await;
 
     // Setting a string value for a list attribute should fail
     let resp = server
@@ -7385,9 +7500,7 @@ async fn abac_list_attribute_allowed_values() {
         .await;
 
     let ds_id = server.create_datasource("ds_abac_list_a", "open").await;
-    let user_id = server
-        .create_user("list_eve", "EvePass1!", "acme", ds_id)
-        .await;
+    let user_id = server.create_user("list_eve", "EvePass1!", ds_id).await;
 
     // Setting a list with an invalid element should fail
     let resp = server

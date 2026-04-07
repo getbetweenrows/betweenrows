@@ -40,8 +40,8 @@ describe('UsersListPage', () => {
   })
 
   it('renders user rows', async () => {
-    const alice = makeUser({ username: 'alice', tenant: 'acme', is_admin: false })
-    const bob = makeUser({ username: 'bob', tenant: 'acme', is_admin: true })
+    const alice = makeUser({ username: 'alice', is_admin: false })
+    const bob = makeUser({ username: 'bob', is_admin: true })
     mockListUsers.mockResolvedValue(makePaginatedUsers([alice, bob]))
     renderWithProviders(<UsersListPage />, { authenticated: true })
     await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument())

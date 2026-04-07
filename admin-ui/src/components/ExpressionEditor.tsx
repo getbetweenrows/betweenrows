@@ -17,7 +17,6 @@ interface ExpressionEditorProps {
 }
 
 const BUILTIN_VARS = [
-  { label: '{user.tenant}', detail: 'string', apply: '{user.tenant}' },
   { label: '{user.username}', detail: 'string', apply: '{user.username}' },
   { label: '{user.id}', detail: 'string', apply: '{user.id}' },
 ]

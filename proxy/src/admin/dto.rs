@@ -48,7 +48,6 @@ pub struct LoginRequest {
 pub struct CreateUserRequest {
     pub username: String,
     pub password: String,
-    pub tenant: String,
     #[serde(default)]
     pub is_admin: bool,
     pub email: Option<String>,
@@ -57,7 +56,6 @@ pub struct CreateUserRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateUserRequest {
-    pub tenant: Option<String>,
     pub is_admin: Option<bool>,
     pub is_active: Option<bool>,
     pub email: Option<String>,
@@ -92,7 +90,6 @@ pub struct LoginResponse {
 pub struct UserResponse {
     pub id: Uuid,
     pub username: String,
-    pub tenant: String,
     pub is_admin: bool,
     pub is_active: bool,
     pub email: Option<String>,
@@ -109,7 +106,6 @@ impl From<proxy_user::Model> for UserResponse {
         Self {
             id: m.id,
             username: m.username,
-            tenant: m.tenant,
             is_admin: m.is_admin,
             is_active: m.is_active,
             email: m.email,
@@ -1007,7 +1003,8 @@ mod tests {
     #[test]
     fn reserved_key_for_user() {
         // Built-in context fields
-        assert!(validate_attribute_definition("tenant", "user", "string", None, None).is_err());
+        // "tenant" is no longer a reserved key — it was removed as a built-in column
+        assert!(validate_attribute_definition("tenant", "user", "string", None, None).is_ok());
         assert!(validate_attribute_definition("username", "user", "string", None, None).is_err());
         assert!(validate_attribute_definition("id", "user", "string", None, None).is_err());
         assert!(validate_attribute_definition("user_id", "user", "string", None, None).is_err());
@@ -1021,7 +1018,7 @@ mod tests {
 
     #[test]
     fn reserved_key_ok_for_non_user() {
-        // "tenant" is only reserved for entity_type="user"
+        // "tenant" is not reserved for any entity_type
         assert!(validate_attribute_definition("tenant", "table", "string", None, None).is_ok());
     }
 

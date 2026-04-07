@@ -18,7 +18,6 @@ use uuid::Uuid;
 pub struct SessionInfo {
     pub user_id: Uuid,
     pub username: String,
-    pub tenant: String,
     pub roles: Vec<String>,
     pub datasource_name: String,
     pub access_mode: String,
@@ -40,7 +39,7 @@ pub struct QueryMetadata {
 
 /// Build the `user` JSON object with attributes flattened as first-class fields.
 ///
-/// Built-in fields (`id`, `username`, `tenant`, `roles`) always win on collision
+/// Built-in fields (`id`, `username`, `roles`) always win on collision
 /// (defense-in-depth alongside API reserved-name validation).
 ///
 /// IMPORTANT: If you add or rename fields here, also update:
@@ -56,7 +55,6 @@ fn build_user_object(session: &SessionInfo) -> serde_json::Value {
     let mut user = json!({
         "id": session.user_id.to_string(),
         "username": session.username,
-        "tenant": session.tenant,
         "roles": session.roles,
     });
     let map = user.as_object_mut().unwrap();
@@ -122,7 +120,6 @@ mod tests {
         SessionInfo {
             user_id: Uuid::nil(),
             username: "alice".to_string(),
-            tenant: "acme".to_string(),
             roles: vec!["analyst".to_string()],
             datasource_name: "prod".to_string(),
             access_mode: "policy_required".to_string(),
@@ -165,7 +162,6 @@ mod tests {
         // Built-in fields present
         assert!(user.contains_key("id"));
         assert!(user.contains_key("username"));
-        assert!(user.contains_key("tenant"));
         assert!(user.contains_key("roles"));
     }
 
@@ -179,7 +175,6 @@ mod tests {
         let session = SessionInfo {
             user_id: Uuid::nil(),
             username: "alice".to_string(),
-            tenant: "acme".to_string(),
             roles: vec![],
             datasource_name: "prod".to_string(),
             access_mode: "open".to_string(),
@@ -199,7 +194,6 @@ mod tests {
         let session = SessionInfo {
             user_id: Uuid::nil(),
             username: "bob".to_string(),
-            tenant: "acme".to_string(),
             roles: vec![],
             datasource_name: "prod".to_string(),
             access_mode: "open".to_string(),
@@ -216,13 +210,11 @@ mod tests {
     fn builtin_fields_win_over_attributes() {
         let mut attrs = HashMap::new();
         attrs.insert("username".to_string(), serde_json::json!("attacker"));
-        attrs.insert("tenant".to_string(), serde_json::json!("evil"));
         attrs.insert("roles".to_string(), serde_json::json!("admin"));
 
         let session = SessionInfo {
             user_id: Uuid::nil(),
             username: "alice".to_string(),
-            tenant: "acme".to_string(),
             roles: vec!["analyst".to_string()],
             datasource_name: "prod".to_string(),
             access_mode: "open".to_string(),
@@ -231,7 +223,24 @@ mod tests {
         let ctx = build_session_context(&session);
         let user = &ctx["session"]["user"];
         assert_eq!(user["username"].as_str().unwrap(), "alice");
-        assert_eq!(user["tenant"].as_str().unwrap(), "acme");
         assert!(user["roles"].is_array());
+    }
+
+    #[test]
+    fn tenant_attribute_appears_as_first_class_field() {
+        let mut attrs = HashMap::new();
+        attrs.insert("tenant".to_string(), serde_json::json!("acme"));
+
+        let session = SessionInfo {
+            user_id: Uuid::nil(),
+            username: "alice".to_string(),
+            roles: vec![],
+            datasource_name: "prod".to_string(),
+            access_mode: "open".to_string(),
+            attributes: attrs,
+        };
+        let ctx = build_session_context(&session);
+        let user = &ctx["session"]["user"];
+        assert_eq!(user["tenant"].as_str().unwrap(), "acme");
     }
 }

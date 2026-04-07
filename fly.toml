@@ -1,4 +1,4 @@
-# fly.toml — QueryProxy on Fly.io
+# fly.toml — BetweenRows on Fly.io
 app = 'betweenrows'
 primary_region = 'ord'
 

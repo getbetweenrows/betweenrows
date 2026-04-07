@@ -1,6 +1,6 @@
-//! QueryProxy - PostgreSQL wire protocol proxy with query governance
+//! BetweenRows — data access governance
 //!
-//! This library provides the core components for the QueryProxy server.
+//! This library provides the core components for the BetweenRows proxy server.
 
 pub mod admin;
 pub mod auth;

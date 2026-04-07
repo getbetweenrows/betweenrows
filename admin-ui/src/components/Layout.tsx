@@ -15,7 +15,7 @@ export function Layout() {
       {/* Sidebar */}
       <aside className="w-56 bg-gray-900 text-gray-100 flex flex-col">
         <div className="px-4 py-5 border-b border-gray-700">
-          <span className="font-bold text-white text-lg">QueryProxy</span>
+          <span className="font-bold text-white text-lg">BetweenRows</span>
           <p className="text-xs text-gray-400 mt-0.5">Admin Console</p>
         </div>
 

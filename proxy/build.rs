@@ -59,6 +59,7 @@ fn download_javy(javy_bin: &PathBuf) {
     let (os, arch) = (env::consts::OS, env::consts::ARCH);
     let asset_name = match (os, arch) {
         ("linux", "x86_64") => format!("javy-x86_64-linux-v{JAVY_VERSION}.gz"),
+        ("linux", "aarch64") => format!("javy-arm-linux-v{JAVY_VERSION}.gz"),
         ("macos", "aarch64") => format!("javy-arm-macos-v{JAVY_VERSION}.gz"),
         ("macos", "x86_64") => format!("javy-x86_64-macos-v{JAVY_VERSION}.gz"),
         _ => panic!("Unsupported platform: {os}/{arch}"),

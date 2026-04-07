@@ -6,7 +6,7 @@
 - [x] **User Attributes (ABAC)** — Schema-first attribute system: `attribute_definition` table defines allowed keys with types (`string`/`integer`/`boolean`), entity type scoping, and optional enum constraints. User attribute values stored as JSON column on `proxy_user`. Available as typed `{user.*}` template variables in filter/mask expressions. Available in decision function context as first-class fields on `ctx.session.user` (e.g., `ctx.session.user.region`) with typed JSON values. `time.now` (RFC 3339 evaluation timestamp) added to decision context for time-windowed access. ABAC and TBAC (resource tags) unified as "attributes" — same concept applied to different entity types. Resource-level attributes planned for future. No IDP sync for MVP. **Tech debt**: reserved attribute key list is derived from ORM columns + manual extras; consider unifying ORM/DTO/context layers into a formal user identity schema if aliasing diverges.
 - [x] **Conditional Policies** — ~~Dropped as a separate feature.~~ Covered by existing mechanisms: `CASE WHEN {user.*}` expressions handle conditional logic in `row_filter` and `column_mask`; decision functions handle conditional gating for all five policy types (including `column_deny`, `table_deny`, `column_allow` which have no expression field). Adding a dedicated `condition` field would duplicate what decision functions already do with no new capabilities — see "ABAC expression patterns" in `docs/permission-system.md` for examples.
 - [ ] **Shadow Mode** — Per-policy dry-run state. Instead of blocking/masking, log what would have happened. Removes "fear of breaking prod" adoption blocker. Each policy gets an `action_status` field: `enforce` (default) or `shadow`.
-- [ ] **YAML Import/Export** — Export all policies for a datasource as YAML. Import YAML to create/update policies. Enables version-controlled policy-as-code workflows and easy promotion between environments (dev → staging → prod).
+- [ ] **Governance Workflows** — Per-datasource `governance_workflow` setting: none (default, today's behavior), draft (stage changes in sandboxes, deploy to go live), or code (YAML in repo, CI/CD deploys). Includes sandboxes, unified apply endpoint, and version history. See [Governance Workflows](#governance-workflows) below.
 
 ## Policy System
 
@@ -16,13 +16,7 @@ All TC-* scenarios are now covered by integration tests in `proxy/tests/policy_e
 
 ### Configurable Policies
 
-- Configure policies, RLS, per user access to schema, table, columns, data masking
-- Assign by user, group, or role (decision needed)
-- Represent rules/policies/tags in single YAML file for "configuration as code" (CLI experience for developers)
-- "As code" approach enables version control
-- Keep audit history for all policy updates (track when who changed what)
-
-> **See also:** AU-03 (YAML policy-as-code), CC-07 (version control & audit trail for policy changes)
+Superseded by [Governance Workflows](#governance-workflows) — covers YAML-as-code, version control, audit history, and CI/CD deployment.
 
 ### Policy-Level Shadow Mode
 
@@ -70,6 +64,186 @@ Shadow Mode is a "dry-run" state for individual SQL security policies. Instead o
 - **User Attribute Sync**: Dynamically pull ABAC attributes (Region, Department, Clearance) from identity claims at connect time. (Base ABAC with admin-defined attributes is shipped; IDP sync is the next step.)
 - **Impact Analysis Engine**: Run a "What-If" simulation of a policy change against historical query logs to identify breaking changes before enforcement.
 - **Policy Impersonation (Sudo Mode)**: Admin tool to "Run as User X" to verify policy enforcement and visibility in real-time.
+
+---
+
+## Governance Workflows
+
+### Overview
+
+Governance state (logical schema, policies, decision functions, assignments) needs safe authoring, review, and deployment workflows. A per-datasource `governance_workflow` setting controls whether and which workflow is used:
+
+- **None** (`governance_workflow: none`, default) — no workflow. Edit in UI, changes take effect immediately. Zero ceremony, lowest barrier to entry. Best for getting started or solo admins. This is today's behavior.
+- **Draft** (`governance_workflow: draft`) — all governance edits go to a **sandbox** (staged changeset), must be deployed to go live. Safety layer for teams that want review/preview before production changes.
+- **Code** (`governance_workflow: code`) — author governance as YAML files in a git repo, review via PRs, deploy via CI/CD. Admin UI is read-only for governance entities on this datasource.
+
+Natural progression: start with none (getting started), graduate to draft (team growing, want safety), then code (mature team, CI/CD everything).
+
+**Terminology:** "Draft" and "code" are the two governance workflows. "Sandbox" is the underlying mechanism — the named, isolated changeset overlay where staged changes live. Sandboxes are used in both draft (mandatory) and code (optional, for local testing) workflows.
+
+### Key Design Decisions
+
+**1. Three tiers of governance rigor**
+
+No workflow, draft workflow, and code workflow form a progression — not interchangeable modes:
+
+| | None | Draft Workflow | Code Workflow |
+|---|---|---|---|
+| **Author** | UI forms | UI forms | YAML files in any editor |
+| **Review** | None — immediate | Sandbox preview via proxy | Git PR review |
+| **Test** | Changes are live | Sandbox members connect, see overlay | Apply to sandbox locally, connect, verify |
+| **Deploy** | Implicit (on save) | Click "Deploy to production" in UI | CI calls apply endpoint with `target=production` |
+
+**2. No hybrid — one workflow per datasource**
+
+Supporting both UI and code editing on the same datasource creates a two-source-of-truth sync nightmare (see: Datadog + Terraform, Looker LookML git sync). Instead, each datasource picks one workflow. The DB is always the runtime state; the question is who's allowed to write to it.
+
+Alternatives considered:
+- *Looker approach* (code editor in UI) — rejected. Requires building an in-app IDE, still needs git sync for proper versioning, and the sync between internal state and git is notoriously fragile.
+- *dbt/Cube.js approach* (code lives in repo, UI is for consumption) — adopted for code workflow. Target users (data/platform engineers) already live in repos. Editing happens in whatever editor they already use. Git PR reviews, branch protection, and CI checks come free.
+
+**3. Sandboxes are the universal staging area**
+
+A sandbox is a named changeset overlay stored in the database. The apply endpoint doesn't care how the changeset was authored:
+
+```
+POST /api/v1/datasources/{id}/apply?target=production
+POST /api/v1/datasources/{id}/apply?target=sandbox/mask-ssn-rollout
+```
+
+- In draft workflow: UI forms build up the changeset, saved to a sandbox
+- In code workflow: YAML is parsed into a changeset, applied to a sandbox for local testing, or directly to production via CI
+
+**4. Code workflow does not require sandboxes**
+
+In code workflow, git branches + PR review ARE the review process. The typical CI/CD flow:
+
+1. Edit YAML locally
+2. (Optional) Apply to a sandbox for local proxy testing
+3. Open PR — code review is the gate
+4. PR merges → CI applies to production target
+
+Sandboxes are optional in code workflow — useful for local dev testing but not mandatory. In draft workflow, sandboxes are the primary safety mechanism.
+
+**5. Sandboxes do NOT live in git**
+
+Sandboxes are ephemeral, stored in the database. Putting them in git adds friction (must commit to test) for zero benefit. The only thing in git (in code workflow) is the YAML representing production-intended state.
+
+**6. Sandbox membership is admin-controlled and audited**
+
+Admins can add users to a sandbox, routing their proxy connections through the overlay. This uses the same trust model as "admin can change your policies right now" — sandboxes actually make it safer because the change isn't live yet. All sandbox creation, membership changes, and proxy routing are fully audited. No opt-in required from users for v1.
+
+**Future consideration — opt-in sandboxes:** Instead of admins silently routing users through a sandbox, users could be *invited* and must explicitly accept before their connections are affected. They could opt in (e.g., via a toggle in a user portal or a connection parameter) and opt out anytime. This gives users control over when they experience sandbox changes. Not needed for v1 since the admin trust model + audit trail is sufficient, but worth revisiting if the user base grows beyond a small trusted team.
+
+**7. Permission model for deployment targets**
+
+- **Sandbox target** — any admin user can create sandboxes and push to them
+- **Production target** — restricted. In code workflow, only a CI/CD service account (API key auth) can deploy to production. In draft workflow, deploy is available to admins through the UI deploy flow with gates.
+
+**8. Physical schema vs logical schema**
+
+Two distinct layers:
+- **Physical schema** — what actually exists in the upstream database, populated by catalog discovery. Source of truth for what's available.
+- **Logical schema** — what BetweenRows exposes to end users. Defined by which schemas/tables/columns are "selected" from the physical catalog, plus policies that restrict visibility.
+
+Today, logical schema selection (the "selected" state on discovered_schema/table/column) lives only in the DB, editable only via UI. In code workflow, the logical schema is declared in YAML alongside policies:
+
+```yaml
+# governance/production.yaml
+schema:
+  public:
+    users:
+      - id
+      - name
+      - email
+      - created_at
+      # ssn deliberately excluded — not even visible
+    orders:
+      - id
+      - user_id
+      - amount
+      - status
+    # credit_scores table not listed — not exposed at all
+
+policies:
+  - name: mask-email-for-analysts
+    type: column_mask
+    targets:
+      - schemas: [public]
+        tables: [users]
+        columns: [email]
+    definition:
+      mask_expression: "'***@' || split_part(email, '@', 2)"
+    assignments:
+      - role: analyst
+```
+
+The catalog discovery wizard remains useful as a bootstrapping tool — discover what's upstream, generate the initial YAML (like `terraform import`), then the YAML becomes the source of truth.
+
+**9. Migration across workflows is a natural progression**
+
+1. New user starts with direct (default), clicks around, learns the system
+2. Team grows, wants safety → switch to `workflow: draft`, edits now require sandboxes
+3. Team matures, wants CI/CD → "Export to YAML" generates config from current DB state
+4. Commit the YAML, flip datasource to `workflow: code`
+5. Apply endpoint is the only writer; UI becomes read-only for that datasource
+
+### Sandboxes
+
+Named changeset overlays for staging governance changes before they go live. Used in draft workflow (mandatory) and code workflow (optional, for local testing). Not used in direct workflow.
+
+**Data model:**
+- `governance_sandbox` — named changeset per datasource with `base_revision` tracking
+- `governance_sandbox_member` — users whose proxy connections route through the sandbox overlay
+- `governance_history` — immutable record of each deployment for audit and revert
+- `governance_revision` on `data_source` — monotonic counter incremented on every deploy
+
+**Changeset format:** Map keyed by `(entity_type, id)`. Each entry is a full entity snapshot (upsert) or a delete marker. Map structure provides automatic dedup — editing the same policy 5 times results in one entry with the final state. Covers: policies, decision functions, policy assignments, catalog (logical schema selection).
+
+**Deploy gates:**
+1. Sandbox must be rebased to current `governance_revision` (production hasn't moved ahead)
+2. Validation must pass — catalog entries checked against physical schema (missing upstream columns block deploy, type drift is a warning)
+
+**Version history and revert:** Each deploy is recorded with the changeset and an auto-generated summary. Revert creates a new sandbox with an inverse changeset — goes through the same sandbox/review/deploy flow, not a direct rollback.
+
+See `Governance Dev Mode with Branch-Based Changesets.md` for the full technical design including data model, overlay layer, engine changes, API endpoints, and implementation phases. (Note: that doc uses "branch" terminology — will be updated to "sandbox" when implementation begins.)
+
+### Code Workflow
+
+Declarative YAML-based governance management applied via CI/CD.
+
+**Apply endpoint:** `POST /api/v1/datasources/{id}/apply`
+- Accepts a YAML manifest, diffs against current state, reconciles
+- Supports `dry_run: true` to preview changes without applying
+- Idempotent — running multiple times produces the same result
+- Name-based identity (not UUIDs) so YAML files are human-readable
+- `target` parameter: `production` or `sandbox/<name>`
+
+**CI auth:** API tokens / service accounts for machine-to-machine authentication. Long-lived API keys mapped to a BetweenRows user identity, so audit trail captures the service account. Separate from JWT-based admin UI auth.
+
+**CI/CD flow (e.g., GitHub Actions):**
+```
+PR merged → GitHub Action runs →
+  1. POST /api/v1/datasources/{id}/apply?target=production&dry_run=true  (preview)
+  2. POST /api/v1/datasources/{id}/apply?target=production                (apply)
+  → Policies and logical schema updated, connections rebuilt
+```
+
+**Local dev flow:**
+```bash
+# Edit YAML locally
+# Apply to a sandbox for local testing
+curl -X POST .../apply?target=sandbox/my-experiment -d @governance.yaml
+# Connect through proxy, verify behavior
+# Happy? Open PR → CI deploys to production on merge
+```
+
+**Scope of YAML manifest (v1 — minimal):** Policies, policy assignments, and logical schema selection (which tables/columns to expose). Roles and datasources referenced by name and must already exist — they're infrastructure concerns set up once and rarely changed. Future versions may expand scope.
+
+**What code workflow does NOT include (v1):**
+- A CLI tool — `curl` + the apply endpoint is sufficient for any CI system
+- Managing datasources, users, or roles declaratively
+- Pruning/deleting unmanaged resources — additive-only for safety
 
 ---
 
@@ -416,6 +590,13 @@ Given complexity of new policy system (interaction with DataFusion and PostgreSQ
 - Forget password and reset password
 - 2FA or OTP support
 
+### Remove `BR_ADMIN_TENANT` env var
+
+- The admin seed user's tenant defaults to `"default"` silently — there's no reason for this to be a documented env var
+- Admin users typically manage the system, not query through the proxy with tenant-scoped policies
+- Tenant can be set through the UI when editing the user
+- Plan: remove the env var entirely, hardcode `"default"` as the seed tenant
+
 ## Bugs
 
 - 2026-03-04: DataFusion query error - Invalid function 'pg_get_function_identity_arguments'. Did you mean 'pg_get_statisticsobjdef_columns'?
@@ -423,7 +604,6 @@ Given complexity of new policy system (interaction with DataFusion and PostgreSQ
 - 2026-03-04: DataFusion query error - table 'postgres.information_schema.table_constraints' not found
 - 2026-03-04: DataFusion query error - Invalid function 'quote_ident'. Did you mean 'date_bin'?
 - 2026-03-09: JOIN with duplicate column names (e.g., `id`) and `SELECT *` causes "Ambiguous reference to unqualified field id" error. — **Partially mitigated 2026-03-11**: column deny/allow now uses `DFSchema` qualifier-aware iteration so deny policies no longer collide across tables. Root ambiguity for `SELECT *` on JOINs with duplicate column names is a DataFusion limitation, not directly related to policy enforcement.
-- Sometimes SQL queries take long time and cause UI to hang - need performance testing, may be missing indexes
 - 2026-03-18: Catalog cache not invalidated after resync discovers new columns/tables/schemas — newly discovered objects are not immediately visible in queries until the cache expires or is manually cleared
 
 ### Git Commit Hook Improvements

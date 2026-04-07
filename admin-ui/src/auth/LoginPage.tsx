@@ -29,7 +29,7 @@ export function LoginPage() {
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center">
       <div className="bg-white rounded-xl shadow-md w-full max-w-sm p-8">
-        <h1 className="text-2xl font-bold text-gray-900 mb-6">QueryProxy Admin</h1>
+        <h1 className="text-2xl font-bold text-gray-900 mb-6">BetweenRows</h1>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>

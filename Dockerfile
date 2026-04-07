@@ -71,6 +71,7 @@ COPY --from=ui-builder /app/admin-ui/dist /usr/local/share/admin-ui
 
 ENV BR_PROXY_BIND_ADDR=0.0.0.0:5434
 ENV BR_ADMIN_BIND_ADDR=0.0.0.0:5435
+ENV BR_ADMIN_DATABASE_URL=sqlite:///data/proxy_admin.db?mode=rwc
 
 EXPOSE 5434
 EXPOSE 5435

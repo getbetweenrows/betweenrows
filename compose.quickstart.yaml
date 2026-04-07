@@ -1,0 +1,20 @@
+services:
+  proxy:
+    image: ghcr.io/getbetweenrows/betweenrows:latest
+    environment:
+      BR_ADMIN_USER: admin
+      BR_ADMIN_PASSWORD: changeme
+      # BR_ENCRYPTION_KEY: ""          # 64-char hex, AES-256-GCM key for secrets at rest (auto-persisted to /data/.encryption_key if unset)
+      # BR_ADMIN_JWT_SECRET: ""        # Any non-empty string, HMAC-SHA256 signing key (auto-persisted to /data/.jwt_secret if unset)
+      # BR_ADMIN_JWT_EXPIRY_HOURS: 24
+      # BR_IDLE_TIMEOUT_SECS: 900     # Close idle pgwire connections after this many seconds (0 to disable)
+      # BR_CORS_ALLOWED_ORIGINS: ""   # Comma-separated allowed CORS origins
+      # RUST_LOG: info
+    ports:
+      - "5434:5434"
+      - "5435:5435"
+    volumes:
+      - betweenrows_data:/data
+
+volumes:
+  betweenrows_data:

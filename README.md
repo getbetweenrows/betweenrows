@@ -1,543 +1,173 @@
-# QueryProxy
+# BetweenRows
 
-A high-performance PostgreSQL wire protocol proxy in Rust. Sits between clients and upstream Postgres backends, providing query governance (row-level security, data masking) via a hook pipeline. Data sources and users are managed through a REST Admin API and React UI.
+A SQL proxy that enforces row-level security, column masking, and access control — without changing your application or database.
 
-## Deploy to Fly.io
+BetweenRows sits between your users and your data sources, applying security policies on every query. Define who can see what through an admin UI, and every connection through the proxy is automatically governed. Currently supports PostgreSQL data sources.
 
-[![Deploy to Fly](https://fly.io/launch/deploy.svg)](https://fly.io/launch?source=https://github.com/getbetweenrows/betweenrows)
+> **Alpha software.** BetweenRows is under active development and not yet production-ready. APIs, configuration, and data formats may change between releases. Pin your Docker image to a specific version tag (e.g., `ghcr.io/getbetweenrows/betweenrows:0.11.0`) rather than using `latest`. The software is provided as-is with no warranty — use at your own risk. We welcome feedback and bug reports via [GitHub Issues](https://github.com/getbetweenrows/betweenrows/issues).
 
-Provisions a Fly.io VM, builds the Docker image (including the admin UI), mounts a 1 GB
-persistent volume for the SQLite database, and starts both services:
+## Why
 
-| Service | External | Internal | Protocol |
-|---------|----------|----------|----------|
-| Admin UI + REST API | `:80` / `:443` | `:5435` | HTTP/S |
-| pgwire (PostgreSQL) | `:5432` (IPv6) | `:5434` | raw TCP |
+- **No application changes** — policies are enforced at the proxy layer, not in your app code
+- **Row-level filtering** — automatically filter rows based on user identity (tenant, role, department)
+- **Column masking** — mask sensitive columns (SSN, email, salary) with expressions, not views
+- **Column & table deny** — hide columns or entire tables from specific users or roles
+- **Full audit trail** — every query is logged with the original SQL, rewritten SQL, and policies applied
+- **RBAC + ABAC** — assign policies via roles, user attributes, or programmable decision functions (JavaScript/WASM)
 
-After deploying:
+Built with **Rust**, **DataFusion**, **pgwire**, and **React**.
 
-| Endpoint | URL / address |
-|----------|---------------|
-| Admin UI | `https://<app-name>.fly.dev` |
-| Admin REST API | `https://<app-name>.fly.dev/api/...` |
-| PostgreSQL proxy | `<app-name>.fly.dev:5432` |
+## Components
 
-**Order of operations matters** — follow these steps in sequence.
+BetweenRows ships as a single binary with two planes:
 
-### 1. Create the app and volume (one-time)
+**Data plane** (port 5434) — PostgreSQL wire protocol proxy. Connect with any PostgreSQL client (`psql`, TablePlus, DBeaver, your app). Policies are enforced transparently on every query.
 
-```sh
-fly launch --no-deploy --copy-config --name <your-app-name>
-fly volumes create betweenrows_data --size 1 --region <region>
-```
+**Management plane** (port 5435) — Admin UI and REST API for managing users, data sources, roles, policies, and audit logs. Only admin users have access.
 
-### 2. Set secrets before first deploy
-
-The app will crash-loop on startup without `BR_ADMIN_PASSWORD`. Set secrets **before** deploying:
-
-```sh
-fly secrets set \
-  BR_ENCRYPTION_KEY=$(openssl rand -hex 32) \
-  BR_ADMIN_JWT_SECRET=$(openssl rand -hex 32) \
-  BR_ADMIN_PASSWORD=<strong-password>
-```
-
-### 3. Allocate IP addresses (one-time)
-
-Without IP addresses the app is unreachable from most networks. Shared IPv4 is free:
-
-```sh
-flyctl ips allocate-v4 --shared
-flyctl ips allocate-v6
-```
-
-### 4. Make the GHCR package public
-
-CI/CD deploys via `flyctl deploy --image ghcr.io/getbetweenrows/betweenrows:latest` require the package to be public. In GitHub: **Packages → betweenrows → Package settings → Change visibility → Public**.
-
-### 5. Deploy
-
-```sh
-fly deploy --image ghcr.io/getbetweenrows/betweenrows:latest --app <your-app-name>
-```
-
-## Upgrading
-
-Pull the latest image and redeploy:
-
-```sh
-fly deploy --image ghcr.io/getbetweenrows/betweenrows:latest --app <your-app-name>
-```
-
-Or if your `fly.toml` already references the image, just:
-
-```sh
-fly deploy
-```
-
-### Connecting via pgwire
-
-The pgwire port is accessible for free via **IPv6** (most modern clients resolve it automatically):
-
-```sh
-psql "postgresql://admin:<password>@<app-name>.fly.dev:5432/<datasource-name>"
-```
-
-**macOS: if the connection times out**, check whether IPv6 is configured:
-
-```sh
-ifconfig | grep "inet6" | grep -v "::1" | grep -v "fe80"
-```
-
-If that returns nothing, your machine has no routable IPv6 address. Re-enable it:
-
-```sh
-sudo networksetup -setv6automatic Wi-Fi
-```
-
-Then confirm it's working with `ping6 google.com` and retry the connection.
-
-For **IPv4-only** environments (no IPv6 support), tunnel via WireGuard:
-
-```sh
-fly proxy 5432:5434 --app <app-name>
-psql "postgresql://admin:<password>@127.0.0.1:5432/<datasource-name>"
-```
-
-Or allocate a dedicated IPv4 ($2/mo):
-
-```sh
-fly ips allocate-v4 --app <app-name>
-```
-
-## How It Works
+The two planes are independent — being an admin does **not** grant data access. All data access must be explicitly granted via data source assignments and policies.
 
 ```
 psql / app
     ↓  PostgreSQL wire protocol (port 5434)
-QueryProxy (Rust)
-    ├─ Authenticates user (Argon2id)
-    ├─ Checks data source access (data_source_access table — direct, role-based, or all)
-    ├─ Runs query hook pipeline:
-    │      ReadOnlyHook  — blocks writes (SQLSTATE 25006)
-    │      PolicyHook    — row filters, column masks, column access control
-    └─ Executes via DataFusion + tokio-postgres federation
+BetweenRows
+    ├─ Authenticates user
+    ├─ Checks data source access
+    ├─ Applies policies:
+    │      row_filter   — inject WHERE clauses
+    │      column_mask  — replace column values
+    │      column_deny  — hide columns
+    │      table_deny   — hide tables
+    │      column_allow — allowlist columns
+    └─ Executes via DataFusion
     ↓
 Upstream PostgreSQL
 ```
 
-## Tech Stack
-
-| Layer | Library | Version |
-|---|---|---|
-| Protocol | pgwire | 0.38 |
-| Query engine | DataFusion | 52 |
-| PG federation | datafusion-table-providers | 0.10 |
-| Async runtime | Tokio | 1 |
-| Admin store | SeaORM + SQLite/PG | 1 |
-| Password hashing | argon2 (Argon2id) | 0.5 |
-| Secret encryption | aes-gcm (AES-256-GCM) | 0.10 |
-| Admin REST API | axum + tower-http | 0.8 / 0.6 |
-| Admin auth | jsonwebtoken (HMAC-SHA256) | 9 |
-| CLI | clap | 4 |
-| Admin UI | React 19 + Vite 6 + Tailwind 4 + TanStack Query 5 | — |
-
-## Project Structure
-
-```
-betweenrows/
-├── Cargo.toml                        workspace root (proxy, migration crates)
-├── migration/src/                    SeaORM migrations (41 total)
-├── docs/                             User-facing documentation
-│   ├── permission-system.md          Policy system user guide
-│   ├── security-vectors.md           Security attack vectors & test plan
-│   ├── permission-stories.md         Detailed permission use cases
-│   └── roadmap.md                    Project roadmap and backlog
-├── scripts/demo_ecommerce/           Demo schema + seed data
-├── admin-ui/                         React admin console
-│   └── src/
-│       ├── api/                      axios + fetch-event-source clients
-│       ├── auth/                     AuthContext, ProtectedRoute, LoginPage
-│       ├── components/               Layout, DataSourceForm, CatalogDiscoveryWizard,
-│       │                             PolicyForm, PolicyAssignmentPanel, RoleForm,
-│       │                             RoleMemberPanel, RoleInheritancePanel, AuditTimeline, …
-│       ├── pages/                    Users*, DataSources*, DataSourceCatalogPage,
-│       │                             Policies*, Roles*, QueryAuditPage
-│       └── types/                    TypeScript interfaces
-└── proxy/src/
-    ├── main.rs                       entry point: CLI, DB init, EngineCache, servers
-    ├── server.rs                     process_socket_with_idle_timeout (idle + startup timeouts)
-    ├── handler.rs                    pgwire StartupHandler + query handlers
-    ├── auth.rs                       Argon2 auth, user creation
-    ├── crypto.rs                     AES-256-GCM encrypt/decrypt
-    ├── admin/                        REST API: mod, dto, jwt, handlers, discovery_job,
-    │                                 policy_handlers, role_handlers, audit_handlers,
-    │                                 admin_audit
-    ├── discovery/                    DiscoveryProvider trait + Postgres impl
-    ├── entity/                       SeaORM entities (proxy_user, data_source, role,
-    │                                 role_member, role_inheritance, data_source_access,
-    │                                 policy, policy_assignment, policy_version,
-    │                                 admin_audit_log, query_audit_log, …)
-    ├── role_resolver.rs              BFS role resolution, cycle detection, effective assignments
-    ├── engine/mod.rs                 EngineCache, VirtualCatalogProvider, build_arrow_schema()
-    └── hooks/                        QueryHook trait, ReadOnlyHook, PolicyHook
-```
-
-## Quick Start
+## Quick Start (Docker)
 
 ```bash
-# 1. Start the proxy (auto-creates proxy_admin.db, seeds admin user)
-#    BR_ADMIN_PASSWORD is required on first boot (set your own password)
-BR_ADMIN_PASSWORD=<your-password> cargo run -p proxy
-
-# 2. Start the Admin UI (separate terminal)
-cd admin-ui && npm run dev
-# → http://localhost:5173  (login: admin / <your-password>)
-
-# 3. Add a data source via the UI, then connect:
-psql "postgresql://admin:admin@127.0.0.1:5434/<datasource-name>"
+docker run -d \
+  -e BR_ADMIN_USER=admin \
+  -e BR_ADMIN_PASSWORD=changeme \
+  -p 5434:5434 -p 5435:5435 \
+  -v betweenrows_data:/data \
+  ghcr.io/getbetweenrows/betweenrows:latest
 ```
 
-Hot reload:
-```bash
-cargo watch -x "run -p proxy"
-```
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `BR_ADMIN_USER` | No | `admin` | Username for the initial admin account. Change it now if you prefer a different name — the username cannot be changed after creation. You can always create additional admin users through the UI later. |
+| `BR_ADMIN_PASSWORD` | **Yes** | — | Password for the initial admin account. Only used on first boot. You can change the password later through the UI. |
+| `-p 5434:5434` | **Yes** | — | SQL proxy port. Connect your SQL clients here. |
+| `-p 5435:5435` | **Yes** | — | Admin UI and REST API port. |
+| `-v betweenrows_data:/data` | **Yes** | — | Persistent volume. Stores the SQLite database (users, data sources, policies, audit logs) and auto-generated encryption/JWT keys when `BR_ENCRYPTION_KEY` and `BR_ADMIN_JWT_SECRET` are not set. **Do not omit** — without it, all data and keys are lost when the container restarts. |
 
-Docker:
-```bash
-docker compose up                                                   # dev (hot reload)
-docker compose -f compose.yaml -f compose.prod.yaml up --build     # prod
-```
+Change these values to your preference **before the first run**. See [Configuration](#configuration) for all available options.
 
-Additional CLI commands:
-```bash
-cargo run -p proxy -- user create --username alice --password secret --tenant acme
-```
+Open **http://localhost:5435** and log in with your admin credentials.
+
+### 5-Minute Walkthrough
+
+1. **Add a data source** — Go to Data Sources → Create. Enter your data source connection details and test the connection.
+2. **Discover the schema** — Click "Discover Catalog" on your new data source. Select which schemas, tables, and columns to expose through the proxy.
+3. **Create a user** — Go to Users → Create. Set a username, password, and tenant.
+4. **Grant access** — On the data source page, assign the user (or a role) access to the data source.
+5. **Create a policy** — Go to Policies → Create. For example, a `row_filter` policy with expression `tenant = {user.tenant}` to isolate rows by tenant.
+6. **Assign the policy** — On the data source page, assign the policy to a user, role, or all users.
+7. **Connect through the proxy** — The user can now query through BetweenRows:
+   ```bash
+   psql "postgresql://alice:secret@localhost:5434/my-datasource"
+   ```
+   Policies are applied automatically. Check the Query Audit page to see what happened.
 
 ## Configuration
 
-| Env var | Default | Description |
-|---|---|---|
-| `BR_ADMIN_DATABASE_URL` | `sqlite://proxy_admin.db?mode=rwc` | SeaORM connection URL (use `postgres://…` for shared backend) |
-| `BR_PROXY_BIND_ADDR` | `127.0.0.1:5434` | pgwire listen address |
-| `BR_ADMIN_BIND_ADDR` | `127.0.0.1:5435` | Admin REST API listen address |
-| `BR_ENCRYPTION_KEY` | *(random, warns)* | 64-char hex — AES-256-GCM key for secrets at rest. **Set in prod.** |
-| `BR_ADMIN_JWT_SECRET` | *(random, warns)* | HMAC-SHA256 signing key. **Set in prod** or tokens invalidate on restart. |
-| `BR_ADMIN_JWT_EXPIRY_HOURS` | `24` | JWT lifetime |
-| `BR_ADMIN_USER` | `admin` | Auto-seed username |
-| `BR_ADMIN_PASSWORD` | *(required on first boot)* | Auto-seed password. **Must be set** when no users exist in DB. |
-| `BR_ADMIN_TENANT` | `default` | Auto-seed tenant |
-| `BR_IDLE_TIMEOUT_SECS` | `900` (15 min) | Close pgwire connections that receive no messages for this many seconds. Enables Fly.io `auto_stop_machines` to work correctly with GUI clients (e.g. TablePlus) that hold idle connections indefinitely. Set to `0` to disable (not recommended on Fly.io). |
-| `BR_CORS_ALLOWED_ORIGINS` | *(empty, same-origin only)* | Comma-separated list of allowed CORS origins for the Admin API |
-| `RUST_LOG` | `info` | Log filter (standard Rust/tracing convention) |
+| Env var | Required | Default | Description |
+|---|---|---|---|
+| `BR_ADMIN_PASSWORD` | **Yes** (first boot) | — | Password for the initial admin account. Must be set when no users exist in DB. |
+| `BR_ADMIN_USER` | No | `admin` | Username for the initial admin account. Only used on first boot. |
+| `BR_ENCRYPTION_KEY` | No | *(auto-persisted)* | 64-char hex — AES-256-GCM key for secrets at rest. If unset, auto-generated and saved to `/data/.betweenrows/encryption_key`. **Set explicitly in prod.** If switching from auto-generated to explicit, copy the value from `/data/.betweenrows/encryption_key` — using a different key makes existing secrets unreadable. |
+| `BR_ADMIN_JWT_SECRET` | No | *(auto-persisted)* | Any non-empty string — HMAC-SHA256 signing key for admin JWTs. If unset, auto-generated and saved to `/data/.betweenrows/jwt_secret`. **Set explicitly in prod.** |
+| `BR_ADMIN_JWT_EXPIRY_HOURS` | No | `24` | JWT lifetime in hours. |
+| `BR_ADMIN_DATABASE_URL` | No | `sqlite://proxy_admin.db?mode=rwc` | SeaORM connection URL (use `postgres://…` for shared backend). |
+| `BR_PROXY_BIND_ADDR` | No | `127.0.0.1:5434` | Proxy listen address. Docker image defaults to `0.0.0.0:5434`. |
+| `BR_ADMIN_BIND_ADDR` | No | `127.0.0.1:5435` | Admin REST API listen address. Docker image defaults to `0.0.0.0:5435`. |
+| `BR_IDLE_TIMEOUT_SECS` | No | `900` (15 min) | Close idle proxy connections after this many seconds. Set to `0` to disable. |
+| `BR_CORS_ALLOWED_ORIGINS` | No | *(empty, same-origin only)* | Comma-separated list of allowed CORS origins for the Admin API. |
+| `RUST_LOG` | No | `info` | Log filter (standard Rust/tracing convention). |
 
-## Connecting via pgwire
+## Connecting to the Proxy
 
-The `database` field in the connection string must match the `name` of a configured data source, and the user must be assigned to it:
+BetweenRows speaks the PostgreSQL wire protocol — connect with any PostgreSQL client using the datasource name as the database:
 
 ```bash
 psql "postgresql://<user>:<password>@127.0.0.1:5434/<datasource-name>"
 ```
 
-Data sources are configured via the Admin UI (`/datasources`) or REST API — not via env vars.
+Tested with **psql** and **TablePlus**. Any tool that supports PostgreSQL or ODBC with a PostgreSQL driver should work — including DBeaver, DataGrip, BI tools, and application ORMs.
 
-## Performance
+> **Note:** Some SQL clients send additional metadata queries (e.g., for autocompletion or schema browsing) that BetweenRows may not support yet. If your client fails to connect, please [open an issue](https://github.com/getbetweenrows/betweenrows/issues).
 
-### Idle Connection Timeout
+## Policy System
 
-pgwire 0.38 has no built-in idle timeout — `socket.next().await` blocks indefinitely after authentication. This prevents Fly.io `auto_stop_machines` from ever triggering when a GUI client like TablePlus is open, because the VM only stops when it has zero connections.
+BetweenRows supports five policy types:
 
-`proxy/src/server.rs` replaces pgwire's `process_socket` with a custom message loop (`process_socket_with_idle_timeout`) that adds a `tokio::select!` branch racing each `socket.next()` against a `sleep(idle_timeout)`. The timer resets after every received message — a running query does not count as idle.
+| Type | What it does |
+|------|-------------|
+| `row_filter` | Injects a WHERE clause to filter rows (e.g., `tenant = {user.tenant}`) |
+| `column_mask` | Replaces column values with an expression (e.g., `'***@' \|\| split_part(email, '@', 2)`) |
+| `column_allow` | Permits access to specific columns (required in `policy_required` mode) |
+| `column_deny` | Hides columns from the user's schema entirely |
+| `table_deny` | Hides entire tables from the user's schema |
 
-Default timeout is 15 minutes (`BR_IDLE_TIMEOUT_SECS=900`). TCP keepalive (60 s time, 10 s interval) is also set on each accepted socket to detect dead connections from crashed clients or network failures.
+Key concepts:
 
-When idle timeout fires, a log line is emitted at `INFO` level:
-```
-Idle connection timed out after 900s
-```
+- **RBAC** — assign policies to roles. Users inherit policies through role membership, including via role hierarchies
+- **ABAC** — define custom user attributes (e.g., department, region, clearance level) and use them in policy expressions via `{user.<key>}` template variables
+- **Decision functions** — optional JavaScript functions compiled to WASM that gate policy evaluation based on arbitrary logic (time windows, multi-attribute conditions, external state)
+- **Assignment scopes** — policies can be assigned to individual users, roles, or all users on a data source
+- **Template variables** — `{user.tenant}`, `{user.username}`, `{user.id}`, and custom attributes are substituted at query time, making policies dynamic per user
+- **Access modes** — data sources can be set to `open` (all tables accessible by default) or `policy_required` (tables are hidden unless a `column_allow` policy grants access)
+- **Deny wins** — deny policies are evaluated before permit policies and cannot be overridden
+- **Visibility follows access** — denied columns and tables are removed from the user's schema at connection time, so they don't appear in client tools like TablePlus or DBeaver
 
-### Arrow Type Alignment (query time)
-
-During catalog discovery, column types are captured using `datafusion-table-providers`' own `get_schema()` function rather than a manual PG-to-Arrow mapping. This guarantees that the stored schema matches exactly what the library produces at query time.
-
-**Why it matters:** an earlier hand-written `pg_type_to_arrow()` mapped `numeric` → `Decimal128(38,10)` and `timestamp` → `Timestamp(Microsecond)`, but the library internally uses `Decimal128(38,20)` and `Timestamp(Nanosecond)`. The mismatch triggered a full schema-cast on every result batch, adding 12–23 s to queries returning ~2 k rows. With `get_schema()`, stored types and runtime types are identical — no cast overhead.
-
-**Do not** replace this with a manual PG type map. If new PG types need support, add them to `parse_arrow_type()` / `arrow_type_to_string()` in `engine/mod.rs` alongside a round-trip test.
-
-### Lazy Connection Pool
-
-The upstream Postgres connection pool (`LazyPool` in `engine/mod.rs`) is **not** created when a client connects — it is created on the first query that touches a user table. Catalog queries (`pg_catalog`, `information_schema`) work instantly without an upstream connection.
-
-This means:
-- TablePlus / psql sidebar population (all `pg_catalog` queries) is instant.
-- Clients that never issue user-table queries pay zero upstream connection cost.
-
-**Do not** move pool creation back into `create_session_context_from_catalog()` or `EngineCache::get_context()`.
-
-### Shared Pool Across Context Rebuilds
-
-`EngineCache` stores one `Arc<LazyPool>` per datasource in a separate `pools` map. `invalidate(name)` (called after catalog re-discovery) removes only the `SessionContext`, keeping the pool. The next `get_context()` call reuses the existing pool rather than creating a new one.
-
-`invalidate_all(name)` (called after datasource connection params are edited or the datasource is deleted) removes both the `SessionContext` and the pool.
-
-**Do not** call `invalidate_all` after catalog operations. **Do not** call plain `invalidate` after datasource edit/delete — the pool would be stale.
-
-### Performance Regression Testing
-
-There is currently no automated performance regression suite. Micro-benchmarks
-(Criterion) were evaluated but rejected: the hot-path functions they would cover
-(AST rewrite, RLS filter injection, schema construction) are sub-microsecond
-operations — regressions there are invisible against real query latency.
-
-Meaningful regression detection requires integration-level tests against a real
-Postgres instance that can verify filter pushdown is still active, connection pool
-reuse is intact, and end-to-end query latency stays within bounds. This is planned
-for a future iteration.
-
-### Background Warmup
-
-After authentication succeeds in `handler.rs`, a background task pre-builds the `SessionContext` (DB queries to load the stored catalog) and eagerly initialises the `LazyPool`. This amortises first-query latency during the window between the client's auth handshake and its first query.
-
-## Security
-
-### Access Control Architecture
-
-Access control is enforced **before** any query reaches the engine:
-
-1. `validate_data_source()` — datasource must exist and be active
-2. `check_access(user_id, datasource_name)` — user must have access via `data_source_access` (direct, role-based, or all-scoped)
-3. If either check fails → `FATAL` PG error, connection rejected before `get_ctx()` is ever called
-
-### Why the Shared Pool Is Safe
-
-The upstream connection pool carries **no user identity** — it is pure TCP connectivity to the upstream Postgres server. All identity and access decisions are made at the pgwire auth layer (steps 1–2 above), not at the pool layer.
-
-Per-user isolation is enforced by:
-- **Data plane** — `data_source_access` allowlist (no matching row → connection rejected). Access can be granted directly to a user, via role membership (including inherited roles), or to all users.
-- **Policy hook** — per-query row filters, column masks, and access controls injected via DataFusion's logical plan tree, based on the authenticated user's policy assignments (direct, role-based, or wildcard)
-- **Virtual catalog** — the stored catalog is an allowlist; tables/columns not explicitly saved are invisible to the engine
-
-The shared pool is safe for all authorized users of a datasource: Pool = "how to talk to upstream". Auth + RLS = "what this user can see". These are orthogonal.
-
-### Policy Enforcement Resistance
-
-`PolicyHook` injects row filters and column transforms at the DataFusion logical plan level via `transform_up`. The filter is applied below the `TableScan` node — it cannot be bypassed by table aliases, CTEs, or subqueries, since DataFusion inlines those into the plan before transformation.
-
-Template variable substitution (`{user.tenant}`, etc.) uses parse-then-substitute: the filter expression is parsed into a `DataFusion Expr` tree first, then placeholder identifiers are replaced with typed `Expr::Literal` values. The user's tenant/username never passes through the SQL parser, preventing injection even if the value contains SQL syntax.
-
-### Permissions Model
-
-QueryProxy enforces a two-layer access control model:
-
-**Management plane** — controlled by `is_admin` flag. Admins manage users, data sources, policies, and catalogs via the Admin API. Non-admins have no Admin API access.
-
-**Data plane** — controlled by two independent mechanisms:
-1. *Connection access* — `data_source_access` entries. A user can connect to a datasource via direct assignment, role membership (including inherited roles), or all-user scope. Being an admin does **not** automatically grant data plane access.
-2. *Query policy* — `PolicyHook` applies row filters, column masks, and column access controls per-query based on assigned policies (direct, role-based, or all-scoped). If the datasource `access_mode` is `"policy_required"`, tables with no matching permit policy return empty results. Policies can reference built-in identity fields (`{user.tenant}`, `{user.username}`, `{user.id}`) and custom user attributes (`{user.KEY}`) for attribute-based access control (ABAC). Optional decision functions (JavaScript/WASM) provide programmable policy gates.
-
-See `docs/permission-system.md` for the full policy system user guide.
-
-Connection flow:
-1. Client connects: `psql -d <datasource_name> -U <username>`
-2. Proxy authenticates (Argon2id)
-3. Proxy validates data source exists and is active
-4. Proxy checks `data_source_access` — denied if no matching row (direct, role, or all scope)
-5. Background task pre-warms `SessionContext` + pool
-6. First query: fast path — context and pool already ready
-
-## Admin REST API
-
-Base: `http://localhost:5435/api/v1`
-
-All endpoints require `Authorization: Bearer <token>` (obtained from `/auth/login`) except login itself. All IDs are UUIDs.
-
-### Auth
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/auth/login` | Get JWT → `{ token, user }` |
-| GET | `/auth/me` | Current user info |
-
-### Users
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/users` | List users (paginated) |
-| POST | `/users` | Create user |
-| GET | `/users/{id}` | Get user |
-| PUT | `/users/{id}` | Update user |
-| DELETE | `/users/{id}` | Delete user |
-| PUT | `/users/{id}/password` | Change password |
-
-### Data Sources
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/datasource-types` | Supported types + field definitions |
-| GET | `/datasources` | List data sources (paginated) |
-| POST | `/datasources` | Create data source |
-| GET | `/datasources/{id}` | Get data source |
-| PUT | `/datasources/{id}` | Update data source |
-| DELETE | `/datasources/{id}` | Delete data source |
-| POST | `/datasources/{id}/test` | Test upstream connection |
-| GET | `/datasources/{id}/users` | List assigned users |
-| PUT | `/datasources/{id}/users` | Replace user assignments (user-scoped access) |
-| PUT | `/datasources/{id}/access/roles` | Set role-based access `{ role_ids: [uuid] }` |
-
-### Roles
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/roles` | List roles (paginated, searchable) |
-| POST | `/roles` | Create role `{ name, description? }` |
-| GET | `/roles/{id}` | Get role + members + inheritance + policy assignments |
-| PUT | `/roles/{id}` | Update name/description/is_active |
-| DELETE | `/roles/{id}` | Delete role → returns impact `{ affected_users, affected_assignments }` |
-| GET | `/roles/{id}/effective-members` | All users inheriting policies (direct + inherited), with source |
-| GET | `/roles/{id}/impact` | Preview impact of deleting this role |
-| POST | `/roles/{id}/members` | Add members `{ user_ids: [uuid] }` |
-| DELETE | `/roles/{id}/members/{user_id}` | Remove member |
-| POST | `/roles/{id}/parents` | Add parent `{ parent_role_id }` (cycle detection + depth check) |
-| DELETE | `/roles/{id}/parents/{parent_id}` | Remove parent |
-
-### Catalog Discovery
-
-Discovery is **async and non-blocking**. Every operation submits a job and returns immediately; progress is streamed via SSE.
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/datasources/{id}/discover` | Submit discovery job → `{ job_id }` (202) |
-| GET | `/datasources/{id}/discover/{job_id}/events` | SSE stream of progress + result |
-| GET | `/datasources/{id}/discover/{job_id}` | Poll job status |
-| DELETE | `/datasources/{id}/discover/{job_id}` | Cancel running job |
-| GET | `/datasources/{id}/catalog` | Read stored catalog (fast, no upstream) |
-
-**Submit body** (`action` field selects the operation):
-
-```json
-{ "action": "discover_schemas" }
-
-{ "action": "discover_tables", "schemas": ["public", "analytics"] }
-
-{ "action": "discover_columns", "tables": [{"schema": "public", "table": "orders"}] }
-
-{ "action": "save_catalog", "schemas": [{ "schema_name": "public", "is_selected": true,
-    "tables": [{ "table_name": "orders", "table_type": "TABLE", "is_selected": true }] }] }
-
-{ "action": "sync_catalog" }
-```
-
-**SSE event stream** (each line is `data: <json>`):
-
-```
-data: {"type":"progress","phase":"connecting","detail":"Connecting to upstream…"}
-data: {"type":"progress","phase":"querying","detail":"Querying schemas…"}
-data: {"type":"result","data":[{"schema_name":"public","is_already_selected":true}]}
-data: {"type":"done"}
-```
-
-Only one discovery job may run per data source at a time — submitting a second returns `409 Conflict` with the active `job_id`.
-
-### Policies
-
-All policy endpoints require admin (`is_admin = true`).
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/policies` | List policies (paginated) |
-| POST | `/policies` | Create policy |
-| GET | `/policies/{id}` | Get policy + assignment count |
-| PUT | `/policies/{id}` | Update policy (requires `version` for optimistic concurrency → 409 on conflict) |
-| DELETE | `/policies/{id}` | Delete policy (cascades) |
-| POST | `/policies/validate-expression` | Validate a filter/mask expression `{ expression, is_mask }` → `{ valid, error? }` |
-| GET | `/policies/export` | Export all policies as YAML |
-| POST | `/policies/import` | Import YAML (`?dry_run=true` to preview) |
-| GET | `/datasources/{id}/policies` | List policy assignments for datasource |
-| POST | `/datasources/{id}/policies` | Assign policy to datasource (scope: user/role/all) |
-| DELETE | `/datasources/{id}/policies/{assignment_id}` | Remove assignment |
-
-### Decision Functions
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/decision-functions` | List decision functions (paginated) |
-| POST | `/decision-functions` | Create decision function |
-| GET | `/decision-functions/{id}` | Get decision function |
-| PUT | `/decision-functions/{id}` | Update decision function (optimistic concurrency) |
-| DELETE | `/decision-functions/{id}` | Delete decision function |
-| POST | `/decision-functions/{id}/test` | Test decision function with sample context |
-
-### Attribute Definitions
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/attribute-definitions` | List definitions (`?entity_type=user` filter, paginated) |
-| POST | `/attribute-definitions` | Create attribute definition |
-| GET | `/attribute-definitions/{id}` | Get definition |
-| PUT | `/attribute-definitions/{id}` | Update definition |
-| DELETE | `/attribute-definitions/{id}` | Delete definition (`?force=true` to cascade-remove from entities) |
-
-User attributes are set via `PUT /users/{id}` with an `attributes` field (full-replace semantics, validated against definitions). Attributes are available as `{user.KEY}` template variables in policy expressions and as `ctx.session.user.attributes` in decision functions.
-
-### Audit Log
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/audit/queries` | Paginated query audit log (filter by user, datasource, date range, status) |
-| GET | `/audit/admin` | Paginated admin audit log (filter by resource_type, resource_id, actor_id, date range) |
-
-### Effective Policies
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/users/{id}/effective-policies?datasource_id=X` | All policies applying to user (with source annotation) |
+See [docs/permission-system.md](docs/permission-system.md) for the full guide.
 
 ## Catalog Workflow
 
-Before a data source is queryable via pgwire, a catalog must be saved. The UI wizard guides through three steps:
+Before a data source is queryable through the proxy, its catalog must be saved. The UI wizard guides through four steps:
 
-1. **Discover schemas** — submit `discover_schemas`, watch SSE, select which schemas to include
-2. **Discover tables** — submit `discover_tables` with selected schemas, select tables
-3. **Discover columns** — submit `discover_columns` with selected tables; choose which columns to expose via a two-panel UI (scrollable table sidebar + column detail panel); unsupported Arrow types (e.g. JSONB, regclass) are shown greyed-out and cannot be selected
-4. **Save** — submit `save_catalog` — persists schema/table/column selections to DB, invalidates engine cache
+1. **Discover schemas** — select which schemas to include
+2. **Discover tables** — select tables within those schemas
+3. **Discover columns** — choose which columns to expose
+4. **Save** — persists selections and makes them available for queries
 
-To detect schema drift after upstream changes, submit `sync_catalog`. The result is stored in `data_source.last_sync_result` and shown in the UI as a green/blue/amber panel.
+The catalog is an **allowlist** — the proxy can never expose tables or columns not explicitly saved. To detect schema drift after upstream changes, use "Sync Catalog" from the data source page.
 
-The catalog is an **allowlist** — the proxy can never expose tables or columns not explicitly saved. `data_source.last_sync_result` only reports drift; the admin decides when to re-run the wizard.
+## Admin REST API
 
-## Data Model
+BetweenRows includes a full REST API at `http://localhost:5435/api/v1` for managing users, data sources, roles, policies, catalog discovery, and audit logs. All endpoints require JWT authentication (`POST /auth/login` to obtain a token).
 
-All primary keys are UUIDs. The admin store uses SQLite by default (configurable via `DATABASE_URL`).
+Everything you can do in the admin UI can also be done via the API — useful for scripting, CI/CD integration, and automation.
 
-```
-proxy_user         (id UUID, username, password_hash, tenant, is_admin, is_active, …)
-data_source        (id UUID, name, ds_type, config JSON, secure_config encrypted,
-                    is_active, access_mode, last_sync_at, last_sync_result, …)
-data_source_access (id UUID, user_id?, role_id?, data_source_id, assignment_scope, …)
-role               (id UUID, name UNIQUE, description, is_active, …)
-role_member        (id UUID, role_id → role, user_id → proxy_user)
-role_inheritance   (id UUID, parent_role_id → role, child_role_id → role)
-discovered_schema  (id UUID v5, data_source_id, schema_name, is_selected)
-discovered_table   (id UUID v5, discovered_schema_id, table_name, table_type, is_selected)
-discovered_column  (id UUID v5, discovered_table_id, column_name, ordinal_position,
-                    data_type, is_nullable, column_default, arrow_type)
+## CLI
 
-policy             (id UUID v7, name, description, policy_type, is_enabled, version, targets JSON, definition JSON, …)
-policy_version     (id UUID v7, policy_id, version, snapshot JSON, change_type, changed_by)
-policy_assignment  (id UUID v7, policy_id, data_source_id, user_id?, role_id?,
-                    assignment_scope, priority)
-admin_audit_log    (id UUID v7, resource_type, resource_id, action, actor_id, changes JSON, created_at)
-query_audit_log    (id UUID v7, user_id, username, data_source_id, datasource_name,
-                    original_query, rewritten_query, policies_applied JSON,
-                    execution_time_ms, client_ip, client_info, created_at)
-```
-
-Catalog entity IDs (schemas, tables, columns) are deterministic UUID v5 fingerprints derived from their natural keys. Re-discovering the same upstream object always produces the same ID, so re-syncs are safe upserts.
-
-## Development
+Create users without the UI — useful for scripting and automation. If you're locked out of the admin UI, use `--admin` to create a new admin user to regain access. You can then change passwords through the UI. A forgot/reset password feature is on the [roadmap](docs/roadmap.md):
 
 ```bash
-cargo build -p proxy          # compile
-cargo test -p proxy           # run tests (213 unit tests + integration tests)
-cd admin-ui && npm run build  # production UI bundle
+# Docker
+docker exec -it <container> proxy user create --username alice --password secret --tenant acme
+docker exec -it <container> proxy user create --username rescue --password secret --tenant default --admin
+
+# From source
+cargo run -p proxy -- user create --username alice --password secret --tenant acme
 ```
+
+## Roadmap
+
+See [docs/roadmap.md](docs/roadmap.md) for planned features including shadow mode, governance workflows, and more.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture details, build instructions, and development setup.

@@ -29,6 +29,9 @@ target/
 .env.test.local
 .env.production.local
 
+# Auto-persisted state (secrets, markers)
+.betweenrows/
+
 # local files
 mydocs/
 pythonpoc/

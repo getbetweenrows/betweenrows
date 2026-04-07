@@ -7,14 +7,14 @@ use proxy::handler::ProxyHandler;
 use proxy::hooks::policy::PolicyHook;
 use proxy::server::process_socket_with_idle_timeout;
 use rand_core::RngCore;
-use sea_orm::{ColumnTrait, Database, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, ConnectOptions, Database, EntityTrait, QueryFilter};
 use socket2::{SockRef, TcpKeepalive};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
 #[derive(Parser)]
-#[command(name = "proxy", about = "QueryProxy — PostgreSQL wire protocol proxy")]
+#[command(name = "proxy", about = "BetweenRows — Data access governance")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -58,6 +58,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load .env if present
     dotenvy::dotenv().ok();
 
+    eprintln!("╔══════════════════════════════╗");
+    eprintln!("║  BetweenRows v{:<14}║", env!("CARGO_PKG_VERSION"));
+    eprintln!("║  Data access governance      ║");
+    eprintln!("╚══════════════════════════════╝");
+
     let cli = Cli::parse();
 
     // Connect to admin DB and run migrations
@@ -66,7 +71,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(database = %redact_db_url(&database_url), "connecting to database");
 
-    let db = Database::connect(&database_url).await?;
+    let mut opt = ConnectOptions::new(&database_url);
+    let sqlx_debug = tracing::level_filters::LevelFilter::current()
+        >= tracing::level_filters::LevelFilter::DEBUG;
+    opt.sqlx_logging(sqlx_debug);
+    let db = Database::connect(opt).await?;
     Migrator::up(&db, None).await?;
 
     // Recompile any decision functions that have JS source but no WASM bytecode
@@ -78,12 +87,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let auth = Arc::new(Auth::new(db.clone()));
 
-    // Parse (or generate) ENCRYPTION_KEY
-    let master_key = parse_or_generate_encryption_key();
+    // Resolve secrets (env var → persisted file → generate & persist)
+    let data_dir = data_dir_from_database_url();
+    let state_dir = data_dir.join(".betweenrows");
+    tracing::info!(path = %data_dir.display(), "data directory");
+    warn_if_data_dir_not_persistent(&data_dir, &state_dir);
+    let master_key = resolve_hex_secret("BR_ENCRYPTION_KEY", &state_dir.join("encryption_key"));
 
     match cli.command {
         None | Some(Commands::Serve) => {
-            serve(auth, db, master_key).await?;
+            serve(auth, db, master_key, &state_dir).await?;
         }
         Some(Commands::User { action }) => {
             handle_user_action(auth, action).await?;
@@ -110,29 +123,212 @@ fn redact_db_url(url: &str) -> String {
     base.to_string()
 }
 
-/// Parse BR_ENCRYPTION_KEY env var as 64-char hex → [u8; 32].
-/// If unset, generate a random key and warn (tokens will not survive restarts).
-fn parse_or_generate_encryption_key() -> [u8; 32] {
-    match std::env::var("BR_ENCRYPTION_KEY") {
-        Ok(hex) => match parse_hex_key(&hex) {
-            Ok(key) => key,
+/// Resolve a hex secret: env var → persisted file → generate & persist.
+///
+/// 1. If `env_var` is set, parse it as 64-char hex and use it (production path).
+/// 2. If not set, check `file_path` — if it exists, load from file.
+/// 3. If file doesn't exist, generate a random 32-byte key, write it to `file_path`, and use it.
+///
+/// Cases 2 and 3 log a warning recommending the env var for production.
+fn resolve_hex_secret(env_var: &str, file_path: &std::path::Path) -> [u8; 32] {
+    // 1. Env var takes priority
+    if let Ok(hex) = std::env::var(env_var) {
+        match parse_hex_key(&hex) {
+            Ok(key) => return key,
             Err(e) => {
                 eprintln!(
-                    "FATAL: BR_ENCRYPTION_KEY is invalid: {}. \
-                         Fix the value or unset it to use a random key.",
-                    e
+                    "FATAL: {env_var} is invalid: {e}. \
+                     Fix the value or unset it to use a file-based key."
                 );
                 std::process::exit(1);
             }
-        },
-        Err(_) => {
-            tracing::warn!(
-                "BR_ENCRYPTION_KEY not set — using a random key. \
-                 Encrypted data will be unreadable after restart. \
-                 Set BR_ENCRYPTION_KEY to a 64-char hex string (32 bytes) in production."
-            );
-            random_key()
         }
+    }
+
+    // 2. Try loading from persisted file
+    if file_path.exists() {
+        match std::fs::read_to_string(file_path) {
+            Ok(hex) => match parse_hex_key(hex.trim()) {
+                Ok(key) => {
+                    tracing::warn!(
+                        "{env_var} not set — loaded from {}. \
+                         Set {env_var} to a 64-char hex string for production.",
+                        file_path.display()
+                    );
+                    return key;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "FATAL: persisted key at {} is invalid: {e}. \
+                         Delete the file or set {env_var} explicitly.",
+                        file_path.display()
+                    );
+                    std::process::exit(1);
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    "Could not read {}: {e} — generating a new key.",
+                    file_path.display()
+                );
+            }
+        }
+    }
+
+    // 3. Generate, persist, and return
+    let key = random_key();
+    let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+
+    if let Some(parent) = file_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::write(file_path, &hex) {
+        Ok(()) => {
+            tracing::warn!(
+                "{env_var} not set — generated and saved to {}. \
+                 Set {env_var} to a 64-char hex string for production.",
+                file_path.display()
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                "{env_var} not set and could not persist to {}: {e}. \
+                 Using an ephemeral key — data will be lost on restart. \
+                 Set {env_var} to a 64-char hex string for production.",
+                file_path.display()
+            );
+        }
+    }
+    key
+}
+
+/// Resolve a string secret from env var → file → generate.
+///
+/// Unlike `resolve_hex_secret`, this accepts any non-empty string as the env var value
+/// (no hex constraint). Used for secrets that don't need to be exactly 32 bytes (e.g. JWT).
+/// When auto-generating, produces a 64-char hex string for good entropy.
+fn resolve_string_secret(env_var: &str, file_path: &std::path::Path) -> String {
+    // 1. Env var takes priority — accept any non-empty string
+    if let Ok(val) = std::env::var(env_var) {
+        let val = val.trim().to_string();
+        if val.is_empty() {
+            eprintln!(
+                "FATAL: {env_var} is set but empty. \
+                 Fix the value or unset it to use a file-based key."
+            );
+            std::process::exit(1);
+        }
+        return val;
+    }
+
+    // 2. Try loading from persisted file
+    if file_path.exists() {
+        match std::fs::read_to_string(file_path) {
+            Ok(val) => {
+                let val = val.trim().to_string();
+                if !val.is_empty() {
+                    tracing::warn!(
+                        "{env_var} not set — loaded from {}. \
+                         Set {env_var} for production.",
+                        file_path.display()
+                    );
+                    return val;
+                }
+                tracing::warn!(
+                    "Persisted key at {} is empty — generating a new key.",
+                    file_path.display()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Could not read {}: {e} — generating a new key.",
+                    file_path.display()
+                );
+            }
+        }
+    }
+
+    // 3. Generate, persist, and return
+    let key = random_key();
+    let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+
+    if let Some(parent) = file_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::write(file_path, &hex) {
+        Ok(()) => {
+            tracing::warn!(
+                "{env_var} not set — generated and saved to {}. \
+                 Set {env_var} for production.",
+                file_path.display()
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                "{env_var} not set and could not persist to {}: {e}. \
+                 Using an ephemeral key — tokens will be invalid on restart. \
+                 Set {env_var} for production.",
+                file_path.display()
+            );
+        }
+    }
+    hex
+}
+
+/// Derive the data directory from BR_ADMIN_DATABASE_URL.
+/// For SQLite URLs like `sqlite:///data/proxy_admin.db?mode=rwc`, returns `/data`.
+/// Falls back to the current directory.
+fn data_dir_from_database_url() -> std::path::PathBuf {
+    let url = std::env::var("BR_ADMIN_DATABASE_URL")
+        .unwrap_or_else(|_| "sqlite://proxy_admin.db?mode=rwc".to_string());
+
+    // Strip query params
+    let path_part = url.split('?').next().unwrap_or(&url);
+
+    // Strip sqlite:// prefix
+    if let Some(stripped) = path_part.strip_prefix("sqlite://") {
+        let db_path = std::path::Path::new(stripped);
+        if let Some(parent) = db_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            return parent.to_path_buf();
+        }
+    }
+
+    std::path::PathBuf::from(".")
+}
+
+/// Warn if the data directory looks like an ephemeral container filesystem.
+///
+/// The `.betweenrows/` state directory acts as a persistence marker. If the data
+/// directory contains DB files but `.betweenrows/` is missing, it means the state
+/// dir was lost between restarts — the volume likely wasn't mounted.
+fn warn_if_data_dir_not_persistent(data_dir: &std::path::Path, state_dir: &std::path::Path) {
+    if state_dir.exists() {
+        return;
+    }
+
+    let db_exists = data_dir
+        .read_dir()
+        .ok()
+        .and_then(|mut entries| {
+            entries.find(|e| {
+                e.as_ref()
+                    .map(|e| e.file_name().to_string_lossy().ends_with(".db"))
+                    .unwrap_or(false)
+            })
+        })
+        .is_some();
+
+    if db_exists {
+        tracing::warn!(
+            "Data directory {} may not be persistent — \
+             .betweenrows/ state directory was not found alongside existing data. \
+             Ensure a volume is mounted (e.g., -v betweenrows_data:{}) \
+             to avoid data loss on container restart.",
+            data_dir.display(),
+            data_dir.display(),
+        );
     }
 }
 
@@ -148,7 +344,7 @@ fn parse_hex_key(hex: &str) -> Result<[u8; 32], String> {
         let byte_str =
             std::str::from_utf8(chunk).map_err(|_| "invalid UTF-8 in hex string".to_string())?;
         key[i] = u8::from_str_radix(byte_str, 16)
-            .map_err(|_| format!("invalid hex character in ENCRYPTION_KEY at byte {}", i))?;
+            .map_err(|_| format!("invalid hex character at byte {i}"))?;
     }
     Ok(key)
 }
@@ -163,6 +359,7 @@ async fn serve(
     auth: Arc<Auth>,
     db: sea_orm::DatabaseConnection,
     master_key: [u8; 32],
+    state_dir: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Auto-seed default admin if no users exist
     if auth.count_users().await? == 0 {
@@ -201,15 +398,7 @@ async fn serve(
     let policy_hook = PolicyHook::new(db.clone(), wasm_runtime.clone());
 
     // ── Admin REST API ────────────────────────────────────────────────────────
-    let jwt_secret = std::env::var("BR_ADMIN_JWT_SECRET").unwrap_or_else(|_| {
-        tracing::warn!(
-            "BR_ADMIN_JWT_SECRET not set — using a random secret. \
-             Tokens will be invalidated on every restart."
-        );
-        let mut bytes = [0u8; 32];
-        rand_core::OsRng.fill_bytes(&mut bytes);
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    });
+    let jwt_secret = resolve_string_secret("BR_ADMIN_JWT_SECRET", &state_dir.join("jwt_secret"));
 
     let jwt_expiry_hours: u64 = std::env::var("BR_ADMIN_JWT_EXPIRY_HOURS")
         .ok()

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-04-06
+
+### Added
+- **BetweenRows rebrand** — renamed from QueryProxy to BetweenRows across CLI, admin UI, Dockerfile, and configuration files
+- **Auto-persisted secrets** — encryption key and JWT secret now follow a three-tier resolution: env var → persisted file → auto-generate and save
+  - Keys are persisted to `.betweenrows/` state directory alongside the database, surviving container restarts without explicit env vars
+  - Persistence warning on startup if the state directory is missing alongside existing data (likely unmounted volume)
+  - Data directory inferred from `BR_ADMIN_DATABASE_URL` for consistent state file placement
+- **Startup banner** — displays version and tagline on boot
+- **Linux aarch64 support for Javy** — `build.rs` now downloads the correct Javy binary for `linux/aarch64` (ARM servers, Graviton, etc.)
+- **Docker quickstart compose** — `compose.quickstart.yaml` for one-command local setup
+- **Governance workflows roadmap** — detailed design for three-tier governance (none → draft → code) with sandboxes, YAML-as-code, and CI/CD deployment
+
+### Changed
+- **README rewritten as user-facing quickstart** — streamlined for new users with Docker quick start, 5-minute walkthrough, configuration reference, and policy overview
+- **Developer docs moved to CONTRIBUTING.md** — architecture details, data model, API reference, and performance notes relocated from README
+- **Fly.io deployment docs** — extracted to `docs/deploy-fly.md`
+- **SQLx logging suppressed below DEBUG** — `sqlx_logging` now only enabled when `RUST_LOG` includes DEBUG or lower, reducing noise in default `info` mode
+- **Dockerfile sets `BR_ADMIN_DATABASE_URL`** — explicitly sets the SQLite path to `/data/proxy_admin.db` for consistent data directory detection
+
+### Infrastructure
+- **`.betweenrows/` added to `.gitignore`** — auto-persisted state directory excluded from version control
+
 ## [0.11.0] - 2026-03-29
 
 ### Fixed

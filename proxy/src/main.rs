@@ -56,12 +56,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load .env if present
     dotenvy::dotenv().ok();
 
-    eprintln!("╔══════════════════════════════╗");
-    eprintln!("║  BetweenRows v{:<14}║", env!("CARGO_PKG_VERSION"));
-    eprintln!("║  Data access governance      ║");
-    eprintln!("╚══════════════════════════════╝");
+    eprintln!("  ██████╗ ███████╗████████╗██╗    ██╗███████╗███████╗███╗   ██╗");
+    eprintln!("  ██╔══██╗██╔════╝╚══██╔══╝██║    ██║██╔════╝██╔════╝████╗  ██║");
+    eprintln!("  ██████╔╝█████╗     ██║   ██║ █╗ ██║█████╗  █████╗  ██╔██╗ ██║");
+    eprintln!("  ██╔══██╗██╔══╝     ██║   ██║███╗██║██╔══╝  ██╔══╝  ██║╚██╗██║");
+    eprintln!("  ██████╔╝███████╗   ██║   ╚███╔███╔╝███████╗███████╗██║ ╚████║");
+    eprintln!("  ╚═════╝ ╚══════╝   ╚═╝    ╚══╝╚══╝ ╚══════╝╚══════╝╚═╝  ╚═══╝");
+    eprintln!("  ██████╗  ██████╗ ██╗    ██╗███████╗");
+    eprintln!("  ██╔══██╗██╔═══██╗██║    ██║██╔════╝");
+    eprintln!("  ██████╔╝██║   ██║██║ █╗ ██║███████╗");
+    eprintln!("  ██╔══██╗██║   ██║██║███╗██║╚════██║");
+    eprintln!("  ██║  ██║╚██████╔╝╚███╔███╔╝███████║");
+    eprintln!("  ╚═╝  ╚═╝ ╚═════╝  ╚══╝╚══╝ ╚══════╝");
+    eprintln!("  v{} — Data Access Governance", env!("CARGO_PKG_VERSION"));
+    eprintln!();
 
     let cli = Cli::parse();
+
+    // Check data directory persistence before DB connect creates any files
+    let data_dir = data_dir_from_database_url();
+    let state_dir = data_dir.join(".betweenrows");
+    tracing::info!(path = %data_dir.display(), "data directory");
+    warn_if_data_dir_not_persistent(&data_dir, &state_dir);
+    // Ensure the state dir exists as a persistence marker (resolve_*_secret
+    // only creates it when secrets are file-backed, not when env vars are set).
+    if let Err(e) = std::fs::create_dir_all(&state_dir) {
+        tracing::warn!(path = %state_dir.display(), error = %e, "failed to create state directory");
+    }
 
     // Connect to admin DB and run migrations
     let database_url = std::env::var("BR_ADMIN_DATABASE_URL")
@@ -86,10 +107,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let auth = Arc::new(Auth::new(db.clone()));
 
     // Resolve secrets (env var → persisted file → generate & persist)
-    let data_dir = data_dir_from_database_url();
-    let state_dir = data_dir.join(".betweenrows");
-    tracing::info!(path = %data_dir.display(), "data directory");
-    warn_if_data_dir_not_persistent(&data_dir, &state_dir);
     let master_key = resolve_hex_secret("BR_ENCRYPTION_KEY", &state_dir.join("encryption_key"));
 
     match cli.command {

@@ -1,9 +1,17 @@
-import { describe, it, expect } from 'vitest'
-import { screen } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Route, Routes } from 'react-router-dom'
 import { renderWithProviders } from '../test/test-utils'
 import { Layout } from './Layout'
+import { makeVersionInfo } from '../test/factories'
+
+vi.mock('../api/version', () => ({
+  getVersion: vi.fn(),
+}))
+
+import { getVersion } from '../api/version'
+const mockGetVersion = getVersion as ReturnType<typeof vi.fn>
 
 function WrappedLayout() {
   return (
@@ -16,6 +24,11 @@ function WrappedLayout() {
     </Routes>
   )
 }
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  mockGetVersion.mockResolvedValue(makeVersionInfo())
+})
 
 describe('Layout', () => {
   it('renders nav links for Users and Data Sources', () => {
@@ -42,5 +55,11 @@ describe('Layout', () => {
 
     expect(screen.getByText('Login Page')).toBeInTheDocument()
     expect(localStorage.getItem('token')).toBeNull()
+  })
+
+  it('displays current version in sidebar', async () => {
+    mockGetVersion.mockResolvedValue(makeVersionInfo({ current: '0.13.0' }))
+    renderWithProviders(<WrappedLayout />, { authenticated: true, routerEntries: ['/'] })
+    await waitFor(() => expect(screen.getByText('v0.13.0 (abc1234)')).toBeInTheDocument())
   })
 })

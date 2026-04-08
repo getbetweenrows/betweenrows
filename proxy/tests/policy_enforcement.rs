@@ -7520,3 +7520,243 @@ async fn abac_list_attribute_allowed_values() {
         .await;
     resp.assert_status_ok();
 }
+
+// ===========================================================================
+// Aggregate queries — COUNT(*) / COUNT(1) with column_allow only (no row_filter)
+// ===========================================================================
+
+#[tokio::test]
+async fn count_star_with_column_allow_only() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "cnt_allow";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT, name TEXT);
+             INSERT INTO {schema}.items VALUES (1, 'a'), (2, 'b'), (3, 'c');"
+        ))
+        .await;
+
+    let ds_id = server
+        .create_datasource("ds_cnt_allow", "policy_required")
+        .await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server.create_user("cnt_user", "CntPass1!", ds_id).await;
+    server
+        .create_column_allow("allow-all-cnt", schema, "items", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("cnt_user", "CntPass1!", "ds_cnt_allow")
+        .await;
+
+    // COUNT(*) with only column_allow policy
+    let msgs = client
+        .simple_query(&format!("SELECT COUNT(*) FROM {schema}.items"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], "3");
+
+    // COUNT(1) with only column_allow policy
+    let msgs = client
+        .simple_query(&format!("SELECT COUNT(1) FROM {schema}.items"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], "3");
+}
+
+#[tokio::test]
+async fn count_star_open_mode_no_policies() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "cnt_open";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT, name TEXT);
+             INSERT INTO {schema}.items VALUES (1, 'x'), (2, 'y');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_cnt_open", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("cnt_open_user", "CntPass1!", ds_id)
+        .await;
+
+    let client = server
+        .connect_as("cnt_open_user", "CntPass1!", "ds_cnt_open")
+        .await;
+
+    // COUNT(*) in open mode (no policies at all)
+    let msgs = client
+        .simple_query(&format!("SELECT COUNT(*) FROM {schema}.items"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], "2");
+
+    // COUNT(1) in open mode
+    let msgs = client
+        .simple_query(&format!("SELECT COUNT(1) FROM {schema}.items"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], "2");
+
+    // SELECT 1 FROM table — also produces 0-column scan
+    let msgs = client
+        .simple_query(&format!("SELECT 1 FROM {schema}.items"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 2);
+
+    // Multiple aggregates with no column refs
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT COUNT(*), COUNT(1), SUM(1) FROM {schema}.items"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], "2", "COUNT(*)");
+    assert_eq!(rows[0][1], "2", "COUNT(1)");
+    assert_eq!(rows[0][2], "2", "SUM(1)");
+}
+
+#[tokio::test]
+async fn count_star_with_column_deny() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "cnt_deny";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.secrets;
+             CREATE TABLE {schema}.secrets (id INT, name TEXT, ssn TEXT);
+             INSERT INTO {schema}.secrets VALUES (1, 'a', '111'), (2, 'b', '222'), (3, 'c', '333');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_cnt_deny", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("cnt_deny_user", "CntPass1!", ds_id)
+        .await;
+    server
+        .create_column_deny("deny-ssn", schema, "secrets", &["ssn"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("cnt_deny_user", "CntPass1!", "ds_cnt_deny")
+        .await;
+
+    // COUNT(*) with column_deny — should still count all rows
+    let msgs = client
+        .simple_query(&format!("SELECT COUNT(*) FROM {schema}.secrets"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], "3");
+
+    // SELECT 1 with column_deny — literal projection, 0-column scan
+    let msgs = client
+        .simple_query(&format!("SELECT 1 FROM {schema}.secrets"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 3);
+}
+
+#[tokio::test]
+async fn count_star_with_column_mask() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "cnt_mask";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.users;
+             CREATE TABLE {schema}.users (id INT, email TEXT);
+             INSERT INTO {schema}.users VALUES (1, 'a@x.com'), (2, 'b@x.com');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_cnt_mask", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("cnt_mask_user", "CntPass1!", ds_id)
+        .await;
+    server
+        .create_column_mask("mask-email", schema, "users", "email", "'***'", ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("cnt_mask_user", "CntPass1!", "ds_cnt_mask")
+        .await;
+
+    // COUNT(*) with column_mask — should count all rows
+    let msgs = client
+        .simple_query(&format!("SELECT COUNT(*) FROM {schema}.users"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], "2");
+}
+
+#[tokio::test]
+async fn count_star_with_join() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "cnt_join";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             DROP TABLE IF EXISTS {schema}.customers;
+             CREATE TABLE {schema}.customers (id INT, name TEXT);
+             CREATE TABLE {schema}.orders (id INT, customer_id INT, amount INT);
+             INSERT INTO {schema}.customers VALUES (1, 'alice'), (2, 'bob');
+             INSERT INTO {schema}.orders VALUES (1, 1, 100), (2, 1, 200), (3, 2, 50);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_cnt_join", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("cnt_join_user", "CntPass1!", ds_id)
+        .await;
+
+    let client = server
+        .connect_as("cnt_join_user", "CntPass1!", "ds_cnt_join")
+        .await;
+
+    // COUNT(*) over a JOIN — no column refs in outer SELECT
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT COUNT(*) FROM {schema}.orders o JOIN {schema}.customers c ON o.customer_id = c.id"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], "3");
+}

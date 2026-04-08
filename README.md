@@ -1,12 +1,18 @@
 # BetweenRows
 
+[![CI](https://github.com/getbetweenrows/betweenrows/actions/workflows/cicd.yml/badge.svg)](https://github.com/getbetweenrows/betweenrows/actions)
+[![Version](https://img.shields.io/github/v/tag/getbetweenrows/betweenrows?label=Version)](https://github.com/getbetweenrows/betweenrows/tags)
+[![License: ELv2](https://img.shields.io/badge/License-ELv2-blue.svg)](LICENSE)
+[![Docker](https://img.shields.io/badge/Docker-GHCR-blue?logo=docker)](https://ghcr.io/getbetweenrows/betweenrows)
+[![Built with Rust](https://img.shields.io/badge/Built%20with-Rust-orange?logo=rust)](https://www.rust-lang.org)
+
 A SQL proxy that enforces row-level security, column masking, and access control — without changing your application or database.
 
 BetweenRows sits between your users and your data sources, applying security policies on every query. Define who can see what through an admin UI, and every connection through the proxy is automatically governed. Currently supports PostgreSQL data sources.
 
 > **Alpha software.** BetweenRows is under active development and not yet production-ready. APIs, configuration, and data formats may change between releases. Pin your Docker image to a specific version tag (e.g., `ghcr.io/getbetweenrows/betweenrows:0.11.0`) rather than using `latest`. The software is provided as-is with no warranty — use at your own risk. We welcome feedback and bug reports via [GitHub Issues](https://github.com/getbetweenrows/betweenrows/issues).
 
-## Why
+## ✨ Why
 
 - **No application changes** — policies are enforced at the proxy layer, not in your app code
 - **Row-level filtering** — automatically filter rows based on user identity (role, department, tenant)
@@ -17,7 +23,7 @@ BetweenRows sits between your users and your data sources, applying security pol
 
 Built with **Rust**, **DataFusion**, **pgwire**, and **React**.
 
-## Components
+## 🏗️ Components
 
 BetweenRows ships as a single binary with two planes:
 
@@ -44,7 +50,7 @@ BetweenRows
 Upstream PostgreSQL
 ```
 
-## Quick Start (Docker)
+## 🚀 Quick Start (Docker)
 
 ```bash
 docker run -d \
@@ -55,13 +61,13 @@ docker run -d \
   ghcr.io/getbetweenrows/betweenrows:latest
 ```
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `BR_ADMIN_USER` | No | `admin` | Username for the initial admin account. Change it now if you prefer a different name — the username cannot be changed after creation. You can always create additional admin users through the UI later. |
-| `BR_ADMIN_PASSWORD` | **Yes** | — | Password for the initial admin account. Only used on first boot. You can change the password later through the UI. |
-| `-p 5434:5434` | **Yes** | — | SQL proxy port. Connect your SQL clients here. |
-| `-p 5435:5435` | **Yes** | — | Admin UI and REST API port. |
-| `-v betweenrows_data:/data` | **Yes** | — | Persistent volume. Stores the SQLite database (users, data sources, policies, audit logs) and auto-generated encryption/JWT keys when `BR_ENCRYPTION_KEY` and `BR_ADMIN_JWT_SECRET` are not set. **Do not omit** — without it, all data and keys are lost when the container restarts. |
+| Variable                    | Required | Default | Description                                                                                                                                                                                                                                                                            |
+| --------------------------- | -------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BR_ADMIN_USER`             | No       | `admin` | Username for the initial admin account. Change it now if you prefer a different name — the username cannot be changed after creation. You can always create additional admin users through the UI later.                                                                               |
+| `BR_ADMIN_PASSWORD`         | **Yes**  | —       | Password for the initial admin account. Only used on first boot. You can change the password later through the UI.                                                                                                                                                                     |
+| `-p 5434:5434`              | **Yes**  | —       | SQL proxy port. Connect your SQL clients here.                                                                                                                                                                                                                                         |
+| `-p 5435:5435`              | **Yes**  | —       | Admin UI and REST API port.                                                                                                                                                                                                                                                            |
+| `-v betweenrows_data:/data` | **Yes**  | —       | Persistent volume. Stores the SQLite database (users, data sources, policies, audit logs) and auto-generated encryption/JWT keys when `BR_ENCRYPTION_KEY` and `BR_ADMIN_JWT_SECRET` are not set. **Do not omit** — without it, all data and keys are lost when the container restarts. |
 
 Change these values to your preference **before the first run**. See [Configuration](#configuration) for all available options.
 
@@ -69,35 +75,35 @@ Open **http://localhost:5435** and log in with your admin credentials.
 
 ### 5-Minute Walkthrough
 
-1. **Add a data source** — Go to Data Sources → Create. Enter your data source connection details and test the connection.
-2. **Discover the schema** — Click "Discover Catalog" on your new data source. Select which schemas, tables, and columns to expose through the proxy.
-3. **Create a user** — Go to Users → Create. Set a username and password.
-4. **Grant access** — On the data source page, assign the user (or a role) access to the data source.
-5. **Create a policy** — Go to Policies → Create. For example, a `row_filter` policy with expression `tenant = {user.tenant}` to isolate rows by tenant. (The `tenant` attribute must be defined as a custom attribute definition first.)
-6. **Assign the policy** — On the data source page, assign the policy to a user, role, or all users.
-7. **Connect through the proxy** — The user can now query through BetweenRows:
+1. 🔗 **Add a data source** — Go to Data Sources → Create. Enter your data source connection details and test the connection.
+2. 🔍 **Discover the schema** — Click "Discover Catalog" on your new data source. Select which schemas, tables, and columns to expose through the proxy.
+3. 👤 **Create a user** — Go to Users → Create. Set a username and password.
+4. 🔑 **Grant access** — On the data source page, assign the user (or a role) access to the data source.
+5. 📜 **Create a policy** — Go to Policies → Create. For example, a `row_filter` policy with expression `tenant = {user.tenant}` to isolate rows by tenant. (The `tenant` attribute must be defined as a custom attribute definition first.)
+6. 🎯 **Assign the policy** — On the data source page, assign the policy to a user, role, or all users.
+7. 🚀 **Connect through the proxy** — The user can now query through BetweenRows:
    ```bash
    psql "postgresql://alice:secret@localhost:5434/my-datasource"
    ```
    Policies are applied automatically. Check the Query Audit page to see what happened.
 
-## Configuration
+## ⚙️ Configuration
 
-| Env var | Required | Default | Description |
-|---|---|---|---|
-| `BR_ADMIN_PASSWORD` | **Yes** (first boot) | — | Password for the initial admin account. Must be set when no users exist in DB. |
-| `BR_ADMIN_USER` | No | `admin` | Username for the initial admin account. Only used on first boot. |
-| `BR_ENCRYPTION_KEY` | No | *(auto-persisted)* | 64-char hex — AES-256-GCM key for secrets at rest. If unset, auto-generated and saved to `/data/.betweenrows/encryption_key`. **Set explicitly in prod.** If switching from auto-generated to explicit, copy the value from `/data/.betweenrows/encryption_key` — using a different key makes existing secrets unreadable. |
-| `BR_ADMIN_JWT_SECRET` | No | *(auto-persisted)* | Any non-empty string — HMAC-SHA256 signing key for admin JWTs. If unset, auto-generated and saved to `/data/.betweenrows/jwt_secret`. **Set explicitly in prod.** |
-| `BR_ADMIN_JWT_EXPIRY_HOURS` | No | `24` | JWT lifetime in hours. |
-| `BR_ADMIN_DATABASE_URL` | No | `sqlite://proxy_admin.db?mode=rwc` | SeaORM connection URL (use `postgres://…` for shared backend). |
-| `BR_PROXY_BIND_ADDR` | No | `127.0.0.1:5434` | Proxy listen address. Docker image defaults to `0.0.0.0:5434`. |
-| `BR_ADMIN_BIND_ADDR` | No | `127.0.0.1:5435` | Admin REST API listen address. Docker image defaults to `0.0.0.0:5435`. |
-| `BR_IDLE_TIMEOUT_SECS` | No | `900` (15 min) | Close idle proxy connections after this many seconds. Set to `0` to disable. |
-| `BR_CORS_ALLOWED_ORIGINS` | No | *(empty, same-origin only)* | Comma-separated list of allowed CORS origins for the Admin API. |
-| `RUST_LOG` | No | `info` | Log filter (standard Rust/tracing convention). |
+| Env var                     | Required             | Default                            | Description                                                                                                                                                                                                                                                                                                                |
+| --------------------------- | -------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BR_ADMIN_PASSWORD`         | **Yes** (first boot) | —                                  | Password for the initial admin account. Must be set when no users exist in DB.                                                                                                                                                                                                                                             |
+| `BR_ADMIN_USER`             | No                   | `admin`                            | Username for the initial admin account. Only used on first boot.                                                                                                                                                                                                                                                           |
+| `BR_ENCRYPTION_KEY`         | No                   | _(auto-persisted)_                 | 64-char hex — AES-256-GCM key for secrets at rest. If unset, auto-generated and saved to `/data/.betweenrows/encryption_key`. **Set explicitly in prod.** If switching from auto-generated to explicit, copy the value from `/data/.betweenrows/encryption_key` — using a different key makes existing secrets unreadable. |
+| `BR_ADMIN_JWT_SECRET`       | No                   | _(auto-persisted)_                 | Any non-empty string — HMAC-SHA256 signing key for admin JWTs. If unset, auto-generated and saved to `/data/.betweenrows/jwt_secret`. **Set explicitly in prod.**                                                                                                                                                          |
+| `BR_ADMIN_JWT_EXPIRY_HOURS` | No                   | `24`                               | JWT lifetime in hours.                                                                                                                                                                                                                                                                                                     |
+| `BR_ADMIN_DATABASE_URL`     | No                   | `sqlite://proxy_admin.db?mode=rwc` | SeaORM connection URL (use `postgres://…` for shared backend).                                                                                                                                                                                                                                                             |
+| `BR_PROXY_BIND_ADDR`        | No                   | `127.0.0.1:5434`                   | Proxy listen address. Docker image defaults to `0.0.0.0:5434`.                                                                                                                                                                                                                                                             |
+| `BR_ADMIN_BIND_ADDR`        | No                   | `127.0.0.1:5435`                   | Admin REST API listen address. Docker image defaults to `0.0.0.0:5435`.                                                                                                                                                                                                                                                    |
+| `BR_IDLE_TIMEOUT_SECS`      | No                   | `900` (15 min)                     | Close idle proxy connections after this many seconds. Set to `0` to disable.                                                                                                                                                                                                                                               |
+| `BR_CORS_ALLOWED_ORIGINS`   | No                   | _(empty, same-origin only)_        | Comma-separated list of allowed CORS origins for the Admin API.                                                                                                                                                                                                                                                            |
+| `RUST_LOG`                  | No                   | `info`                             | Log filter (standard Rust/tracing convention).                                                                                                                                                                                                                                                                             |
 
-## Connecting to the Proxy
+## 🔌 Connecting to the Proxy
 
 BetweenRows speaks the PostgreSQL wire protocol — connect with any PostgreSQL client using the datasource name as the database:
 
@@ -109,17 +115,17 @@ Tested with **psql** and **TablePlus**. Any tool that supports PostgreSQL or ODB
 
 > **Note:** Some SQL clients send additional metadata queries (e.g., for autocompletion or schema browsing) that BetweenRows may not support yet. If your client fails to connect, please [open an issue](https://github.com/getbetweenrows/betweenrows/issues).
 
-## Policy System
+## 🛡️ Policy System
 
 BetweenRows supports five policy types:
 
-| Type | What it does |
-|------|-------------|
-| `row_filter` | Injects a WHERE clause to filter rows (e.g., `tenant = {user.tenant}`) |
-| `column_mask` | Replaces column values with an expression (e.g., `'***@' \|\| split_part(email, '@', 2)`) |
-| `column_allow` | Permits access to specific columns (required in `policy_required` mode) |
-| `column_deny` | Hides columns from the user's schema entirely |
-| `table_deny` | Hides entire tables from the user's schema |
+| Type           | What it does                                                                              |
+| -------------- | ----------------------------------------------------------------------------------------- |
+| `row_filter`   | Injects a WHERE clause to filter rows (e.g., `tenant = {user.tenant}`)                    |
+| `column_mask`  | Replaces column values with an expression (e.g., `'***@' \|\| split_part(email, '@', 2)`) |
+| `column_allow` | Permits access to specific columns (required in `policy_required` mode)                   |
+| `column_deny`  | Hides columns from the user's schema entirely                                             |
+| `table_deny`   | Hides entire tables from the user's schema                                                |
 
 Key concepts:
 
@@ -134,7 +140,7 @@ Key concepts:
 
 See [docs/permission-system.md](docs/permission-system.md) for the full guide.
 
-## Catalog Workflow
+## 📋 Catalog Workflow
 
 Before a data source is queryable through the proxy, its catalog must be saved. The UI wizard guides through four steps:
 
@@ -145,13 +151,13 @@ Before a data source is queryable through the proxy, its catalog must be saved. 
 
 The catalog is an **allowlist** — the proxy can never expose tables or columns not explicitly saved. To detect schema drift after upstream changes, use "Sync Catalog" from the data source page.
 
-## Admin REST API
+## 🔗 Admin REST API
 
 BetweenRows includes a full REST API at `http://localhost:5435/api/v1` for managing users, data sources, roles, policies, catalog discovery, and audit logs. All endpoints require JWT authentication (`POST /auth/login` to obtain a token).
 
 Everything you can do in the admin UI can also be done via the API — useful for scripting, CI/CD integration, and automation.
 
-## CLI
+## 💻 CLI
 
 Create users without the UI — useful for scripting and automation. If you're locked out of the admin UI, use `--admin` to create a new admin user to regain access. You can then change passwords through the UI. A forgot/reset password feature is on the [roadmap](docs/roadmap.md):
 
@@ -164,10 +170,10 @@ docker exec -it <container> proxy user create --username rescue --password secre
 cargo run -p proxy -- user create --username alice --password secret
 ```
 
-## Roadmap
+## 🗺️ Roadmap
 
 See [docs/roadmap.md](docs/roadmap.md) for planned features including shadow mode, governance workflows, and more.
 
-## Contributing
+## 🤝 Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture details, build instructions, and development setup.

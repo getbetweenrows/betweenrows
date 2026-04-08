@@ -704,6 +704,69 @@ impl datafusion::optimizer::OptimizerRule for ScanFilterProjectionFixRule {
     }
 }
 
+/// Workaround for `datafusion-table-providers` `SqlExec` returning a 1-column
+/// schema (`ONE_COLUMN_SCHEMA`) when the logical projection is empty (`Some([])`).
+///
+/// `optimize_projections` can narrow a `TableScan` projection to `[]` when no
+/// columns are needed (e.g. `SELECT COUNT(*) FROM t`).  The logical plan says 0
+/// output fields, but `SqlExec::new → project_schema_safe` maps `[]` to a
+/// 1-column schema (field `"1": Int64`) because the SQL it generates is
+/// `SELECT 1 FROM t`.  The physical planner then rejects the plan because
+/// physical (1 field) ≠ logical (0 fields).
+///
+/// This rule converts `TableScan(projection=Some([]))` to
+/// `TableScan(projection=Some([0]))` — selecting at least the first column.
+/// Parent nodes (e.g. `Aggregate`) never reference scan columns in this
+/// situation, so adding an unreferenced column is harmless.
+///
+/// **To check on DataFusion / table-providers upgrade:** run
+/// `cargo test --test policy_enforcement count_star` without this rule.
+/// If the tests pass, the workaround can be removed.
+#[derive(Debug)]
+struct EmptyProjectionFixRule;
+
+impl datafusion::optimizer::OptimizerRule for EmptyProjectionFixRule {
+    fn name(&self) -> &str {
+        "empty_projection_fix"
+    }
+
+    fn apply_order(&self) -> Option<datafusion::optimizer::ApplyOrder> {
+        Some(datafusion::optimizer::ApplyOrder::BottomUp)
+    }
+
+    fn rewrite(
+        &self,
+        plan: datafusion::logical_expr::LogicalPlan,
+        _config: &dyn datafusion::optimizer::OptimizerConfig,
+    ) -> datafusion::error::Result<
+        datafusion::common::tree_node::Transformed<datafusion::logical_expr::LogicalPlan>,
+    > {
+        use datafusion::common::tree_node::Transformed;
+        use datafusion::logical_expr::LogicalPlan;
+
+        let LogicalPlan::TableScan(ref scan) = plan else {
+            return Ok(Transformed::no(plan));
+        };
+        let Some(projection) = &scan.projection else {
+            return Ok(Transformed::no(plan));
+        };
+        if !projection.is_empty() {
+            return Ok(Transformed::no(plan));
+        }
+
+        // Replace empty projection with the first column.
+        let new_scan = datafusion::logical_expr::TableScan::try_new(
+            scan.table_name.clone(),
+            scan.source.clone(),
+            Some(vec![0]),
+            scan.filters.clone(),
+            scan.fetch,
+        )?;
+
+        Ok(Transformed::yes(LogicalPlan::TableScan(new_scan)))
+    }
+}
+
 /// Build a SessionContext from local catalog metadata using a shared LazyPool.
 ///
 /// Pool creation is deferred until the first user-table query, so pg_catalog /
@@ -747,6 +810,7 @@ async fn create_session_context_from_catalog(
         .with_default_catalog_and_schema("postgres", default_schema);
     let mut ctx = SessionContext::new_with_config(config);
     ctx.add_optimizer_rule(Arc::new(ScanFilterProjectionFixRule));
+    ctx.add_optimizer_rule(Arc::new(EmptyProjectionFixRule));
     ctx.register_catalog("postgres", Arc::new(catalog));
 
     setup_pg_catalog(&ctx, "postgres", ProxyCatalogContext)

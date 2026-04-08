@@ -9,7 +9,7 @@ pgwire 0.38, DataFusion 52, axum 0.8, SeaORM 1, tokio-postgres 0.7, argon2 0.5, 
 - `src/admin/jwt.rs` — `AdminClaims` / `AuthClaims` extractors
 - `src/admin/datasource_types.rs` — `split_config`, `merge_config`, `get_type_defs`
 - `src/admin/discovery_job.rs` — `JobStore`, `DiscoveryJob`, `DiscoveryEvent`, `DiscoveryRequest`
-- `src/engine/mod.rs` — `EngineCache` (uses shared `Arc<WasmDecisionRuntime>` for visibility-level decision fn evaluation), `VirtualCatalogProvider`, `build_arrow_schema()`, `arrow_type_to_string()`
+- `src/engine/mod.rs` — `EngineCache` (uses shared `Arc<WasmDecisionRuntime>` for visibility-level decision fn evaluation), `VirtualCatalogProvider`, `build_arrow_schema()`, `arrow_type_to_string()`, `ScanFilterProjectionFixRule` (ensures pushed-down filter columns are in scan projection), `EmptyProjectionFixRule` (prevents zero-column scan projections that cause schema mismatch with `SqlExec`)
 - `src/engine/rewrite.rs` — `rewrite_statement()` AST visitor (pg_catalog table qualification, schema-stripped function calls)
 - `src/hooks/read_only.rs` — `ReadOnlyHook` (allowlist: Query, Show*, Explain*)
 - `src/hooks/policy.rs` — `PolicyHook` (five policy types: row_filter, column_mask, column_allow, column_deny, table_deny; audit logging)

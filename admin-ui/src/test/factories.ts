@@ -1,6 +1,7 @@
 import type { User, LoginResponse, PaginatedResponse } from '../types/user'
 import type { DataSource, DataSourceType, FieldDef } from '../types/datasource'
 import type { PolicyResponse, PolicyAssignmentResponse } from '../types/policy'
+import type { VersionInfo } from '../api/version'
 import type { DecisionFunctionResponse } from '../types/decisionFunction'
 import type {
   CatalogResponse,
@@ -179,6 +180,14 @@ export function makePolicy(overrides: Partial<PolicyResponse> = {}): PolicyRespo
     created_at: '2024-01-01T00:00:00Z',
     updated_at: '2024-01-01T00:00:00Z',
     assignments: [],
+    ...overrides,
+  }
+}
+
+export function makeVersionInfo(overrides: Partial<VersionInfo> = {}): VersionInfo {
+  return {
+    current: '0.13.0',
+    commit: 'abc1234',
     ...overrides,
   }
 }

@@ -103,7 +103,15 @@ pub fn admin_router(state: AdminState) -> Router {
     };
 
     Router::new()
-        .route("/health", get(|| async { StatusCode::OK }))
+        .route(
+            "/health",
+            get(|| async {
+                Json(serde_json::json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "commit": env!("GIT_COMMIT_SHORT"),
+                }))
+            }),
+        )
         .nest("/api/v1", api_v1())
         .fallback_service(
             ServeDir::new("/usr/local/share/admin-ui")

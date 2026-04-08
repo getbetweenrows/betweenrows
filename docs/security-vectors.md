@@ -844,3 +844,15 @@ Note: `tenant` is no longer a reserved key — it is a regular custom attribute.
 
 **Test**: Unit tests in `dto.rs` can verify that unsupported syntax (e.g., `EXTRACT(HOUR FROM col)`) is rejected at save time. Integration test `abac_column_mask_case_when` verifies that CASE WHEN (a previously unsupported syntax, now added) works end-to-end.
 
+---
+
+### 69. Zero-column scan projection causes schema mismatch (datafusion-table-providers)
+
+**Vector**: Queries that don't reference any table columns (e.g. `SELECT COUNT(*)`, `SELECT COUNT(1)`, `SELECT 1 FROM t`) cause DataFusion to optimize the `TableScan` projection to `Some([])` (zero columns). The `datafusion-table-providers` crate's `SqlExec` handles empty projections by generating `SELECT 1 FROM t` and returning a 1-column physical schema (`ONE_COLUMN_SCHEMA`), but the logical plan expects 0 columns → physical/logical schema mismatch error at execution time.
+
+**Bug**: No optimizer rule prevented zero-column projections from reaching `SqlExec`. The existing `ScanFilterProjectionFixRule` only fired when pushed-down filters were present, so queries without filters (or without row_filter policies) hit the mismatch.
+
+**Defense**: `EmptyProjectionFixRule` optimizer rule (registered on every `SessionContext`) converts `TableScan(projection=Some([]))` to `TableScan(projection=Some([0]))` — selecting at least the first column. Parent nodes (e.g. `Aggregate`) never reference scan columns in this situation, so the extra column is harmless.
+
+**Test**: `count_star_open_mode_no_policies` — COUNT(\*), COUNT(1), SELECT 1, and multiple aggregates with no policies. `count_star_with_column_allow_only` — COUNT(\*) and COUNT(1) with only column_allow in policy_required mode. `count_star_with_column_deny` — COUNT(\*) and SELECT 1 with column_deny. `count_star_with_column_mask` — COUNT(\*) with column_mask. `count_star_with_join` — COUNT(\*) over a JOIN with no column refs in outer SELECT.
+

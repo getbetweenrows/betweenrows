@@ -1,9 +1,11 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
+import { useVersion } from '../hooks/useVersion'
 
 export function Layout() {
   const { user, signOut } = useAuth()
   const navigate = useNavigate()
+  const { data: version } = useVersion()
 
   function handleSignOut() {
     signOut()
@@ -109,6 +111,9 @@ export function Layout() {
 
         <div className="px-4 py-4 border-t border-gray-700">
           <p className="text-xs text-gray-400 truncate">{user?.username}</p>
+          {version && (
+            <p className="text-xs text-gray-500 mt-1">v{version.current} ({version.commit})</p>
+          )}
           <button
             onClick={handleSignOut}
             className="mt-2 text-xs text-gray-400 hover:text-white transition-colors"

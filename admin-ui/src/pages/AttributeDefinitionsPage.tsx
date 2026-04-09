@@ -1,11 +1,13 @@
 import { useState } from 'react'
+import { useDebounce } from '../hooks/useDebounce'
 import { Link, useNavigate } from 'react-router-dom'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   listAttributeDefinitions,
   deleteAttributeDefinition,
 } from '../api/attributeDefinitions'
 import { CopyableId } from '../components/CopyableId'
+import { SUPPORTED_ENTITY_TYPES } from '../types/attributeDefinition'
 
 const VALUE_TYPE_BADGE: Record<string, string> = {
   string: 'bg-blue-100 text-blue-700',
@@ -18,16 +20,20 @@ export function AttributeDefinitionsPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
+  const [search, setSearch] = useState('')
+  const debouncedSearch = useDebounce(search, 300)
   const [entityFilter, setEntityFilter] = useState<string>('user')
 
   const { data, isLoading } = useQuery({
-    queryKey: ['attribute-definitions', page, entityFilter],
+    queryKey: ['attribute-definitions', page, entityFilter, debouncedSearch],
     queryFn: () =>
       listAttributeDefinitions({
         entity_type: entityFilter || undefined,
+        search: debouncedSearch || undefined,
         page,
         page_size: 50,
       }),
+    placeholderData: keepPreviousData,
   })
 
   const [deleteError, setDeleteError] = useState<string | null>(null)
@@ -93,20 +99,29 @@ export function AttributeDefinitionsPage() {
       </div>
 
       <div className="flex items-center gap-3 mb-4">
-        <label className="text-sm text-gray-600">Entity type:</label>
-        <select
-          value={entityFilter}
-          onChange={(e) => {
-            setEntityFilter(e.target.value)
-            setPage(1)
-          }}
-          className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-        >
-          <option value="user">User</option>
-          <option value="table">Table</option>
-          <option value="column">Column</option>
-          <option value="">All</option>
-        </select>
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => { setSearch(e.target.value); setPage(1) }}
+          placeholder="Search by key or display name…"
+          className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-64"
+        />
+        <label className="text-sm text-gray-600 flex items-center gap-2">
+          Entity type:
+          <select
+            value={entityFilter}
+            onChange={(e) => {
+              setEntityFilter(e.target.value)
+              setPage(1)
+            }}
+            className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            {SUPPORTED_ENTITY_TYPES.map((t) => (
+              <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>
+            ))}
+            <option value="">All</option>
+          </select>
+        </label>
       </div>
 
       {deleteError && (
@@ -134,6 +149,7 @@ export function AttributeDefinitionsPage() {
               <tr>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Key</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">ID</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Entity</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Display Name</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Type</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Allowed Values</th>
@@ -148,6 +164,7 @@ export function AttributeDefinitionsPage() {
                   <td className="px-4 py-3">
                     <CopyableId id={def.id} short />
                   </td>
+                  <td className="px-4 py-3 text-gray-500">{def.entity_type}</td>
                   <td className="px-4 py-3">{def.display_name}</td>
                   <td className="px-4 py-3">
                     <span

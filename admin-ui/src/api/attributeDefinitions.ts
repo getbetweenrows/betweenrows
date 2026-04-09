@@ -8,6 +8,7 @@ import type { PaginatedResponse } from '../types/user'
 
 export async function listAttributeDefinitions(params?: {
   entity_type?: string
+  search?: string
   page?: number
   page_size?: number
 }): Promise<PaginatedResponse<AttributeDefinition>> {

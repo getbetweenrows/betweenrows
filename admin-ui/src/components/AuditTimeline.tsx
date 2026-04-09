@@ -18,7 +18,7 @@ export function AuditTimeline({ resourceType, resourceId }: AuditTimelineProps) 
         resource_type: resourceType,
         resource_id: resourceId,
         page,
-        page_size: 20,
+        page_size: 5,
       }),
   })
 
@@ -74,7 +74,7 @@ export function AuditTimeline({ resourceType, resourceId }: AuditTimelineProps) 
       </div>
 
       {totalPages > 1 && (
-        <div className="flex items-center gap-2 mt-4 justify-end">
+        <div className="flex items-center gap-2 mt-4">
           <button
             onClick={() => setPage((p) => Math.max(1, p - 1))}
             disabled={page === 1}

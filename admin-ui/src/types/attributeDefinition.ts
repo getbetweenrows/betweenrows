@@ -1,6 +1,9 @@
 export type ValueType = 'string' | 'integer' | 'boolean' | 'list'
 export type EntityType = 'user' | 'table' | 'column'
 
+// Only "user" attributes are supported for now; add "table", "column" later
+export const SUPPORTED_ENTITY_TYPES: EntityType[] = ['user']
+
 export interface AttributeDefinition {
   id: string
   key: string

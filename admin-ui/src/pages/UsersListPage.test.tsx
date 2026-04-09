@@ -89,15 +89,14 @@ describe('UsersListPage', () => {
     expect(screen.getByRole('button', { name: /next/i })).toBeInTheDocument()
   })
 
-  it('search form submits and refetches', async () => {
+  it('debounced search refetches', async () => {
     const user = userEvent.setup()
     mockListUsers.mockResolvedValue(makePaginatedUsers([makeUser({ username: 'alice' })]))
 
     renderWithProviders(<UsersListPage />, { authenticated: true })
-    await waitFor(() => screen.getByRole('button', { name: /^search$/i }))
+    await waitFor(() => screen.getByRole('searchbox'))
 
     await user.type(screen.getByRole('searchbox'), 'alice')
-    await user.click(screen.getByRole('button', { name: /^search$/i }))
 
     await waitFor(() =>
       expect(mockListUsers).toHaveBeenCalledWith(

@@ -1,5 +1,5 @@
 import { Fragment, useState, useMemo } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { listAdminAuditLogs } from '../api/adminAudit'
 import { actionBadgeClass } from '../utils/auditBadge'
 import { EntitySelect } from '../components/EntitySelect'
@@ -70,6 +70,7 @@ export function AdminAuditPage() {
         page_size: 20,
         ...appliedFilters,
       }),
+    placeholderData: keepPreviousData,
   })
 
   function handleFilter(e: React.FormEvent) {

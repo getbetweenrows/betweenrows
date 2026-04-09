@@ -1,8 +1,9 @@
 import { type FormEvent, useState, useEffect } from 'react'
-import type {
-  ValueType,
-  EntityType,
-  AttributeDefinition,
+import {
+  SUPPORTED_ENTITY_TYPES,
+  type ValueType,
+  type EntityType,
+  type AttributeDefinition,
 } from '../types/attributeDefinition'
 
 export interface AttributeDefinitionFormValues {
@@ -26,7 +27,7 @@ interface Props {
 }
 
 const VALUE_TYPES: ValueType[] = ['string', 'integer', 'boolean', 'list']
-const ENTITY_TYPES: EntityType[] = ['user', 'table', 'column']
+const ENTITY_TYPES = SUPPORTED_ENTITY_TYPES
 
 const inputCls =
   'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500'

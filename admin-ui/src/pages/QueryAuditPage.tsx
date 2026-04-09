@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { format } from 'sql-formatter'
 import { listAuditLogs } from '../api/audit'
 import type { AuditLogEntry } from '../api/audit'
@@ -68,6 +68,7 @@ export function QueryAuditPage() {
         page_size: 20,
         ...appliedFilters,
       }),
+    placeholderData: keepPreviousData,
   })
 
   function handleFilter(e: React.FormEvent) {

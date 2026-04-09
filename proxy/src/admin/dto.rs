@@ -154,6 +154,7 @@ pub struct UpdateAttributeDefinitionRequest {
 #[derive(Debug, Deserialize)]
 pub struct ListAttributeDefinitionsQuery {
     pub entity_type: Option<String>,
+    pub search: Option<String>,
     pub page: Option<u64>,
     pub page_size: Option<u64>,
 }

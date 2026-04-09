@@ -44,7 +44,7 @@ describe('Layout', () => {
 
   it('shows the logged-in username', () => {
     renderWithProviders(<WrappedLayout />, { authenticated: true, routerEntries: ['/'] })
-    expect(screen.getByText('admin')).toBeInTheDocument()
+    expect(screen.getByText('@admin')).toBeInTheDocument()
   })
 
   it('sign out button clears auth and navigates to /login', async () => {

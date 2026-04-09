@@ -37,6 +37,15 @@ pub async fn list_attribute_definitions(
     if let Some(ref et) = params.entity_type {
         query = query.filter(attribute_definition::Column::EntityType.eq(et.as_str()));
     }
+    if let Some(ref search) = params.search
+        && !search.is_empty()
+    {
+        query = query.filter(
+            attribute_definition::Column::Key
+                .contains(search.as_str())
+                .or(attribute_definition::Column::DisplayName.contains(search.as_str())),
+        );
+    }
 
     let total = query
         .clone()

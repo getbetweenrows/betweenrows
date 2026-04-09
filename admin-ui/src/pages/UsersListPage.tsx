@@ -1,6 +1,7 @@
 import { useState } from 'react'
+import { useDebounce } from '../hooks/useDebounce'
 import { Link, useNavigate } from 'react-router-dom'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { deleteUser, listUsers } from '../api/users'
 import type { User } from '../types/user'
 import { CopyableId } from '../components/CopyableId'
@@ -10,11 +11,12 @@ export function UsersListPage() {
   const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
-  const [searchInput, setSearchInput] = useState('')
+  const debouncedSearch = useDebounce(search, 300)
 
   const { data, isLoading, isError } = useQuery({
-    queryKey: ['users', page, search],
-    queryFn: () => listUsers({ page, page_size: 20, search: search || undefined }),
+    queryKey: ['users', page, debouncedSearch],
+    queryFn: () => listUsers({ page, page_size: 20, search: debouncedSearch || undefined }),
+    placeholderData: keepPreviousData,
   })
 
   const deleteMutation = useMutation({
@@ -24,12 +26,6 @@ export function UsersListPage() {
       queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
     },
   })
-
-  function handleSearch(e: React.FormEvent) {
-    e.preventDefault()
-    setSearch(searchInput)
-    setPage(1)
-  }
 
   function handleDelete(user: User) {
     if (!confirm(`Delete user "${user.username}"? This cannot be undone.`)) return
@@ -55,31 +51,15 @@ export function UsersListPage() {
         </Link>
       </div>
 
-      {/* Search */}
-      <form onSubmit={handleSearch} className="flex gap-2 mb-4">
+      <div className="flex items-center gap-3 mb-4">
         <input
           type="search"
-          value={searchInput}
-          onChange={(e) => setSearchInput(e.target.value)}
+          value={search}
+          onChange={(e) => { setSearch(e.target.value); setPage(1) }}
           placeholder="Search by username…"
-          className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-64"
+          className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-64"
         />
-        <button
-          type="submit"
-          className="border border-gray-300 rounded-lg px-4 py-2 text-sm hover:bg-gray-50 transition-colors"
-        >
-          Search
-        </button>
-        {search && (
-          <button
-            type="button"
-            onClick={() => { setSearch(''); setSearchInput(''); setPage(1) }}
-            className="text-sm text-gray-500 hover:text-gray-700 px-2"
-          >
-            Clear
-          </button>
-        )}
-      </form>
+      </div>
 
       {/* Table */}
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
@@ -93,11 +73,11 @@ export function UsersListPage() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
-                <th className="text-left px-4 py-3 font-medium text-gray-600">Username</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-600">ID</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-600">Role</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-600">Status</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-600">Last login</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Username</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">ID</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Role</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Status</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Last login</th>
                 <th className="px-4 py-3" />
               </tr>
             </thead>

@@ -57,7 +57,7 @@ export function App() {
                 <Route path="policies" element={<PoliciesListPage />} />
                 <Route path="policies/create" element={<PolicyCreatePage />} />
                 <Route path="policies/:id/edit" element={<PolicyEditPage />} />
-                <Route path="audit" element={<QueryAuditPage />} />
+                <Route path="query-audit" element={<QueryAuditPage />} />
                 <Route path="admin-audit" element={<AdminAuditPage />} />
               </Route>
             </Route>

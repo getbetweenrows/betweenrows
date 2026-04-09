@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-04-08
+
+### Added
+
+- **[Both] Entity search, copyable IDs, and audit improvements** — server-side search for attribute definitions, entity search dropdowns on audit pages, copyable UUID components across list pages, debounce hook, and new admin/query audit page tests
+  - Proxy: search filter on `GET /attribute-definitions`, copyable IDs in audit responses, policy enforcement test coverage for missing attribute defaults
+  - Admin UI: `CopyableId` component, `EntitySelect` component, `useDebounce` hook, admin audit & query audit page tests
+- **[Both] Version display** — app version and git commit hash shown in sidebar footer
+  - Proxy: `/api/version` endpoint serving version from `Cargo.toml` + build-time git commit
+  - Admin UI: `useVersion` hook, version display in Layout
+
+### Changed
+
+- **[Both] Debounced search and `keepPreviousData`** — replaced form-submit search with real-time debounced search across all list pages (Users, Roles, Policies, Data Sources, Attributes); added `keepPreviousData` to prevent layout flash during transitions
+- **[Admin UI] Sidebar navigation redesign** — grouped nav into Access Control / Data / Activity sections with Heroicons; added "Report an issue" link in footer; username prefixed with `@`
+- **[Admin UI] Default value UX improvements** — type-specific placeholders, inline NULL badge when empty, icon-based clear button in attribute definition form
+- **[Admin UI] Attribute definitions table** — added entity type column, reordered entity type filter before search input
+- **[Admin UI] Audit timeline** ��� reduced page size from 20 to 5 for inline timelines; left-aligned pagination
+- **[Admin UI] Table header styling** — consistent `text-xs` sizing across all list page headers
+- **[Both] NULL terminology standardized** — replaced inconsistent "no default (null)" phrasing with explicit "NULL" across UI, docs, code comments, and security vectors
+
+### Fixed
+
+- **[Proxy] Zero-column scan** — fixed `EmptyProjectionFixRule` handling when all columns are denied
+
 ## [0.13.0] - 2026-04-06
 
 ### Added

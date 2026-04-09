@@ -21,12 +21,17 @@ Group entries by:
 - **Fixed** — bug fixes
 - **Infrastructure** — CI, build, tooling changes (omit if trivial)
 
-Format each entry as a bolded feature name with a short summary, followed by detail sub-bullets where useful:
+Format each entry with a component tag and bolded feature name, followed by detail sub-bullets where useful:
 ```
-- **Feature name** — one-line summary
+- **[Admin UI] Feature name** — one-line summary
   - detail point
   - detail point
+- **[Proxy] Feature name** — one-line summary
+- **[Both] Feature name** — one-line summary
 ```
+
+Component tags: `[Proxy]`, `[Admin UI]`, `[Docs]`, `[Migration]`, `[Both]` (when a change spans proxy and admin-ui). Derive the tag from which files the commit touches — commits scoped to `proxy/` → `[Proxy]`, `admin-ui/` → `[Admin UI]`, `docs/` only → `[Docs]`, `migration/` → `[Migration]`. Commits touching both `proxy/` and `admin-ui/` → `[Both]`.
+
 Do not mix flat one-liners with wall-of-text entries. Keep the top-level line scannable; put specifics in sub-bullets.
 
 Do not include merge commits, formatting-only commits, or version bump commits. Do not classify a commit as **Fixed** if it fixes a bug in code that was not yet released — those are part of the new feature and belong under **Added** or **Changed**. **Fixed** is only for regressions or bugs in previously released behavior.

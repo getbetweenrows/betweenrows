@@ -320,15 +320,15 @@ Reserved keys for `entity_type = "user"`: `username`, `id`, `user_id`, `roles` �
 
 When a user lacks an attribute that is referenced by a policy, the proxy resolves the value using the attribute definition's `default_value`:
 
-| User has attribute? | `default_value` set? | Template variable result | Decision function context |
+| User has attribute? | `default_value` | Template variable result | Decision function context |
 |---|---|---|---|
 | Yes | (irrelevant) | User's actual value (typed literal) | User's actual value (typed JSON) |
-| No | Yes (`"acme"`) | `default_value` as typed literal | `default_value` as typed JSON |
-| No | No (null) | SQL `NULL` literal | JSON `null` |
+| No | Non-NULL (e.g. `"acme"`) | `default_value` as typed literal | `default_value` as typed JSON |
+| No | NULL (default) | SQL `NULL` literal | JSON `null` |
 
 **SQL NULL semantics**: In SQL, comparisons with NULL (e.g., `column = NULL`) evaluate to NULL (three-valued logic), which is treated as false in WHERE clauses — so the user sees zero rows. This is standard SQL behavior consistent across DataFusion (which evaluates the filter in-process) and upstream databases like PostgreSQL (if the filter is pushed down). This applies to equality (`=`, `!=`), `IN`, and comparison operators (`>`, `<`). NULL is also handled naturally by `COALESCE` expressions. Note: `IS NULL` would match, so avoid writing filter expressions that use `IS NULL` with user attributes unless that behavior is intentional.
 
-**Decision function null semantics**: Missing attributes with no default appear as `null` (not `undefined`). Equality checks work correctly (`null === "acme"` → `false`). However, numeric comparisons have a JS quirk: `null >= 0` is `true` because `null` coerces to `0`. Always guard numeric comparisons with a null check: `if (ctx.session.user.clearance == null) return { fire: true, reason: "missing clearance" }`.
+**Decision function null semantics**: Missing attributes whose default is NULL appear as `null` (not `undefined`). Equality checks work correctly (`null === "acme"` → `false`). However, numeric comparisons have a JS quirk: `null >= 0` is `true` because `null` coerces to `0`. Always guard numeric comparisons with a null check: `if (ctx.session.user.clearance == null) return { fire: true, reason: "missing clearance" }`.
 
 **Undefined attributes**: If a policy references `{user.foo}` but no attribute definition named `foo` exists at all, the query fails with an error. This catches typos and stale policies referencing deleted attributes.
 
@@ -400,7 +400,7 @@ curl -X POST ... \
 
 See [Template variables](#template-variables) above. `{user.KEY}` references produce typed literals based on the attribute definition's `value_type`.
 
-**Missing attributes**: if a user does not have an attribute set, the proxy resolves the value from the attribute definition's `default_value`. If a default is set, it is substituted as a typed literal. If no default is set (null), SQL `NULL` is substituted — comparisons with `NULL` evaluate to `NULL` (three-valued logic), which is treated as false in WHERE clauses, so the user sees zero rows. If the attribute has no definition at all, the query fails with an error. See [Missing attribute behavior](#missing-attribute-behavior) for the full resolution table.
+**Missing attributes**: if a user does not have an attribute set, the proxy resolves the value from the attribute definition's `default_value`. If a default is set, it is substituted as a typed literal. If the default is NULL, SQL `NULL` is substituted — comparisons with `NULL` evaluate to `NULL` (three-valued logic), which is treated as false in WHERE clauses, so the user sees zero rows. If the attribute has no definition at all, the query fails with an error. See [Missing attribute behavior](#missing-attribute-behavior) for the full resolution table.
 
 ### Using attributes in decision functions
 
@@ -434,7 +434,7 @@ User attributes are available as first-class fields on `ctx.session.user` with c
 
 Note: integer and boolean attributes appear as native JSON types in the decision function context (not strings). List attributes appear as JSON arrays of strings.
 
-**Missing attributes in decision context**: attributes the user lacks are resolved via `default_value` from the attribute definition. If a default is set, the typed value appears on `ctx.session.user` as if the user had that attribute. If no default is set, the field is `null` (not `undefined`). Use `== null` checks before numeric comparisons, since `null >= 0` is `true` in JavaScript. See [Missing attribute behavior](#missing-attribute-behavior) for the full resolution table.
+**Missing attributes in decision context**: attributes the user lacks are resolved via `default_value` from the attribute definition. If a default is set, the typed value appears on `ctx.session.user` as if the user had that attribute. If the default is NULL, the field is `null` (not `undefined`). Use `== null` checks before numeric comparisons, since `null >= 0` is `true` in JavaScript. See [Missing attribute behavior](#missing-attribute-behavior) for the full resolution table.
 
 ### Cache behavior
 

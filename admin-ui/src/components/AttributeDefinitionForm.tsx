@@ -29,6 +29,13 @@ interface Props {
 const VALUE_TYPES: ValueType[] = ['string', 'integer', 'boolean', 'list']
 const ENTITY_TYPES = SUPPORTED_ENTITY_TYPES
 
+const DEFAULT_PLACEHOLDER: Record<ValueType, string> = {
+  string: 'Type a value…',
+  integer: 'Type an integer…',
+  boolean: '', // boolean uses a select, not a text input
+  list: 'JSON array, e.g., ["default"]',
+}
+
 const inputCls =
   'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500'
 
@@ -186,39 +193,41 @@ export function AttributeDefinitionForm({
             onChange={(e) => setDefaultValue(e.target.value)}
             className={inputCls}
           >
-            <option value="">No default (null)</option>
+            <option value="">NULL</option>
             <option value="true">true</option>
             <option value="false">false</option>
           </select>
         ) : (
-          <div className="flex items-center gap-2">
+          <div className="relative">
             <input
               type={valueType === 'integer' ? 'number' : 'text'}
               value={defaultValue}
               onChange={(e) => setDefaultValue(e.target.value)}
-              placeholder={
-                valueType === 'list'
-                  ? 'No default (null) — or JSON array, e.g., ["default"]'
-                  : 'No default (null)'
-              }
-              className={`${inputCls} flex-1`}
+              placeholder={DEFAULT_PLACEHOLDER[valueType]}
+              className={`${inputCls} ${defaultValue ? 'pr-8' : 'pr-16'}`}
             />
-            {defaultValue && (
+            {defaultValue ? (
               <button
                 type="button"
                 onClick={() => setDefaultValue('')}
-                className="text-gray-400 hover:text-red-500 text-sm px-1"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-500 transition-colors"
                 title="Clear to null"
               >
-                &times;
+                <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16ZM8.28 7.22a.75.75 0 0 0-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 1 0 1.06 1.06L10 11.06l1.72 1.72a.75.75 0 1 0 1.06-1.06L11.06 10l1.72-1.72a.75.75 0 0 0-1.06-1.06L10 8.94 8.28 7.22Z" clipRule="evenodd" />
+                </svg>
               </button>
+            ) : (
+              <span className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none font-mono text-xs bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded">
+                NULL
+              </span>
             )}
           </div>
         )}
         <p className="text-xs text-gray-400 mt-1">
           {defaultValue
             ? `Users without this attribute will be treated as having the value "${defaultValue}" when policies are evaluated. This value is applied by the proxy at query time — it is not stored on the user.`
-            : 'When null: users without this attribute will have NULL substituted in policy expressions. In SQL, comparisons with NULL (e.g., tenant = NULL) evaluate to NULL, which is treated as false — so equality filters return zero rows. This is applied by the proxy at query time, not stored on the user.'}
+            : 'The default is NULL. Users without this attribute will have NULL substituted in policy expressions. In SQL, comparisons with NULL (e.g., tenant = NULL) evaluate to NULL, which is treated as false — so equality filters return zero rows. This is applied by the proxy at query time, not stored on the user.'}
         </p>
       </div>
 

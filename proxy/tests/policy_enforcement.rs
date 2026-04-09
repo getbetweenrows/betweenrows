@@ -7821,7 +7821,7 @@ async fn row_filter_missing_attr_uses_default() {
     assert_eq!(rows[1][1], "acme");
 }
 
-/// Row filter: user lacks attribute, no default_value → SQL NULL → zero rows.
+/// Row filter: user lacks attribute, default is NULL → SQL NULL → zero rows.
 #[tokio::test]
 async fn row_filter_missing_attr_null_default() {
     let _pg = require_postgres!();
@@ -7992,7 +7992,7 @@ async fn column_mask_missing_attr_uses_default() {
     assert_eq!(rows[1][1], "B***_guest");
 }
 
-/// Column mask: user lacks attribute, no default → mask uses NULL.
+/// Column mask: user lacks attribute, default is NULL → mask uses NULL.
 #[tokio::test]
 async fn column_mask_missing_attr_null_default() {
     let _pg = require_postgres!();
@@ -8011,7 +8011,7 @@ async fn column_mask_missing_attr_null_default() {
     let ds_id = server.create_datasource("ds_cmdef02", "open").await;
     server.discover(ds_id, &[schema]).await;
 
-    // Attribute definition with no default → NULL
+    // Attribute definition with NULL default
     server
         .create_attribute_definition("label", "user", "string", None)
         .await;
@@ -8081,7 +8081,7 @@ async fn decision_fn_missing_attr_uses_default() {
     let _user_id = server.create_user("gina", "GinaPass12!", ds_id).await;
 
     // Decision function: fire only if clearance === 0 (the default)
-    // If the user had no attribute and no default injection, ctx.session.user.clearance
+    // If the user had no attribute and the default were not injected, ctx.session.user.clearance
     // would be undefined → undefined === 0 is false → filter would NOT fire → all rows visible.
     let decision_fn_id = create_decision_fn(
         &server,

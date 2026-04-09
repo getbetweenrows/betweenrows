@@ -87,7 +87,7 @@ pub struct AttrDefInfo {
 
 /// Merge user's actual attributes with defaults from attribute definitions.
 /// Missing attributes with a default_value get that value inserted.
-/// Missing attributes with no default get a null sentinel (value_type="null").
+/// Missing attributes whose default is NULL get a null sentinel (value_type="null").
 pub fn resolve_user_attribute_defaults(
     user_attrs: &HashMap<String, TypedAttribute>,
     attr_defs: &HashMap<String, AttrDefInfo>,
@@ -180,7 +180,7 @@ struct VarMapping {
 ///
 /// Uses `resolve_user_attribute_defaults` to merge user attributes with definition defaults
 /// before substitution. Missing attributes with a default produce typed literals; missing
-/// attributes with no default produce SQL NULL; references to undefined attributes error.
+/// attributes with a NULL default produce SQL NULL; references to undefined attributes error.
 fn mangle_vars(template: &str, vars: &UserVars) -> Result<(String, Vec<VarMapping>), String> {
     let mut result = template.to_string();
     let mut mappings = Vec::new();
@@ -4850,7 +4850,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
         // Missing + default → uses default
         assert_eq!(resolved["clearance"].value, "0");
         assert_eq!(resolved["clearance"].value_type, "integer");
-        // Missing + no default → null sentinel
+        // Missing + NULL default → null sentinel
         assert_eq!(resolved["region"].value_type, "null");
     }
 

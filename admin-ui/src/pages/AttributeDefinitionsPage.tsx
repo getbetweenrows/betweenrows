@@ -99,13 +99,6 @@ export function AttributeDefinitionsPage() {
       </div>
 
       <div className="flex items-center gap-3 mb-4">
-        <input
-          type="search"
-          value={search}
-          onChange={(e) => { setSearch(e.target.value); setPage(1) }}
-          placeholder="Search by key or display name…"
-          className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-64"
-        />
         <label className="text-sm text-gray-600 flex items-center gap-2">
           Entity type:
           <select
@@ -122,6 +115,13 @@ export function AttributeDefinitionsPage() {
             <option value="">All</option>
           </select>
         </label>
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => { setSearch(e.target.value); setPage(1) }}
+          placeholder="Search by key or display name…"
+          className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-64"
+        />
       </div>
 
       {deleteError && (

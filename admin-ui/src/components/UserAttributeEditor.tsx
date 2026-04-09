@@ -171,7 +171,7 @@ function AddAttributeDropdown({
                 {d.display_name} ({d.value_type})
                 {d.default_value != null
                   ? ` — default: ${d.default_value}`
-                  : ' — no default (null)'}
+                  : ' — default: NULL'}
               </option>
             ))}
           </select>

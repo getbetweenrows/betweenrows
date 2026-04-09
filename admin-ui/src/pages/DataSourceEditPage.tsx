@@ -7,6 +7,7 @@ import { UserAssignmentPanel } from '../components/UserAssignmentPanel'
 import { RoleAccessPanel } from '../components/RoleAccessPanel'
 import { DatasourceAssignmentsReadonly } from '../components/PolicyAssignmentPanel'
 import { AuditTimeline } from '../components/AuditTimeline'
+import { CopyableId } from '../components/CopyableId'
 
 export function DataSourceEditPage() {
   const { id } = useParams<{ id: string }>()
@@ -38,6 +39,7 @@ export function DataSourceEditPage() {
       })
       queryClient.invalidateQueries({ queryKey: ['datasources'] })
       queryClient.invalidateQueries({ queryKey: ['datasource', dsId] })
+      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
       navigate('/datasources')
     } finally {
       setIsSubmitting(false)
@@ -71,6 +73,7 @@ export function DataSourceEditPage() {
         <h1 className="text-xl font-bold text-gray-900">
           Edit: <span className="font-mono text-lg">{ds.name}</span>
         </h1>
+        <CopyableId id={dsId} />
         <p className="text-sm text-gray-500 mt-1">Type: {ds.ds_type}</p>
       </div>
 

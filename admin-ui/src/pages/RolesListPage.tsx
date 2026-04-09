@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { deleteRole, listRoles } from '../api/roles'
 import type { Role } from '../types/role'
+import { CopyableId } from '../components/CopyableId'
 
 export function RolesListPage() {
   const navigate = useNavigate()
@@ -18,7 +19,10 @@ export function RolesListPage() {
 
   const deleteMutation = useMutation({
     mutationFn: deleteRole,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['roles'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['roles'] })
+      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
+    },
   })
 
   function handleSearch(e: React.FormEvent) {
@@ -92,6 +96,7 @@ export function RolesListPage() {
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Name</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600">ID</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Description</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Status</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Direct Members</th>
@@ -108,6 +113,9 @@ export function RolesListPage() {
                 >
                   <td className="px-4 py-3">
                     <div className="font-medium text-gray-900">{role.name}</div>
+                  </td>
+                  <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                    <CopyableId id={role.id} short />
                   </td>
                   <td className="px-4 py-3">
                     {role.description ? (

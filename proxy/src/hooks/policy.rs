@@ -75,7 +75,49 @@ pub fn is_system_only_statement(statement: &Statement) -> bool {
 #[derive(Clone, Debug)]
 pub struct TypedAttribute {
     pub value: String,
-    pub value_type: String, // "string", "integer", "boolean"
+    pub value_type: String, // "string", "integer", "boolean", "null"
+}
+
+/// Lightweight attribute definition metadata for default resolution at query time.
+#[derive(Clone, Debug)]
+pub struct AttrDefInfo {
+    pub default_value: Option<String>,
+    pub value_type: String,
+}
+
+/// Merge user's actual attributes with defaults from attribute definitions.
+/// Missing attributes with a default_value get that value inserted.
+/// Missing attributes with no default get a null sentinel (value_type="null").
+pub fn resolve_user_attribute_defaults(
+    user_attrs: &HashMap<String, TypedAttribute>,
+    attr_defs: &HashMap<String, AttrDefInfo>,
+) -> HashMap<String, TypedAttribute> {
+    let mut result = user_attrs.clone();
+    for (key, def) in attr_defs {
+        if !result.contains_key(key) {
+            match &def.default_value {
+                Some(v) => {
+                    result.insert(
+                        key.clone(),
+                        TypedAttribute {
+                            value: v.clone(),
+                            value_type: def.value_type.clone(),
+                        },
+                    );
+                }
+                None => {
+                    result.insert(
+                        key.clone(),
+                        TypedAttribute {
+                            value: String::new(),
+                            value_type: "null".to_string(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    result
 }
 
 #[derive(Clone)]
@@ -83,6 +125,8 @@ struct UserVars {
     username: String,
     user_id: String,
     attributes: HashMap<String, TypedAttribute>,
+    /// All user-entity attribute definitions — used for default resolution when user lacks an attribute.
+    attribute_defs: HashMap<String, AttrDefInfo>,
 }
 
 impl UserVars {
@@ -98,6 +142,7 @@ impl UserVars {
         }
     }
 
+    #[cfg(test)]
     fn get_type(&self, key: &str) -> &str {
         match key {
             "user.username" | "user.id" => "string",
@@ -123,6 +168,7 @@ fn user_var_regex() -> &'static regex::Regex {
 }
 
 /// Variable mapping entry carrying both value and type for typed literal production.
+#[derive(Debug)]
 struct VarMapping {
     placeholder: String,
     value: String,
@@ -130,10 +176,22 @@ struct VarMapping {
 }
 
 /// Replace `{user.X}` placeholders with safe identifier placeholders.
-/// Returns the mangled expression and typed mappings.
-fn mangle_vars(template: &str, vars: &UserVars) -> (String, Vec<VarMapping>) {
+/// Returns the mangled expression and typed mappings, or an error if an undefined attribute is referenced.
+///
+/// Uses `resolve_user_attribute_defaults` to merge user attributes with definition defaults
+/// before substitution. Missing attributes with a default produce typed literals; missing
+/// attributes with no default produce SQL NULL; references to undefined attributes error.
+fn mangle_vars(template: &str, vars: &UserVars) -> Result<(String, Vec<VarMapping>), String> {
     let mut result = template.to_string();
     let mut mappings = Vec::new();
+
+    // Resolve attributes with defaults applied
+    let resolved = if vars.attribute_defs.is_empty() {
+        // Save-time validation mode: no defs loaded, use raw attributes only
+        vars.attributes.clone()
+    } else {
+        resolve_user_attribute_defaults(&vars.attributes, &vars.attribute_defs)
+    };
 
     // Built-in keys first (stable placeholders)
     for key in ["user.username", "user.id"] {
@@ -157,14 +215,24 @@ fn mangle_vars(template: &str, vars: &UserVars) -> (String, Vec<VarMapping>) {
         .map(|cap| (cap[0].to_string(), cap[1].to_string()))
         .collect();
     for (needle, attr_key) in captures {
-        let full_key = format!("user.{}", attr_key);
-        let value = vars.get(&full_key).unwrap_or("").to_string();
-        let value_type = vars.get_type(&full_key).to_string();
+        // Look up resolved value (user's actual value, default, or null sentinel)
+        let (value, value_type) = match resolved.get(&attr_key) {
+            Some(ta) => (ta.value.clone(), ta.value_type.clone()),
+            None => {
+                if vars.attribute_defs.is_empty() {
+                    // Save-time validation: fall back to empty string
+                    (String::new(), "string".to_string())
+                } else {
+                    return Err(format!(
+                        "Policy references undefined attribute '{}'",
+                        attr_key
+                    ));
+                }
+            }
+        };
 
         if value_type == "list" {
             // List type: expand into multiple comma-separated placeholders
-            // so `department IN {user.departments}` becomes
-            // `department IN __br_user_departments_0__, __br_user_departments_1__`
             let elements: Vec<String> = serde_json::from_str(&value).unwrap_or_default();
             if elements.is_empty() {
                 // Empty list → single NULL placeholder
@@ -190,6 +258,15 @@ fn mangle_vars(template: &str, vars: &UserVars) -> (String, Vec<VarMapping>) {
                     });
                 }
             }
+        } else if value_type == "null" {
+            // Null default → SQL NULL literal
+            let placeholder = format!("__br_user_{}__", attr_key);
+            result = result.replace(&needle, &placeholder);
+            mappings.push(VarMapping {
+                placeholder: placeholder.to_lowercase(),
+                value: String::new(),
+                value_type: "null".to_string(),
+            });
         } else {
             let placeholder = format!("__br_user_{}__", attr_key);
             result = result.replace(&needle, &placeholder);
@@ -201,7 +278,7 @@ fn mangle_vars(template: &str, vars: &UserVars) -> (String, Vec<VarMapping>) {
         }
     }
 
-    (result, mappings)
+    Ok((result, mappings))
 }
 
 /// Produce a typed DataFusion literal from a string value and value_type.
@@ -515,7 +592,8 @@ fn parse_filter_expr(
         return Ok(lit(false));
     }
 
-    let (mangled, var_values) = mangle_vars(template, vars);
+    let (mangled, var_values) =
+        mangle_vars(template, vars).map_err(datafusion::error::DataFusionError::Plan)?;
 
     let dialect = GenericDialect {};
     let mut parser = Parser::new(&dialect).try_with_sql(&mangled).map_err(|e| {
@@ -544,7 +622,8 @@ fn parse_mask_expr(
     mask_template: &str,
     vars: &UserVars,
 ) -> datafusion::error::Result<datafusion::logical_expr::Expr> {
-    let (mangled, var_values) = mangle_vars(mask_template, vars);
+    let (mangled, var_values) =
+        mangle_vars(mask_template, vars).map_err(datafusion::error::DataFusionError::Plan)?;
     let dialect = GenericDialect {};
     let mut parser = Parser::new(&dialect).try_with_sql(&mangled).map_err(|e| {
         datafusion::error::DataFusionError::Plan(format!(
@@ -572,6 +651,7 @@ pub fn validate_expression(expression: &str, is_mask: bool) -> Result<(), String
         username: "__validate__".to_string(),
         user_id: "__validate__".to_string(),
         attributes: HashMap::new(),
+        attribute_defs: HashMap::new(), // empty → save-time validation skips default resolution
     };
 
     if is_mask {
@@ -628,6 +708,8 @@ struct SessionData {
     roles: Vec<String>,
     /// User attributes with types (from attribute_definition).
     user_attributes: HashMap<String, TypedAttribute>,
+    /// All user-entity attribute definitions for default resolution.
+    attribute_defs: HashMap<String, AttrDefInfo>,
     loaded_at: std::time::Instant,
 }
 
@@ -790,7 +872,7 @@ impl PolicyHook {
         };
 
         // Load user attributes (from proxy_user.attributes JSON column)
-        let user_attributes = self.load_user_attributes(user_id).await?;
+        let (user_attributes, attribute_defs) = self.load_user_attributes(user_id).await?;
 
         // Load policy assignments for this datasource+user (user-specific, role-based, or wildcard)
         let relevant_assignments =
@@ -822,6 +904,7 @@ impl PolicyHook {
                 datasource_name: ds.name.clone(),
                 roles: role_names,
                 user_attributes,
+                attribute_defs,
                 loaded_at: std::time::Instant::now(),
             });
         }
@@ -919,16 +1002,24 @@ impl PolicyHook {
             datasource_name: ds.name.clone(),
             roles: role_names,
             user_attributes,
+            attribute_defs,
             loaded_at: std::time::Instant::now(),
         })
     }
 
     /// Load user attributes from the proxy_user model and pair with types
-    /// from attribute_definition. Returns a HashMap of TypedAttribute.
+    /// from attribute_definition. Also loads ALL user-entity attribute definitions
+    /// for default resolution at query time via `resolve_user_attribute_defaults`.
     async fn load_user_attributes(
         &self,
         user_id: Uuid,
-    ) -> Result<HashMap<String, TypedAttribute>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<
+        (
+            HashMap<String, TypedAttribute>,
+            HashMap<String, AttrDefInfo>,
+        ),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         use crate::entity::{attribute_definition, proxy_user};
 
         let user = proxy_user::Entity::find_by_id(user_id)
@@ -937,21 +1028,31 @@ impl PolicyHook {
             .ok_or_else(|| format!("User {user_id} not found"))?;
 
         let raw_attrs = proxy_user::parse_attributes(&user.attributes);
-        if raw_attrs.is_empty() {
-            return Ok(HashMap::new());
-        }
 
-        // Load definitions for the keys this user has
-        let keys: Vec<String> = raw_attrs.keys().cloned().collect();
+        // Load ALL user-type attribute definitions (not just the user's keys)
+        // so we have default_value info for attributes the user does NOT have.
         let defs = attribute_definition::Entity::find()
             .filter(attribute_definition::Column::EntityType.eq("user"))
-            .filter(attribute_definition::Column::Key.is_in(keys))
             .all(&self.db)
             .await?;
 
         let def_map: HashMap<&str, &str> = defs
             .iter()
             .map(|d| (d.key.as_str(), d.value_type.as_str()))
+            .collect();
+
+        // Build attribute_defs map from all definitions
+        let attr_defs: HashMap<String, AttrDefInfo> = defs
+            .iter()
+            .map(|d| {
+                (
+                    d.key.clone(),
+                    AttrDefInfo {
+                        default_value: d.default_value.clone(),
+                        value_type: d.value_type.clone(),
+                    },
+                )
+            })
             .collect();
 
         let mut result = HashMap::new();
@@ -975,7 +1076,7 @@ impl PolicyHook {
                 },
             );
         }
-        Ok(result)
+        Ok((result, attr_defs))
     }
 }
 
@@ -991,6 +1092,7 @@ struct SessionDataClone {
     datasource_name: String,
     roles: Vec<String>,
     user_attributes: HashMap<String, TypedAttribute>,
+    attribute_defs: HashMap<String, AttrDefInfo>,
 }
 
 fn clone_session_data(s: &SessionData) -> SessionDataRef {
@@ -1003,6 +1105,7 @@ fn clone_session_data(s: &SessionData) -> SessionDataRef {
         datasource_name: s.datasource_name.clone(),
         roles: s.roles.clone(),
         user_attributes: s.user_attributes.clone(),
+        attribute_defs: s.attribute_defs.clone(),
     })
 }
 
@@ -1884,6 +1987,7 @@ impl QueryHook for PolicyHook {
             username: username.clone(),
             user_id: user_id.to_string(),
             attributes: session.user_attributes.clone(),
+            attribute_defs: session.attribute_defs.clone(),
         };
 
         let query_start = std::time::Instant::now();
@@ -1917,12 +2021,14 @@ impl QueryHook for PolicyHook {
             };
 
             // Build decision evaluation context with session + query metadata.
-            // Convert TypedAttribute map to typed JSON values for decision context
-            let json_attrs: HashMap<String, serde_json::Value> = session
-                .user_attributes
+            // Use resolve_user_attribute_defaults to include defaults for missing attrs.
+            let resolved_attrs =
+                resolve_user_attribute_defaults(&session.user_attributes, &session.attribute_defs);
+            let json_attrs: HashMap<String, serde_json::Value> = resolved_attrs
                 .iter()
                 .map(|(k, ta)| {
                     let v = match ta.value_type.as_str() {
+                        "null" => serde_json::Value::Null,
                         "list" => serde_json::from_str::<Vec<String>>(&ta.value)
                             .map(|arr| serde_json::json!(arr))
                             .unwrap_or_else(|_| serde_json::json!(&ta.value)),
@@ -2144,6 +2250,7 @@ mod tests {
             datasource_name: "test_ds".to_string(),
             roles: vec![],
             user_attributes: HashMap::new(),
+            attribute_defs: HashMap::new(),
         }
     }
 
@@ -2290,6 +2397,7 @@ mod tests {
             username: "alice".to_string(),
             user_id: "00000000-0000-0000-0000-000000000001".to_string(),
             attributes: attrs,
+            attribute_defs: HashMap::new(),
         }
     }
 
@@ -2355,6 +2463,7 @@ mod tests {
             username: "alice".to_string(),
             user_id: "test-id".to_string(),
             attributes: attrs,
+            attribute_defs: HashMap::new(),
         };
         let expr = parse_filter_expr("organization_id = {user.tenant}", &vars).unwrap();
         let expr_str = format!("{expr:?}");
@@ -2370,6 +2479,7 @@ mod tests {
             username: "u".to_string(),
             user_id: "i".to_string(),
             attributes: HashMap::new(),
+            attribute_defs: HashMap::new(),
         };
         let expr = parse_filter_expr("1=1", &vars).unwrap();
         let expr_str = format!("{expr:?}");
@@ -2393,9 +2503,10 @@ mod tests {
             username: "alice".to_string(),
             user_id: "uid-1".to_string(),
             attributes: attrs,
+            attribute_defs: HashMap::new(),
         };
         let (mangled, mappings) =
-            mangle_vars("org = {user.tenant} AND user = {user.username}", &vars);
+            mangle_vars("org = {user.tenant} AND user = {user.username}", &vars).unwrap();
         assert!(!mangled.contains("{user.tenant}"));
         assert!(!mangled.contains("{user.username}"));
         assert_eq!(mappings.len(), 2);
@@ -2415,6 +2526,7 @@ mod tests {
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
+            attribute_defs: HashMap::new(),
         };
         let expr = parse_filter_expr(
             "organization_id = {user.tenant} AND is_active = true",
@@ -4508,8 +4620,9 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
+            attribute_defs: HashMap::new(),
         };
-        let (mangled, mappings) = mangle_vars("region = {user.region}", &vars);
+        let (mangled, mappings) = mangle_vars("region = {user.region}", &vars).unwrap();
         assert!(
             !mangled.contains("{user.region}"),
             "placeholder should be replaced"
@@ -4540,9 +4653,10 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
+            attribute_defs: HashMap::new(),
         };
         let (mangled, mappings) =
-            mangle_vars("tenant = {user.tenant} AND dept = {user.dept}", &vars);
+            mangle_vars("tenant = {user.tenant} AND dept = {user.dept}", &vars).unwrap();
         assert!(!mangled.contains("{user.tenant}"));
         assert!(!mangled.contains("{user.dept}"));
         assert_eq!(mappings.len(), 2);
@@ -4554,13 +4668,190 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: HashMap::new(),
+            attribute_defs: HashMap::new(),
         };
-        let (_, mappings) = mangle_vars("x = {user.nonexistent}", &vars);
+        let (_, mappings) = mangle_vars("x = {user.nonexistent}", &vars).unwrap();
         assert_eq!(mappings.len(), 1);
         assert_eq!(
             mappings[0].value, "",
             "unknown attribute should produce empty string"
         );
+    }
+
+    // ---------- ABAC: missing attribute default resolution ----------
+
+    #[test]
+    fn test_mangle_vars_missing_attr_with_default() {
+        let vars = UserVars {
+            username: "alice".to_string(),
+            user_id: "uid".to_string(),
+            attributes: HashMap::new(), // user has NO attributes
+            attribute_defs: HashMap::from([(
+                "tenant".to_string(),
+                AttrDefInfo {
+                    default_value: Some("acme".to_string()),
+                    value_type: "string".to_string(),
+                },
+            )]),
+        };
+        let (_, mappings) = mangle_vars("tenant = {user.tenant}", &vars).unwrap();
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].value, "acme", "should use default_value");
+        assert_eq!(mappings[0].value_type, "string");
+    }
+
+    #[test]
+    fn test_mangle_vars_missing_attr_null_default() {
+        let vars = UserVars {
+            username: "alice".to_string(),
+            user_id: "uid".to_string(),
+            attributes: HashMap::new(),
+            attribute_defs: HashMap::from([(
+                "tenant".to_string(),
+                AttrDefInfo {
+                    default_value: None, // null default
+                    value_type: "string".to_string(),
+                },
+            )]),
+        };
+        let (_, mappings) = mangle_vars("tenant = {user.tenant}", &vars).unwrap();
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(
+            mappings[0].value_type, "null",
+            "null default should produce NULL literal"
+        );
+    }
+
+    #[test]
+    fn test_mangle_vars_missing_attr_no_definition() {
+        let vars = UserVars {
+            username: "alice".to_string(),
+            user_id: "uid".to_string(),
+            attributes: HashMap::new(),
+            attribute_defs: HashMap::from([(
+                "other_key".to_string(),
+                AttrDefInfo {
+                    default_value: None,
+                    value_type: "string".to_string(),
+                },
+            )]), // defs exist but NOT for "nonexistent"
+        };
+        let result = mangle_vars("x = {user.nonexistent}", &vars);
+        assert!(result.is_err(), "should error for undefined attribute");
+        assert!(
+            result.unwrap_err().contains("undefined attribute"),
+            "error should mention undefined attribute"
+        );
+    }
+
+    #[test]
+    fn test_mangle_vars_missing_attr_default_integer() {
+        let vars = UserVars {
+            username: "alice".to_string(),
+            user_id: "uid".to_string(),
+            attributes: HashMap::new(),
+            attribute_defs: HashMap::from([(
+                "clearance".to_string(),
+                AttrDefInfo {
+                    default_value: Some("0".to_string()),
+                    value_type: "integer".to_string(),
+                },
+            )]),
+        };
+        let (_, mappings) = mangle_vars("level >= {user.clearance}", &vars).unwrap();
+        assert_eq!(mappings[0].value, "0");
+        assert_eq!(mappings[0].value_type, "integer");
+    }
+
+    #[test]
+    fn test_mangle_vars_missing_attr_default_list() {
+        let vars = UserVars {
+            username: "alice".to_string(),
+            user_id: "uid".to_string(),
+            attributes: HashMap::new(),
+            attribute_defs: HashMap::from([(
+                "departments".to_string(),
+                AttrDefInfo {
+                    default_value: Some(r#"["eng"]"#.to_string()),
+                    value_type: "list".to_string(),
+                },
+            )]),
+        };
+        let (mangled, mappings) = mangle_vars("dept IN {user.departments}", &vars).unwrap();
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].value, "eng");
+        assert!(mangled.contains("__br_user_departments_0__"));
+    }
+
+    #[test]
+    fn test_mangle_vars_present_attr_ignores_default() {
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "tenant".to_string(),
+            TypedAttribute {
+                value: "real_value".to_string(),
+                value_type: "string".to_string(),
+            },
+        );
+        let vars = UserVars {
+            username: "alice".to_string(),
+            user_id: "uid".to_string(),
+            attributes: attrs,
+            attribute_defs: HashMap::from([(
+                "tenant".to_string(),
+                AttrDefInfo {
+                    default_value: Some("default_value".to_string()),
+                    value_type: "string".to_string(),
+                },
+            )]),
+        };
+        let (_, mappings) = mangle_vars("tenant = {user.tenant}", &vars).unwrap();
+        assert_eq!(
+            mappings[0].value, "real_value",
+            "actual attribute should take priority over default"
+        );
+    }
+
+    #[test]
+    fn test_resolve_user_attribute_defaults() {
+        let user_attrs = HashMap::from([(
+            "tenant".to_string(),
+            TypedAttribute {
+                value: "acme".to_string(),
+                value_type: "string".to_string(),
+            },
+        )]);
+        let attr_defs = HashMap::from([
+            (
+                "tenant".to_string(),
+                AttrDefInfo {
+                    default_value: Some("default_tenant".to_string()),
+                    value_type: "string".to_string(),
+                },
+            ),
+            (
+                "clearance".to_string(),
+                AttrDefInfo {
+                    default_value: Some("0".to_string()),
+                    value_type: "integer".to_string(),
+                },
+            ),
+            (
+                "region".to_string(),
+                AttrDefInfo {
+                    default_value: None,
+                    value_type: "string".to_string(),
+                },
+            ),
+        ]);
+        let resolved = resolve_user_attribute_defaults(&user_attrs, &attr_defs);
+        // User's actual value wins
+        assert_eq!(resolved["tenant"].value, "acme");
+        // Missing + default → uses default
+        assert_eq!(resolved["clearance"].value, "0");
+        assert_eq!(resolved["clearance"].value_type, "integer");
+        // Missing + no default → null sentinel
+        assert_eq!(resolved["region"].value_type, "null");
     }
 
     // ---------- ABAC: list attribute expansion ----------
@@ -4579,8 +4870,9 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
+            attribute_defs: HashMap::new(),
         };
-        let (mangled, mappings) = mangle_vars("dept IN {user.departments}", &vars);
+        let (mangled, mappings) = mangle_vars("dept IN {user.departments}", &vars).unwrap();
         assert_eq!(mappings.len(), 2);
         assert!(mangled.contains("__br_user_departments_0__"));
         assert!(mangled.contains("__br_user_departments_1__"));
@@ -4604,8 +4896,9 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
+            attribute_defs: HashMap::new(),
         };
-        let (mangled, mappings) = mangle_vars("dept IN {user.departments}", &vars);
+        let (mangled, mappings) = mangle_vars("dept IN {user.departments}", &vars).unwrap();
         assert_eq!(mappings.len(), 1);
         assert_eq!(mappings[0].value_type, "null");
         assert!(mangled.contains("__br_user_departments_0__"));
@@ -4625,8 +4918,9 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
+            attribute_defs: HashMap::new(),
         };
-        let (mangled, mappings) = mangle_vars("region IN {user.regions}", &vars);
+        let (mangled, mappings) = mangle_vars("region IN {user.regions}", &vars).unwrap();
         assert_eq!(mappings.len(), 1);
         assert_eq!(mappings[0].value, "us-east");
         assert_eq!(mappings[0].value_type, "string");
@@ -4658,6 +4952,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
+            attribute_defs: HashMap::new(),
         };
         let expr = parse_filter_expr("department IN ({user.departments})", &vars);
         assert!(expr.is_ok(), "list IN clause should parse: {expr:?}");
@@ -4683,6 +4978,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
+            attribute_defs: HashMap::new(),
         };
         let expr = parse_filter_expr("department IN ({user.departments})", &vars);
         assert!(expr.is_ok(), "empty list IN clause should parse: {expr:?}");
@@ -4704,6 +5000,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
+            attribute_defs: HashMap::new(),
         };
         // tenant is now a custom attribute, resolved from attributes map
         assert_eq!(vars.get("user.tenant"), Some("acme"));
@@ -4723,6 +5020,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
+            attribute_defs: HashMap::new(),
         };
         assert_eq!(vars.get("user.region"), Some("eu-west"));
         assert_eq!(vars.get("user.unknown"), None);
@@ -4787,6 +5085,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             username: "alice".to_string(),
             user_id: "uid".to_string(),
             attributes: attrs,
+            attribute_defs: HashMap::new(),
         };
         let expr = parse_filter_expr("level >= {user.clearance}", &vars).unwrap();
         let debug = format!("{expr:?}");
@@ -4844,6 +5143,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             username: "real_user".to_string(),
             user_id: "real_id".to_string(),
             attributes,
+            attribute_defs: HashMap::new(),
         };
 
         // Built-in username and id must always win over attribute overrides
@@ -4872,6 +5172,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             username: "alice".to_string(),
             user_id: "test-id".to_string(),
             attributes,
+            attribute_defs: HashMap::new(),
         };
         let expr = parse_filter_expr("organization_id = {user.tenant}", &vars).unwrap();
         let debug = format!("{expr:?}");

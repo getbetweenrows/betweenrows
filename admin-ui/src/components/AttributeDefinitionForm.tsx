@@ -179,13 +179,46 @@ export function AttributeDefinitionForm({
         <label className="block text-sm font-medium text-gray-700 mb-1">
           Default value
         </label>
-        <input
-          type="text"
-          value={defaultValue}
-          onChange={(e) => setDefaultValue(e.target.value)}
-          placeholder={valueType === 'list' ? 'JSON array, e.g., ["default"]' : 'Optional'}
-          className={inputCls}
-        />
+        {valueType === 'boolean' ? (
+          <select
+            value={defaultValue}
+            onChange={(e) => setDefaultValue(e.target.value)}
+            className={inputCls}
+          >
+            <option value="">No default (null)</option>
+            <option value="true">true</option>
+            <option value="false">false</option>
+          </select>
+        ) : (
+          <div className="flex items-center gap-2">
+            <input
+              type={valueType === 'integer' ? 'number' : 'text'}
+              value={defaultValue}
+              onChange={(e) => setDefaultValue(e.target.value)}
+              placeholder={
+                valueType === 'list'
+                  ? 'No default (null) — or JSON array, e.g., ["default"]'
+                  : 'No default (null)'
+              }
+              className={`${inputCls} flex-1`}
+            />
+            {defaultValue && (
+              <button
+                type="button"
+                onClick={() => setDefaultValue('')}
+                className="text-gray-400 hover:text-red-500 text-sm px-1"
+                title="Clear to null"
+              >
+                &times;
+              </button>
+            )}
+          </div>
+        )}
+        <p className="text-xs text-gray-400 mt-1">
+          {defaultValue
+            ? `Users without this attribute will be treated as having the value "${defaultValue}" when policies are evaluated. This value is applied by the proxy at query time — it is not stored on the user.`
+            : 'When null: users without this attribute will have NULL substituted in policy expressions. In SQL, comparisons with NULL (e.g., tenant = NULL) evaluate to NULL, which is treated as false — so equality filters return zero rows. This is applied by the proxy at query time, not stored on the user.'}
+        </p>
       </div>
 
       <div>

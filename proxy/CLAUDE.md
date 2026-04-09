@@ -14,6 +14,8 @@ pgwire 0.38, DataFusion 52, axum 0.8, SeaORM 1, tokio-postgres 0.7, argon2 0.5, 
 - `src/hooks/read_only.rs` — `ReadOnlyHook` (allowlist: Query, Show*, Explain*)
 - `src/hooks/policy.rs` — `PolicyHook` (five policy types: row_filter, column_mask, column_allow, column_deny, table_deny; audit logging)
 - `src/admin/policy_handlers.rs` — policy CRUD + assignment endpoints (scope: user/role/all)
+- `src/admin/datasource_handlers.rs` — datasource CRUD endpoints (create, update, delete, test, user access, role access)
+- `src/admin/user_handlers.rs` — user CRUD endpoints (create, update, delete, change_password)
 - `src/admin/role_handlers.rs` — role CRUD, member management, inheritance, datasource role access (GET+PUT), effective members; `get_role()` includes `datasource_access` (direct + inherited) and `policy_assignments` (direct + inherited)
 - `src/admin/admin_audit.rs` — `AuditAction` enum, `AuditedTxn` transactional audit wrapper, `audit_log()` (internal)
 - `src/admin/audit_handlers.rs` — `GET /audit/queries`, `GET /audit/admin`
@@ -134,15 +136,17 @@ Custom key-value attributes on users, governed by a schema-first attribute defin
 
 **Namespace design**: Attributes are nested under `attributes` in the API (`PUT /users/{id}` payload and response) but flat in expressions (`{user.KEY}`) and decision context (`ctx.session.user.KEY`). This is intentional — API nesting separates user-defined from built-in fields; expression flattening keeps policy authoring concise. Reserved key validation prevents collisions. See `docs/permission-system.md` § "Namespace design" for the full rationale.
 
-**Template variables**: `{user.KEY}` in filter/mask expressions. Built-in fields (`{user.username}`, `{user.id}`) take priority via `match` arms in `UserVars::get()`, preventing attribute override attacks. Custom attributes (including `tenant`) fall through to the attribute map.
+**Template variables**: `{user.KEY}` in filter/mask expressions. Built-in fields (`{user.username}`, `{user.id}`) take priority via `match` arms in `UserVars::get()`, preventing attribute override attacks. Custom attributes (including `tenant`) fall through to the resolved attribute map (user values + definition defaults via `resolve_user_attribute_defaults()`).
 
-**Decision function context**: Custom attributes are flattened as first-class fields on `ctx.session.user` (e.g., `ctx.session.user.region`, `ctx.session.user.tenant`) with typed JSON values. Built-in fields (`id`, `username`, `roles`) always take priority. `ctx.session.time.now` is an ISO 8601 / RFC 3339 timestamp of the evaluation time (not session start).
+**Missing attribute resolution**: When a user lacks an attribute referenced by a policy, the proxy resolves it from the attribute definition's `default_value`. If set, the default is used as a typed literal. If null, SQL `NULL` is substituted (comparisons with NULL evaluate to NULL → treated as false in WHERE → zero rows). If no definition exists, the query errors. This is handled centrally by `resolve_user_attribute_defaults()` in `hooks/policy.rs`, used in all three paths: template variables, query-level decision context, and visibility-level decision context (`build_typed_json_attributes` in `engine/mod.rs`).
+
+**Decision function context**: Custom attributes are flattened as first-class fields on `ctx.session.user` (e.g., `ctx.session.user.region`, `ctx.session.user.tenant`) with typed JSON values. Missing attributes with a `default_value` appear as their typed default; missing with no default appear as `null` (not `undefined`). Built-in fields (`id`, `username`, `roles`) always take priority. `ctx.session.time.now` is an ISO 8601 / RFC 3339 timestamp of the evaluation time (not session start).
 
 **Save-time expression validation**: `validate_expression()` in `hooks/policy.rs` dry-run parses filter/mask expressions at policy create/update time and returns 422 if the syntax is unsupported. Called from `validate_definition()` in `dto.rs`.
 
 **API endpoints**: `GET/POST /attribute-definitions`, `GET/PUT/DELETE /attribute-definitions/{id}`. User attributes are set via `PUT /users/{id}` with an `attributes` field (full-replace semantics, validated against definitions). DELETE supports `?force=true` for cascade cleanup via database-specific JSON operations (SQLite `json_remove()`, PostgreSQL `jsonb -`).
 
-**Cache invalidation**: attribute changes trigger `policy_hook.invalidate_user()` + `proxy_handler.rebuild_contexts_for_user()`. This fires on attribute changes and is_active changes in `update_user`. Attribute definition `value_type` changes also trigger cache invalidation for all users with that attribute.
+**Cache invalidation**: attribute changes trigger `policy_hook.invalidate_user()` + `proxy_handler.rebuild_contexts_for_user()`. This fires on attribute changes and is_active changes in `update_user`. Attribute definition `value_type` or `default_value` changes also trigger cache invalidation for all users with that attribute.
 
 ## RBAC (Role-Based Access Control)
 
@@ -163,11 +167,23 @@ Custom key-value attributes on users, governed by a schema-first attribute defin
 
 ### Admin Audit Patterns
 - **Always use `AuditedTxn`** (from `admin_audit.rs`) for handlers that mutate entities. It wraps a `DatabaseTransaction`, queues audit entries via `txn.audit(...)`, and writes them atomically on `txn.commit()`. This makes the correct pattern (audit inside the transaction) the only pattern.
-- **`AuditedTxn::commit()` errors if no audit entries were queued** — prevents accidentally unaudited transactions. Use a plain `DatabaseTransaction` if you genuinely don't need audit (e.g., `create_datasource` auto-assign).
+- **`AuditedTxn::commit()` errors if no audit entries were queued** — prevents accidentally unaudited transactions.
 - **`audit_log()` is `pub(crate)`** — used internally by `AuditedTxn::commit()`. Handlers should not call it directly.
-- **`audit_delete` / `audit_insert` have been removed** — replaced by direct entity operations + `txn.audit(...)`.
 - Convention: log on the owning entity (role membership → role, policy assignment → policy).
 - **Cache invalidation after commit**: always invalidate caches *after* `txn.commit()`, not before or inside the transaction. Collect affected user IDs before the transaction if needed (e.g., `remove_parent` collects members before removing the inheritance edge).
+
+### Audit Changes JSON Conventions
+
+All mutation handlers must follow these standardized conventions for the `changes` JSON in `txn.audit(...)`:
+
+| Action | JSON shape | What to capture |
+|---|---|---|
+| **Create** | `{"after": {all fields}}` | Full snapshot of the new entity (excluding secrets) |
+| **Update** | `{"before": {changed}, "after": {changed}}` | Only fields that changed, using `serde_json::Map` — matches `update_role` pattern |
+| **Delete** | `{"before": {all fields}}` | Full snapshot of the entity being deleted (excluding secrets) |
+| **Assign/Unassign** | `{relationship fields}` | Flat JSON with identifiers (assignment_id, datasource_id, scope, user_id, role_id) |
+
+**Secrets rule**: Never log `config`, `secure_config`, `password_hash`, or `decision_fn` source code in audit entries. For update audits where these change, use boolean flags like `"config_changed": true` or `"field": "password"` instead of logging the actual values.
 
 **Role handler cache invalidation pattern**:
 - Member add/remove → `invalidate_user(affected_user_id)` + `rebuild_contexts_for_user(user_id)`
@@ -177,6 +193,9 @@ Custom key-value attributes on users, governed by a schema-first attribute defin
 ## Testing
 
 Data security and robustness are core product requirements. Every feature must ship with comprehensive unit and integration tests covering happy paths, edge cases, and security boundaries. Aim for best-in-class coverage — not just "it works", but "it cannot be bypassed".
+
+### Test the real code path (non-optional)
+Tests must exercise the actual code path that runs in production. If the real behavior flows through an HTTP handler, the test must make an HTTP request through the router — not bypass it with direct DB writes. Direct DB manipulation in tests is only appropriate for setting up preconditions (e.g., inserting seed data), never for testing the behavior itself. This ensures middleware, extractors, audit logging, cache invalidation, and error handling are all covered.
 
 ### Unit tests (`src/**`)
 Inline `#[cfg(test)]` modules in each source file. No external dependencies — run with `cargo test --lib`.

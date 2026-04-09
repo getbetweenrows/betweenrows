@@ -142,6 +142,9 @@ pub async fn create_user(
             "after": {
                 "username": model.username,
                 "is_admin": model.is_admin,
+                "is_active": model.is_active,
+                "email": model.email,
+                "display_name": model.display_name,
             }
         }),
     );
@@ -188,30 +191,32 @@ pub async fn update_user(
         }
     }
 
-    // Capture before-state for audit
-    let before_snapshot = serde_json::json!({
-        "is_admin": user.is_admin,
-        "is_active": user.is_active,
-        "email": user.email,
-        "display_name": user.display_name,
-        "attributes": user.attributes,
-    });
+    let mut changes_before = serde_json::Map::new();
+    let mut changes_after = serde_json::Map::new();
 
-    let mut active: proxy_user::ActiveModel = user.into();
+    let mut active: proxy_user::ActiveModel = user.clone().into();
 
     let is_active_changed = body.is_active.is_some();
 
     if let Some(is_admin) = body.is_admin {
+        changes_before.insert("is_admin".into(), serde_json::json!(user.is_admin));
+        changes_after.insert("is_admin".into(), serde_json::json!(is_admin));
         active.is_admin = Set(is_admin);
     }
     if let Some(is_active) = body.is_active {
+        changes_before.insert("is_active".into(), serde_json::json!(user.is_active));
+        changes_after.insert("is_active".into(), serde_json::json!(is_active));
         active.is_active = Set(is_active);
     }
-    if let Some(email) = body.email {
-        active.email = Set(Some(email));
+    if let Some(ref email) = body.email {
+        changes_before.insert("email".into(), serde_json::json!(user.email));
+        changes_after.insert("email".into(), serde_json::json!(email));
+        active.email = Set(Some(email.clone()));
     }
-    if let Some(display_name) = body.display_name {
-        active.display_name = Set(Some(display_name));
+    if let Some(ref display_name) = body.display_name {
+        changes_before.insert("display_name".into(), serde_json::json!(user.display_name));
+        changes_after.insert("display_name".into(), serde_json::json!(display_name));
+        active.display_name = Set(Some(display_name.clone()));
     }
 
     // Handle attributes (full-replace semantics)
@@ -308,6 +313,8 @@ pub async fn update_user(
             }
         }
 
+        changes_before.insert("attributes".into(), serde_json::json!(user.attributes));
+        changes_after.insert("attributes".into(), serde_json::json!(attrs));
         let attrs_json = serde_json::to_string(attrs).map_err(ApiErr::internal)?;
         active.attributes = Set(attrs_json);
         attributes_changed = true;
@@ -326,16 +333,7 @@ pub async fn update_user(
         id,
         AuditAction::Update,
         claims.sub,
-        serde_json::json!({
-            "before": before_snapshot,
-            "after": {
-                "is_admin": updated.is_admin,
-                "is_active": updated.is_active,
-                "email": updated.email,
-                "display_name": updated.display_name,
-                "attributes": updated.attributes,
-            }
-        }),
+        serde_json::json!({ "before": changes_before, "after": changes_after }),
     );
     txn.commit().await.map_err(ApiErr::internal)?;
 
@@ -353,7 +351,7 @@ pub async fn update_user(
 }
 
 pub async fn change_password(
-    AdminClaims(_): AdminClaims,
+    AdminClaims(claims): AdminClaims,
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
     Json(body): Json<ChangePasswordRequest>,
@@ -372,7 +370,20 @@ pub async fn change_password(
     active.password_hash = Set(hash);
     active.updated_at = Set(Utc::now().naive_utc());
 
-    let updated = active.update(&state.db).await.map_err(ApiErr::internal)?;
+    let mut txn = AuditedTxn::begin(&state.db)
+        .await
+        .map_err(ApiErr::internal)?;
+
+    let updated = active.update(&*txn).await.map_err(ApiErr::internal)?;
+
+    txn.audit(
+        "proxy_user",
+        id,
+        AuditAction::Update,
+        claims.sub,
+        serde_json::json!({ "field": "password", "changed": true }),
+    );
+    txn.commit().await.map_err(ApiErr::internal)?;
 
     Ok(Json(UserResponse::from(updated)))
 }
@@ -419,6 +430,9 @@ pub async fn delete_user(
             "before": {
                 "username": user.username,
                 "is_admin": user.is_admin,
+                "is_active": user.is_active,
+                "email": user.email,
+                "display_name": user.display_name,
             }
         }),
     );

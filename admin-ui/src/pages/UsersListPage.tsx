@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { deleteUser, listUsers } from '../api/users'
 import type { User } from '../types/user'
+import { CopyableId } from '../components/CopyableId'
 
 export function UsersListPage() {
   const navigate = useNavigate()
@@ -18,7 +19,10 @@ export function UsersListPage() {
 
   const deleteMutation = useMutation({
     mutationFn: deleteUser,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['users'] })
+      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
+    },
   })
 
   function handleSearch(e: React.FormEvent) {
@@ -90,6 +94,7 @@ export function UsersListPage() {
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Username</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600">ID</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Role</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Status</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Last login</th>
@@ -100,6 +105,9 @@ export function UsersListPage() {
               {data?.data.map((user) => (
                 <tr key={user.id} className="hover:bg-gray-50">
                   <td className="px-4 py-3 font-medium text-gray-900">{user.username}</td>
+                  <td className="px-4 py-3">
+                    <CopyableId id={user.id} short />
+                  </td>
                   <td className="px-4 py-3">
                     <span
                       className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${

@@ -1,17 +1,26 @@
-import { Fragment, useState } from 'react'
+import { Fragment, useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { listAdminAuditLogs } from '../api/adminAudit'
 import { actionBadgeClass } from '../utils/auditBadge'
+import { EntitySelect } from '../components/EntitySelect'
+import {
+  searchUsers,
+  searchDataSources,
+  searchRoles,
+  searchPolicies,
+} from '../utils/entitySearchFns'
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleString()
 }
 
+// The backend stores resource_type as "proxy_user" (matching the DB table name).
+// The UI displays it as "user" for readability, but all API queries use "proxy_user".
 function resourceBadgeClass(resourceType: string): string {
   switch (resourceType) {
     case 'role':
       return 'bg-purple-100 text-purple-700'
-    case 'user':
+    case 'proxy_user':
       return 'bg-blue-100 text-blue-700'
     case 'policy':
       return 'bg-indigo-100 text-indigo-700'
@@ -26,15 +35,32 @@ export function AdminAuditPage() {
   const [page, setPage] = useState(1)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [filterResourceType, setFilterResourceType] = useState('')
+  const [filterResourceId, setFilterResourceId] = useState('')
   const [filterActorId, setFilterActorId] = useState('')
   const [filterFrom, setFilterFrom] = useState('')
   const [filterTo, setFilterTo] = useState('')
   const [appliedFilters, setAppliedFilters] = useState<{
     resource_type?: string
+    resource_id?: string
     actor_id?: string
     from?: string
     to?: string
   }>({})
+
+  const resourceSearchFn = useMemo(() => {
+    const fns: Record<string, (q: string) => Promise<import('../utils/entitySearchFns').EntityOption[]>> = {
+      proxy_user: searchUsers,
+      role: searchRoles,
+      policy: searchPolicies,
+      datasource: searchDataSources,
+    }
+    return fns[filterResourceType] ?? null
+  }, [filterResourceType])
+
+  function handleResourceTypeChange(value: string) {
+    setFilterResourceType(value)
+    setFilterResourceId('')
+  }
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ['admin-audit', page, appliedFilters],
@@ -50,6 +76,7 @@ export function AdminAuditPage() {
     e.preventDefault()
     setAppliedFilters({
       resource_type: filterResourceType || undefined,
+      resource_id: filterResourceId || undefined,
       actor_id: filterActorId || undefined,
       from: filterFrom ? filterFrom + ':00' : undefined,
       to: filterTo ? filterTo + ':00' : undefined,
@@ -59,6 +86,7 @@ export function AdminAuditPage() {
 
   function clearFilters() {
     setFilterResourceType('')
+    setFilterResourceId('')
     setFilterActorId('')
     setFilterFrom('')
     setFilterTo('')
@@ -92,31 +120,42 @@ export function AdminAuditPage() {
 
       {/* Filters */}
       <form onSubmit={handleFilter} className="bg-white rounded-xl border border-gray-200 p-4 mb-4">
-        <div className="grid grid-cols-4 gap-3 mb-3">
+        <div className="grid grid-cols-5 gap-3 mb-3">
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">Resource Type</label>
             <select
               value={filterResourceType}
-              onChange={(e) => setFilterResourceType(e.target.value)}
+              onChange={(e) => handleResourceTypeChange(e.target.value)}
               className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
             >
               <option value="">All</option>
               <option value="role">Role</option>
-              <option value="user">User</option>
+              {/* Backend resource_type is "proxy_user" (DB table name); displayed as "User" */}
+              <option value="proxy_user">User</option>
               <option value="policy">Policy</option>
               <option value="datasource">Datasource</option>
             </select>
           </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Actor ID</label>
-            <input
-              type="text"
-              value={filterActorId}
-              onChange={(e) => setFilterActorId(e.target.value)}
-              placeholder="UUID..."
-              className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+          {resourceSearchFn ? (
+            <EntitySelect
+              label="Resource"
+              value={filterResourceId}
+              onChange={setFilterResourceId}
+              searchFn={resourceSearchFn}
+              placeholder={`Search ${
+                { proxy_user: 'users', role: 'roles', policy: 'policies', datasource: 'data sources' }[filterResourceType] ?? ''
+              }…`}
             />
-          </div>
+          ) : (
+            <div />
+          )}
+          <EntitySelect
+            label="Actor"
+            value={filterActorId}
+            onChange={setFilterActorId}
+            searchFn={searchUsers}
+            placeholder="Search users…"
+          />
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">From</label>
             <input
@@ -186,7 +225,7 @@ export function AdminAuditPage() {
                       <span
                         className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${resourceBadgeClass(entry.resource_type)}`}
                       >
-                        {entry.resource_type}
+                        {entry.resource_type === 'proxy_user' ? 'user' : entry.resource_type}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-xs">

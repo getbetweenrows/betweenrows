@@ -183,7 +183,7 @@ pub async fn create_role(
         role_id,
         AuditAction::Create,
         claims.sub,
-        serde_json::json!({ "after": { "name": body.name, "description": body.description } }),
+        serde_json::json!({ "after": { "name": body.name, "description": body.description, "is_active": true } }),
     );
 
     txn.commit().await.map_err(ApiErr::internal)?;
@@ -730,7 +730,7 @@ pub async fn delete_role(
         .map_err(ApiErr::internal)?
         .ok_or_else(|| ApiErr::not_found("Role not found"))?;
 
-    let before_json = serde_json::json!({ "name": r.name, "description": r.description });
+    let before_json = serde_json::json!({ "name": r.name, "description": r.description, "is_active": r.is_active });
 
     let affected_users = role_resolver::resolve_all_role_members(&state.db, id)
         .await

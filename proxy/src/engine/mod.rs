@@ -1569,16 +1569,13 @@ async fn build_typed_json_attributes(
     raw_attrs: &std::collections::HashMap<String, serde_json::Value>,
 ) -> std::collections::HashMap<String, serde_json::Value> {
     use crate::entity::attribute_definition;
+    use crate::hooks::policy::{AttrDefInfo, TypedAttribute, resolve_user_attribute_defaults};
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-    if raw_attrs.is_empty() {
-        return std::collections::HashMap::new();
-    }
-
-    let keys: Vec<String> = raw_attrs.keys().cloned().collect();
+    // Load ALL user-type attribute definitions (not just for keys the user has)
+    // so we can resolve defaults for missing attributes.
     let defs = attribute_definition::Entity::find()
         .filter(attribute_definition::Column::EntityType.eq("user"))
-        .filter(attribute_definition::Column::Key.is_in(keys))
         .all(db)
         .await
         .unwrap_or_default();
@@ -1588,34 +1585,62 @@ async fn build_typed_json_attributes(
         .map(|d| (d.key.as_str(), d.value_type.as_str()))
         .collect();
 
-    let mut result = std::collections::HashMap::new();
+    // Build AttrDefInfo map for resolve_user_attribute_defaults
+    let attr_defs: std::collections::HashMap<String, AttrDefInfo> = defs
+        .iter()
+        .map(|d| {
+            (
+                d.key.clone(),
+                AttrDefInfo {
+                    default_value: d.default_value.clone(),
+                    value_type: d.value_type.clone(),
+                },
+            )
+        })
+        .collect();
+
+    // Build user's actual TypedAttribute map from raw JSON
+    let mut user_attrs = std::collections::HashMap::new();
     for (key, value) in raw_attrs {
         let value_type = def_map.get(key.as_str()).unwrap_or(&"string");
-        let json_val = match *value_type {
-            // List values are already JSON arrays — pass through directly
-            "list" => value.clone(),
-            "integer" => {
-                let s = match value {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                s.parse::<i64>()
-                    .map(|n| serde_json::json!(n))
-                    .unwrap_or_else(|_| serde_json::json!(s))
-            }
-            "boolean" => {
-                let s = match value {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                s.parse::<bool>()
-                    .map(|b| serde_json::json!(b))
-                    .unwrap_or_else(|_| serde_json::json!(s))
-            }
+        let str_value = match *value_type {
+            "list" => serde_json::to_string(value).unwrap_or_else(|_| "[]".to_string()),
             _ => match value {
-                serde_json::Value::String(s) => serde_json::json!(s),
-                other => other.clone(),
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
             },
+        };
+        user_attrs.insert(
+            key.clone(),
+            TypedAttribute {
+                value: str_value,
+                value_type: value_type.to_string(),
+            },
+        );
+    }
+
+    // Resolve defaults for missing attributes
+    let resolved = resolve_user_attribute_defaults(&user_attrs, &attr_defs);
+
+    // Convert to typed JSON values
+    let mut result = std::collections::HashMap::new();
+    for (key, ta) in &resolved {
+        let json_val = match ta.value_type.as_str() {
+            "null" => serde_json::Value::Null,
+            "list" => serde_json::from_str::<Vec<String>>(&ta.value)
+                .map(|arr| serde_json::json!(arr))
+                .unwrap_or_else(|_| serde_json::json!(&ta.value)),
+            "integer" => ta
+                .value
+                .parse::<i64>()
+                .map(|n| serde_json::json!(n))
+                .unwrap_or_else(|_| serde_json::json!(&ta.value)),
+            "boolean" => ta
+                .value
+                .parse::<bool>()
+                .map(|b| serde_json::json!(b))
+                .unwrap_or_else(|_| serde_json::json!(&ta.value)),
+            _ => serde_json::json!(&ta.value),
         };
         result.insert(key.clone(), json_val);
     }

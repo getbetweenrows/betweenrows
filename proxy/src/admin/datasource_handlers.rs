@@ -6,7 +6,6 @@ use axum::{
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -133,7 +132,9 @@ pub async fn create_datasource(
     let now = Utc::now().naive_utc();
     let ds_id = Uuid::now_v7();
 
-    let txn = state.db.begin().await.map_err(ApiErr::internal)?;
+    let mut txn = AuditedTxn::begin(&state.db)
+        .await
+        .map_err(ApiErr::internal)?;
 
     let model = data_source::ActiveModel {
         id: Set(ds_id),
@@ -148,7 +149,7 @@ pub async fn create_datasource(
         created_at: Set(now),
         updated_at: Set(now),
     }
-    .insert(&txn)
+    .insert(&*txn)
     .await
     .map_err(|e| {
         let msg = e.to_string();
@@ -168,9 +169,24 @@ pub async fn create_datasource(
         assignment_scope: Set("user".to_string()),
         created_at: Set(now),
     }
-    .insert(&txn)
+    .insert(&*txn)
     .await
     .map_err(ApiErr::internal)?;
+
+    txn.audit(
+        "datasource",
+        ds_id,
+        AuditAction::Create,
+        claims.sub,
+        serde_json::json!({
+            "after": {
+                "name": &model.name,
+                "ds_type": &model.ds_type,
+                "access_mode": &model.access_mode,
+                "is_active": model.is_active,
+            }
+        }),
+    );
 
     txn.commit().await.map_err(ApiErr::internal)?;
 
@@ -196,7 +212,7 @@ pub async fn get_datasource(
 // ---------- PUT /datasources/{id} ----------
 
 pub async fn update_datasource(
-    AdminClaims(_): AdminClaims,
+    AdminClaims(claims): AdminClaims,
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateDataSourceRequest>,
@@ -207,27 +223,38 @@ pub async fn update_datasource(
         .map_err(ApiErr::internal)?
         .ok_or_else(|| ApiErr::not_found("Data source not found"))?;
 
+    let mut changes_before = serde_json::Map::new();
+    let mut changes_after = serde_json::Map::new();
+
     let mut active: data_source::ActiveModel = model.clone().into();
 
     if let Some(ref name) = body.name {
         validate_datasource_name(name)
             .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+        changes_before.insert("name".into(), serde_json::json!(model.name));
+        changes_after.insert("name".into(), serde_json::json!(name));
         active.name = Set(name.clone());
     }
     if let Some(is_active) = body.is_active {
+        changes_before.insert("is_active".into(), serde_json::json!(model.is_active));
+        changes_after.insert("is_active".into(), serde_json::json!(is_active));
         active.is_active = Set(is_active);
     }
-    if let Some(access_mode) = body.access_mode {
-        if !validate_access_mode(&access_mode) {
+    if let Some(ref access_mode) = body.access_mode {
+        if !validate_access_mode(access_mode) {
             return Err(ApiErr::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "access_mode must be 'open' or 'policy_required'",
             ));
         }
-        active.access_mode = Set(access_mode);
+        changes_before.insert("access_mode".into(), serde_json::json!(model.access_mode));
+        changes_after.insert("access_mode".into(), serde_json::json!(access_mode));
+        active.access_mode = Set(access_mode.clone());
     }
 
     if let Some(config_input) = body.config {
+        changes_after.insert("config_changed".into(), serde_json::json!(true));
+
         // Load existing decrypted secure config for merge
         let existing_config: serde_json::Value =
             serde_json::from_str(&model.config).map_err(ApiErr::internal)?;
@@ -253,8 +280,18 @@ pub async fn update_datasource(
         active.secure_config = Set(new_secure_str);
     }
 
+    // No-op: nothing to update
+    if changes_before.is_empty() && changes_after.is_empty() {
+        return Ok(Json(ds_response(model)?));
+    }
+
     active.updated_at = Set(Utc::now().naive_utc());
-    let updated = active.update(&state.db).await.map_err(|e| {
+
+    let mut txn = AuditedTxn::begin(&state.db)
+        .await
+        .map_err(ApiErr::internal)?;
+
+    let updated = active.update(&*txn).await.map_err(|e| {
         let msg = e.to_string();
         if msg.contains("UNIQUE") || msg.contains("unique") {
             ApiErr::conflict("Data source name already exists")
@@ -263,9 +300,25 @@ pub async fn update_datasource(
         }
     })?;
 
+    txn.audit(
+        "datasource",
+        id,
+        AuditAction::Update,
+        claims.sub,
+        serde_json::json!({ "before": changes_before, "after": changes_after }),
+    );
+
+    txn.commit().await.map_err(ApiErr::internal)?;
+
     // Invalidate cached session context AND shared pool (connection params may have changed)
     // Use old name in case name was changed
     state.engine_cache.invalidate_all(&model.name).await;
+    if let Some(hook) = &state.policy_hook {
+        hook.invalidate_datasource(&model.name).await;
+    }
+    if let Some(ph) = &state.proxy_handler {
+        ph.rebuild_contexts_for_datasource(&model.name);
+    }
 
     Ok(Json(ds_response(updated)?))
 }
@@ -273,7 +326,7 @@ pub async fn update_datasource(
 // ---------- DELETE /datasources/{id} ----------
 
 pub async fn delete_datasource(
-    AdminClaims(_): AdminClaims,
+    AdminClaims(claims): AdminClaims,
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiErr> {
@@ -284,8 +337,33 @@ pub async fn delete_datasource(
         .ok_or_else(|| ApiErr::not_found("Data source not found"))?;
 
     let name = model.name.clone();
+    let ds_type = model.ds_type.clone();
+    let access_mode = model.access_mode.clone();
+    let is_active = model.is_active;
+
+    let mut txn = AuditedTxn::begin(&state.db)
+        .await
+        .map_err(ApiErr::internal)?;
+
     let active: data_source::ActiveModel = model.into();
-    active.delete(&state.db).await.map_err(ApiErr::internal)?;
+    active.delete(&*txn).await.map_err(ApiErr::internal)?;
+
+    txn.audit(
+        "datasource",
+        id,
+        AuditAction::Delete,
+        claims.sub,
+        serde_json::json!({
+            "before": {
+                "name": &name,
+                "ds_type": &ds_type,
+                "access_mode": &access_mode,
+                "is_active": is_active,
+            }
+        }),
+    );
+
+    txn.commit().await.map_err(ApiErr::internal)?;
 
     // Invalidate cached session context AND shared pool
     state.engine_cache.invalidate_all(&name).await;
@@ -692,5 +770,264 @@ mod tests {
 
         let ds_count = data_source::Entity::find().count(&db).await.unwrap();
         assert_eq!(ds_count, 0);
+    }
+
+    // ===== Audit logging tests (HTTP handler level) =====
+
+    use crate::{
+        admin::{discovery_job, jwt},
+        engine::EngineCache,
+        entity::admin_audit_log,
+    };
+    use axum::{
+        Router,
+        body::Body,
+        http::{Method, Request, StatusCode as AxumStatusCode},
+        routing::get,
+    };
+    use std::sync::{Arc, OnceLock};
+    use tokio::sync::Mutex as TokioMutex;
+    use tower::ServiceExt;
+
+    use super::AdminState;
+
+    const JWT_SECRET: &str = "test-jwt-secret-key-32-chars-pad";
+
+    fn shared_wasm_runtime() -> Arc<crate::decision::wasm::WasmDecisionRuntime> {
+        static RUNTIME: OnceLock<Arc<crate::decision::wasm::WasmDecisionRuntime>> = OnceLock::new();
+        RUNTIME
+            .get_or_init(|| Arc::new(crate::decision::wasm::WasmDecisionRuntime::new().unwrap()))
+            .clone()
+    }
+
+    fn make_state(db: sea_orm::DatabaseConnection, master_key: [u8; 32]) -> AdminState {
+        let wasm_runtime = shared_wasm_runtime();
+        let engine_cache = EngineCache::new(db.clone(), master_key, wasm_runtime.clone());
+        AdminState {
+            auth: Arc::new(crate::auth::Auth::new(db.clone())),
+            db,
+            jwt_secret: JWT_SECRET.to_string(),
+            jwt_expiry_hours: 1,
+            engine_cache,
+            master_key,
+            job_store: Arc::new(TokioMutex::new(discovery_job::JobStore::new())),
+            policy_hook: None,
+            proxy_handler: None,
+            wasm_runtime,
+        }
+    }
+
+    fn make_router(state: AdminState) -> Router {
+        Router::new()
+            .route(
+                "/datasources",
+                get(list_datasources).post(create_datasource),
+            )
+            .route(
+                "/datasources/{id}",
+                get(get_datasource)
+                    .put(update_datasource)
+                    .delete(delete_datasource),
+            )
+            .with_state(state)
+    }
+
+    fn admin_token(id: Uuid) -> String {
+        let claims = jwt::Claims {
+            sub: id,
+            username: "admin".to_string(),
+            is_admin: true,
+            exp: (Utc::now().timestamp() as u64) + 3600,
+        };
+        jwt::encode_jwt(&claims, JWT_SECRET).unwrap()
+    }
+
+    fn json_body(value: serde_json::Value) -> Body {
+        Body::from(serde_json::to_string(&value).unwrap())
+    }
+
+    async fn body_json(res: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn get_audit_entries(
+        db: &sea_orm::DatabaseConnection,
+        resource_type: &str,
+    ) -> Vec<admin_audit_log::Model> {
+        use sea_orm::QueryFilter;
+        admin_audit_log::Entity::find()
+            .filter(admin_audit_log::Column::ResourceType.eq(resource_type))
+            .all(db)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn audit_create_datasource() {
+        let (db, master_key) = setup().await;
+        let user = create_user(&db, "admin", true).await;
+        let token = admin_token(user.id);
+
+        let res = make_router(make_state(db.clone(), master_key))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/datasources")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "audit-ds",
+                        "ds_type": "postgres",
+                        "access_mode": "open",
+                        "config": {
+                            "host": "localhost",
+                            "port": 5432,
+                            "database": "testdb",
+                            "username": "alice",
+                            "password": "secret",
+                            "sslmode": "require"
+                        }
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), AxumStatusCode::CREATED);
+        let body = body_json(res).await;
+        let ds_id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+
+        let entries = get_audit_entries(&db, "datasource").await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].resource_id, ds_id);
+        assert_eq!(entries[0].action, "create");
+        assert_eq!(entries[0].actor_id, user.id);
+
+        let changes: serde_json::Value =
+            serde_json::from_str(entries[0].changes.as_deref().unwrap()).unwrap();
+        assert_eq!(changes["after"]["name"], "audit-ds");
+        assert_eq!(changes["after"]["ds_type"], "postgres");
+        assert_eq!(changes["after"]["access_mode"], "open");
+        assert_eq!(changes["after"]["is_active"], true);
+        // Secrets must not appear
+        assert!(changes["after"].get("config").is_none());
+        assert!(changes["after"].get("secure_config").is_none());
+    }
+
+    #[tokio::test]
+    async fn audit_update_datasource_changed_fields_only() {
+        let (db, master_key) = setup().await;
+        let user = create_user(&db, "admin", true).await;
+        let token = admin_token(user.id);
+
+        // Create via handler
+        let create_res = make_router(make_state(db.clone(), master_key))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/datasources")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "original",
+                        "ds_type": "postgres",
+                        "access_mode": "open",
+                        "config": {
+                            "host": "localhost", "port": 5432, "database": "testdb",
+                            "username": "alice", "password": "secret", "sslmode": "require"
+                        }
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let ds_id = body_json(create_res).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Update name only
+        let update_res = make_router(make_state(db.clone(), master_key))
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/datasources/{ds_id}"))
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({"name": "renamed"})))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_res.status(), AxumStatusCode::OK);
+
+        let entries = get_audit_entries(&db, "datasource").await;
+        let update_entry = entries.iter().find(|e| e.action == "update").unwrap();
+        let changes: serde_json::Value =
+            serde_json::from_str(update_entry.changes.as_deref().unwrap()).unwrap();
+        // Only changed fields
+        assert_eq!(changes["before"]["name"], "original");
+        assert_eq!(changes["after"]["name"], "renamed");
+        assert!(changes["before"].get("is_active").is_none());
+        assert!(changes["after"].get("is_active").is_none());
+    }
+
+    #[tokio::test]
+    async fn audit_delete_datasource() {
+        let (db, master_key) = setup().await;
+        let user = create_user(&db, "admin", true).await;
+        let token = admin_token(user.id);
+
+        let create_res = make_router(make_state(db.clone(), master_key))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/datasources")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "deletable",
+                        "ds_type": "postgres",
+                        "access_mode": "open",
+                        "config": {
+                            "host": "localhost", "port": 5432, "database": "testdb",
+                            "username": "alice", "password": "secret", "sslmode": "require"
+                        }
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let ds_id = body_json(create_res).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let del_res = make_router(make_state(db.clone(), master_key))
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/datasources/{ds_id}"))
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_res.status(), AxumStatusCode::NO_CONTENT);
+
+        let entries = get_audit_entries(&db, "datasource").await;
+        let del_entry = entries.iter().find(|e| e.action == "delete").unwrap();
+        let changes: serde_json::Value =
+            serde_json::from_str(del_entry.changes.as_deref().unwrap()).unwrap();
+        assert_eq!(changes["before"]["name"], "deletable");
+        assert_eq!(changes["before"]["ds_type"], "postgres");
+        assert_eq!(changes["before"]["is_active"], true);
+        // No secrets
+        assert!(changes["before"].get("config").is_none());
+        assert!(changes["before"].get("secure_config").is_none());
     }
 }

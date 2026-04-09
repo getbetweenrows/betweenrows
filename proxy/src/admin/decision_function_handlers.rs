@@ -226,10 +226,13 @@ pub async fn create_decision_function(
         serde_json::json!({
             "after": {
                 "name": model.name,
+                "description": model.description,
                 "language": model.language,
                 "evaluate_context": model.evaluate_context,
                 "on_error": model.on_error,
                 "log_level": model.log_level,
+                "is_enabled": model.is_enabled,
+                "decision_config": model.decision_config,
             }
         }),
     );
@@ -304,22 +307,33 @@ pub async fn update_decision_function(
 
     let mut active: decision_function::ActiveModel = df.clone().into();
 
+    let mut changes_before = serde_json::Map::new();
+    let mut changes_after = serde_json::Map::new();
+
     // Recompile WASM if decision_fn changes
     let mut needs_recompile = false;
     if let Some(ref name) = body.name {
+        changes_before.insert("name".into(), serde_json::json!(df.name));
+        changes_after.insert("name".into(), serde_json::json!(name));
         active.name = Set(name.clone());
     }
     if let Some(ref desc) = body.description {
+        changes_before.insert("description".into(), serde_json::json!(df.description));
+        changes_after.insert("description".into(), serde_json::json!(desc));
         active.description = Set(Some(desc.clone()));
     }
     if let Some(ref lang) = body.language {
+        changes_before.insert("language".into(), serde_json::json!(df.language));
+        changes_after.insert("language".into(), serde_json::json!(lang));
         active.language = Set(lang.clone());
     }
     if let Some(ref fn_source) = body.decision_fn {
+        changes_after.insert("code_changed".into(), serde_json::json!(true));
         active.decision_fn = Set(fn_source.clone());
         needs_recompile = true;
     }
     if let Some(config_val) = body.decision_config {
+        changes_after.insert("config_changed".into(), serde_json::json!(true));
         let json = config_val
             .map(|v| serde_json::to_string(&v))
             .transpose()
@@ -327,15 +341,26 @@ pub async fn update_decision_function(
         active.decision_config = Set(json);
     }
     if let Some(ref ctx) = body.evaluate_context {
+        changes_before.insert(
+            "evaluate_context".into(),
+            serde_json::json!(df.evaluate_context),
+        );
+        changes_after.insert("evaluate_context".into(), serde_json::json!(ctx));
         active.evaluate_context = Set(ctx.clone());
     }
     if let Some(ref on_err) = body.on_error {
+        changes_before.insert("on_error".into(), serde_json::json!(df.on_error));
+        changes_after.insert("on_error".into(), serde_json::json!(on_err));
         active.on_error = Set(on_err.clone());
     }
     if let Some(ref ll) = body.log_level {
+        changes_before.insert("log_level".into(), serde_json::json!(df.log_level));
+        changes_after.insert("log_level".into(), serde_json::json!(ll));
         active.log_level = Set(ll.clone());
     }
     if let Some(enabled) = body.is_enabled {
+        changes_before.insert("is_enabled".into(), serde_json::json!(df.is_enabled));
+        changes_after.insert("is_enabled".into(), serde_json::json!(enabled));
         active.is_enabled = Set(enabled);
     }
 
@@ -361,19 +386,15 @@ pub async fn update_decision_function(
         }
     })?;
 
+    changes_before.insert("version".into(), serde_json::json!(df.version));
+    changes_after.insert("version".into(), serde_json::json!(new_version));
+
     txn.audit(
         "decision_function",
         id,
         AuditAction::Update,
         claims.sub,
-        serde_json::json!({
-            "after": {
-                "name": updated.name,
-                "version": new_version,
-                "is_enabled": updated.is_enabled,
-                "log_level": updated.log_level,
-            }
-        }),
+        serde_json::json!({ "before": changes_before, "after": changes_after }),
     );
     txn.commit().await.map_err(ApiErr::internal)?;
 
@@ -423,8 +444,12 @@ pub async fn delete_decision_function(
         serde_json::json!({
             "before": {
                 "name": df.name,
+                "description": df.description,
                 "language": df.language,
                 "evaluate_context": df.evaluate_context,
+                "on_error": df.on_error,
+                "log_level": df.log_level,
+                "is_enabled": df.is_enabled,
             }
         }),
     );

@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { deleteDataSource, listDataSources, testDataSource } from '../api/datasources'
 import type { DataSource } from '../types/datasource'
+import { CopyableId } from '../components/CopyableId'
 
 export function DataSourcesListPage() {
   const navigate = useNavigate()
@@ -20,7 +21,10 @@ export function DataSourcesListPage() {
 
   const deleteMutation = useMutation({
     mutationFn: deleteDataSource,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['datasources'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['datasources'] })
+      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
+    },
   })
 
   function handleSearch(e: React.FormEvent) {
@@ -110,6 +114,7 @@ export function DataSourcesListPage() {
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Name</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600">ID</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Type</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Host</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Status</th>
@@ -121,6 +126,9 @@ export function DataSourcesListPage() {
                 <tr key={ds.id} className="hover:bg-gray-50">
                   <td className="px-4 py-3 font-medium text-gray-900 font-mono text-xs">
                     {ds.name}
+                  </td>
+                  <td className="px-4 py-3">
+                    <CopyableId id={ds.id} short />
                   </td>
                   <td className="px-4 py-3 text-gray-600 capitalize">{ds.ds_type}</td>
                   <td className="px-4 py-3 text-gray-600 text-xs font-mono">

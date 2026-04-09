@@ -8,6 +8,7 @@ import { PolicyAssignmentEditPanel } from '../components/PolicyAssignmentPanel'
 import { PolicyCodeView } from '../components/PolicyCodeView'
 import { AuditTimeline } from '../components/AuditTimeline'
 import { useCatalogHints } from '../hooks/useCatalogHints'
+import { CopyableId } from '../components/CopyableId'
 
 export function PolicyEditPage() {
   const { id } = useParams<{ id: string }>()
@@ -48,6 +49,7 @@ export function PolicyEditPage() {
       })
       queryClient.invalidateQueries({ queryKey: ['policies'] })
       queryClient.invalidateQueries({ queryKey: ['policy', policyId] })
+      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
       navigate('/policies')
     } catch (err: unknown) {
       const apiErr = err as { response?: { status?: number; data?: { error?: string } } }
@@ -90,6 +92,7 @@ export function PolicyEditPage() {
         <h1 className="text-xl font-bold text-gray-900">
           Edit: <span className="font-mono text-lg">{policy.name}</span>
         </h1>
+        <CopyableId id={policyId} />
         <p className="text-sm text-gray-500 mt-1">Version {policy.version}</p>
       </div>
 
@@ -108,9 +111,10 @@ export function PolicyEditPage() {
         <PolicyAssignmentEditPanel
           policyId={policyId}
           assignments={policy.assignments ?? []}
-          onAssignmentChange={() =>
+          onAssignmentChange={() => {
             queryClient.invalidateQueries({ queryKey: ['policy', policyId] })
-          }
+            queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
+          }}
         />
       </div>
 

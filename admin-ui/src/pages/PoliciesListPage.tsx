@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { deletePolicy, listPolicies, updatePolicy } from '../api/policies'
 import type { PolicyResponse } from '../types/policy'
+import { CopyableId } from '../components/CopyableId'
 
 export function PoliciesListPage() {
   const navigate = useNavigate()
@@ -18,13 +19,19 @@ export function PoliciesListPage() {
 
   const deleteMutation = useMutation({
     mutationFn: deletePolicy,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['policies'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['policies'] })
+      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
+    },
   })
 
   const toggleMutation = useMutation({
     mutationFn: ({ id, is_enabled, version }: { id: string; is_enabled: boolean; version: number }) =>
       updatePolicy(id, { is_enabled, version }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['policies'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['policies'] })
+      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
+    },
   })
 
   function handleSearch(e: React.FormEvent) {
@@ -102,6 +109,7 @@ export function PoliciesListPage() {
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Name</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600">ID</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Type</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Targets</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Assignments</th>
@@ -119,6 +127,9 @@ export function PoliciesListPage() {
                         {policy.description}
                       </div>
                     )}
+                  </td>
+                  <td className="px-4 py-3">
+                    <CopyableId id={policy.id} short />
                   </td>
                   <td className="px-4 py-3">
                     <span

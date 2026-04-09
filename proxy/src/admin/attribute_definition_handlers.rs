@@ -134,6 +134,9 @@ pub async fn create_attribute_definition(
                 "entity_type": model.entity_type,
                 "value_type": model.value_type,
                 "display_name": model.display_name,
+                "default_value": model.default_value,
+                "allowed_values": model.allowed_values,
+                "description": model.description,
             }
         }),
     );
@@ -197,22 +200,38 @@ pub async fn update_attribute_definition(
     .map_err(|e| ApiErr::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
 
     let original_value_type = def.value_type.clone();
+    let original_default_value = def.default_value.clone();
     let key = def.key.clone();
     let entity_type = def.entity_type.clone();
 
     let now = Utc::now().naive_utc();
-    let mut active: attribute_definition::ActiveModel = def.into();
+
+    let mut changes_before = serde_json::Map::new();
+    let mut changes_after = serde_json::Map::new();
+
+    let mut active: attribute_definition::ActiveModel = def.clone().into();
 
     if let Some(ref dn) = body.display_name {
+        changes_before.insert("display_name".into(), serde_json::json!(def.display_name));
+        changes_after.insert("display_name".into(), serde_json::json!(dn));
         active.display_name = Set(dn.clone());
     }
     if let Some(ref vt) = body.value_type {
+        changes_before.insert("value_type".into(), serde_json::json!(def.value_type));
+        changes_after.insert("value_type".into(), serde_json::json!(vt));
         active.value_type = Set(vt.clone());
     }
     if let Some(ref dv) = body.default_value {
+        changes_before.insert("default_value".into(), serde_json::json!(def.default_value));
+        changes_after.insert("default_value".into(), serde_json::json!(dv));
         active.default_value = Set(dv.clone());
     }
     if let Some(ref av) = body.allowed_values {
+        changes_before.insert(
+            "allowed_values".into(),
+            serde_json::json!(def.allowed_values),
+        );
+        changes_after.insert("allowed_values".into(), serde_json::json!(av));
         let json = av
             .as_ref()
             .map(serde_json::to_string)
@@ -221,6 +240,8 @@ pub async fn update_attribute_definition(
         active.allowed_values = Set(json);
     }
     if let Some(ref desc) = body.description {
+        changes_before.insert("description".into(), serde_json::json!(def.description));
+        changes_after.insert("description".into(), serde_json::json!(desc));
         active.description = Set(desc.clone());
     }
     active.updated_by = Set(claims.sub);
@@ -237,19 +258,20 @@ pub async fn update_attribute_definition(
         id,
         AuditAction::Update,
         claims.sub,
-        serde_json::json!({
-            "after": {
-                "display_name": updated.display_name,
-                "value_type": updated.value_type,
-            }
-        }),
+        serde_json::json!({ "before": changes_before, "after": changes_after }),
     );
     txn.commit().await.map_err(ApiErr::internal)?;
 
-    // Cache invalidation: if value_type changed, stale typed literals need flushing
+    // Cache invalidation: if value_type or default_value changed, stale data needs flushing.
+    // default_value now affects query-time behavior (used as fallback for missing attributes).
     let value_type_changed =
         body.value_type.is_some() && body.value_type.as_deref() != Some(&original_value_type);
-    if value_type_changed && entity_type == "user" {
+    let default_value_changed = body.default_value.is_some()
+        && match &body.default_value {
+            Some(dv) => *dv != original_default_value,
+            None => false,
+        };
+    if (value_type_changed || default_value_changed) && entity_type == "user" {
         invalidate_users_with_attribute(&state, &key).await;
     }
 
@@ -324,6 +346,10 @@ pub async fn delete_attribute_definition(
                 "key": def.key,
                 "entity_type": def.entity_type,
                 "value_type": def.value_type,
+                "display_name": def.display_name,
+                "default_value": def.default_value,
+                "allowed_values": def.allowed_values,
+                "description": def.description,
                 "affected_count": affected_count,
             }
         }),

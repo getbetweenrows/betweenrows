@@ -6,6 +6,7 @@ import { RoleForm } from '../components/RoleForm'
 import { RoleMemberPanel } from '../components/RoleMemberPanel'
 import { RoleInheritancePanel } from '../components/RoleInheritancePanel'
 import { AuditTimeline } from '../components/AuditTimeline'
+import { CopyableId } from '../components/CopyableId'
 import type { RoleFormValues } from '../components/RoleForm'
 
 type Tab = 'details' | 'members' | 'inheritance' | 'datasources' | 'policies' | 'activity'
@@ -39,6 +40,7 @@ export function RoleEditPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['role', roleId] })
       queryClient.invalidateQueries({ queryKey: ['roles'] })
+      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
     },
   })
 
@@ -46,6 +48,7 @@ export function RoleEditPage() {
     mutationFn: () => deleteRole(roleId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['roles'] })
+      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
       navigate('/roles', { replace: true })
     },
   })
@@ -60,6 +63,7 @@ export function RoleEditPage() {
       })
       queryClient.invalidateQueries({ queryKey: ['role', roleId] })
       queryClient.invalidateQueries({ queryKey: ['roles'] })
+      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
       setError(null)
     } catch (err: unknown) {
       const msg =
@@ -79,6 +83,7 @@ export function RoleEditPage() {
   function handleRoleDataChange() {
     queryClient.invalidateQueries({ queryKey: ['role', roleId] })
     queryClient.invalidateQueries({ queryKey: ['roles'] })
+    queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
   }
 
   if (isLoading) {
@@ -111,6 +116,7 @@ export function RoleEditPage() {
             <h1 className="text-xl font-bold text-gray-900">
               {role.name}
             </h1>
+            <CopyableId id={roleId} />
             <div className="flex items-center gap-3 mt-1">
               <span
                 className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${

@@ -960,6 +960,26 @@ impl ProxyTestServer {
         value_type: &str,
         allowed_values: Option<Vec<&str>>,
     ) -> Uuid {
+        self.create_attribute_definition_with_default(
+            key,
+            entity_type,
+            value_type,
+            allowed_values,
+            None,
+        )
+        .await
+    }
+
+    /// Create an attribute definition with an optional default_value.
+    #[allow(dead_code)]
+    pub async fn create_attribute_definition_with_default(
+        &self,
+        key: &str,
+        entity_type: &str,
+        value_type: &str,
+        allowed_values: Option<Vec<&str>>,
+        default_value: Option<&str>,
+    ) -> Uuid {
         let mut body = json!({
             "key": key,
             "entity_type": entity_type,
@@ -968,6 +988,9 @@ impl ProxyTestServer {
         });
         if let Some(av) = allowed_values {
             body["allowed_values"] = json!(av);
+        }
+        if let Some(dv) = default_value {
+            body["default_value"] = json!(dv);
         }
         let resp = self
             .admin

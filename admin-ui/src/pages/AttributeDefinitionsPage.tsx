@@ -1,10 +1,11 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   listAttributeDefinitions,
   deleteAttributeDefinition,
 } from '../api/attributeDefinitions'
+import { CopyableId } from '../components/CopyableId'
 
 const VALUE_TYPE_BADGE: Record<string, string> = {
   string: 'bg-blue-100 text-blue-700',
@@ -34,6 +35,7 @@ export function AttributeDefinitionsPage() {
     mutationFn: (id: string) => deleteAttributeDefinition(id, false),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['attribute-definitions'] })
+      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
       setDeleteError(null)
     },
     onError: (err: unknown) => {
@@ -50,6 +52,7 @@ export function AttributeDefinitionsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['attribute-definitions'] })
       queryClient.invalidateQueries({ queryKey: ['users'] })
+      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
       setDeleteError(null)
     },
   })
@@ -79,16 +82,14 @@ export function AttributeDefinitionsPage() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-xl font-bold text-gray-900">Attribute Definitions</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            {total} definition{total !== 1 ? 's' : ''}
-          </p>
+          <p className="text-sm text-gray-500 mt-0.5">{total} total</p>
         </div>
-        <button
-          onClick={() => navigate('/attributes/create')}
-          className="bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg px-5 py-2 text-sm transition-colors"
+        <Link
+          to="/attributes/create"
+          className="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg px-4 py-2 transition-colors"
         >
-          New definition
-        </button>
+          + New definition
+        </Link>
       </div>
 
       <div className="flex items-center gap-3 mb-4">
@@ -122,27 +123,31 @@ export function AttributeDefinitionsPage() {
         </div>
       )}
 
-      {isLoading ? (
-        <p className="text-sm text-gray-400">Loading...</p>
-      ) : items.length === 0 ? (
-        <p className="text-sm text-gray-500">No attribute definitions found.</p>
-      ) : (
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        {isLoading ? (
+          <div className="p-8 text-center text-gray-400 text-sm">Loading...</div>
+        ) : items.length === 0 ? (
+          <div className="p-8 text-center text-gray-400 text-sm">No attribute definitions found.</div>
+        ) : (
           <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                <th className="px-4 py-3">Key</th>
-                <th className="px-4 py-3">Display Name</th>
-                <th className="px-4 py-3">Type</th>
-                <th className="px-4 py-3">Allowed Values</th>
-                <th className="px-4 py-3">Default</th>
-                <th className="px-4 py-3 text-right">Actions</th>
+            <thead className="bg-gray-50 border-b border-gray-200">
+              <tr>
+                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Key</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">ID</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Display Name</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Type</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Allowed Values</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Default</th>
+                <th className="px-4 py-3 font-medium text-gray-600 text-xs text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {items.map((def) => (
                 <tr key={def.id} className="hover:bg-gray-50 transition-colors">
                   <td className="px-4 py-3 font-mono text-sm">{def.key}</td>
+                  <td className="px-4 py-3">
+                    <CopyableId id={def.id} short />
+                  </td>
                   <td className="px-4 py-3">{def.display_name}</td>
                   <td className="px-4 py-3">
                     <span
@@ -157,7 +162,9 @@ export function AttributeDefinitionsPage() {
                       : <span className="text-gray-300">any</span>}
                   </td>
                   <td className="px-4 py-3 text-gray-500">
-                    {def.default_value ?? <span className="text-gray-300">none</span>}
+                    {def.default_value != null
+                      ? def.default_value
+                      : <span className="text-gray-300 italic">null</span>}
                   </td>
                   <td className="px-4 py-3 text-right space-x-2">
                     <button
@@ -177,25 +184,25 @@ export function AttributeDefinitionsPage() {
               ))}
             </tbody>
           </table>
-        </div>
-      )}
+        )}
+      </div>
 
       {totalPages > 1 && (
-        <div className="flex justify-center gap-2 mt-4">
+        <div className="flex items-center gap-2 mt-4 justify-end">
           <button
             onClick={() => setPage((p) => Math.max(1, p - 1))}
             disabled={page <= 1}
-            className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm disabled:opacity-40 hover:bg-gray-50"
+            className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg disabled:opacity-40 hover:bg-gray-50 transition-colors"
           >
             Previous
           </button>
-          <span className="text-sm text-gray-500 py-1.5">
+          <span className="text-sm text-gray-600">
             Page {page} of {totalPages}
           </span>
           <button
             onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
             disabled={page >= totalPages}
-            className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm disabled:opacity-40 hover:bg-gray-50"
+            className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg disabled:opacity-40 hover:bg-gray-50 transition-colors"
           >
             Next
           </button>

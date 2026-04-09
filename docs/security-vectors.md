@@ -856,3 +856,15 @@ Note: `tenant` is no longer a reserved key — it is a regular custom attribute.
 
 **Test**: `count_star_open_mode_no_policies` — COUNT(\*), COUNT(1), SELECT 1, and multiple aggregates with no policies. `count_star_with_column_allow_only` — COUNT(\*) and COUNT(1) with only column_allow in policy_required mode. `count_star_with_column_deny` — COUNT(\*) and SELECT 1 with column_deny. `count_star_with_column_mask` — COUNT(\*) with column_mask. `count_star_with_join` — COUNT(\*) over a JOIN with no column refs in outer SELECT.
 
+---
+
+### 70. Silent empty-string fallback for missing user attributes
+
+**Vector**: Row filter policy references `{user.tenant}` but user lacks `tenant` attribute. System silently falls back to empty string, producing `WHERE tenant = ''` — either leaking rows where tenant is empty, or returning silent empty results with no indication of misconfiguration. Same risk applies to column mask expressions and decision function context.
+
+**Bug**: `mangle_vars()` used `unwrap_or("")` for missing attributes with no error or warning. Decision function context omitted missing attributes entirely (`undefined` in JS), causing `undefined >= 0` to silently evaluate to `false` in numeric comparisons.
+
+**Defense**: `resolve_user_attribute_defaults()` merges user attributes with definition defaults. Missing attributes with a `default_value` get that value substituted (typed literal in SQL, typed JSON in decision context). Missing attributes with no default get SQL `NULL` (zero rows for equality) and JSON `null` (distinguishable from `undefined`). References to completely undefined attributes (no definition) return an error. The centralized helper is used in all three paths: `mangle_vars` (row filters + masks), query-level decision context (`handle_query`), and visibility-level decision context (`build_typed_json_attributes`).
+
+**Test**: Unit: `test_mangle_vars_missing_attr_with_default`, `test_mangle_vars_missing_attr_null_default`, `test_mangle_vars_missing_attr_no_definition`, `test_mangle_vars_missing_attr_default_integer`, `test_mangle_vars_missing_attr_default_list`, `test_mangle_vars_present_attr_ignores_default`, `test_resolve_user_attribute_defaults`. Integration: `row_filter_missing_attr_uses_default`, `row_filter_missing_attr_null_default`, `row_filter_attr_present_ignores_default`, `column_mask_missing_attr_uses_default`, `column_mask_missing_attr_null_default`, `decision_fn_missing_attr_uses_default`.
+

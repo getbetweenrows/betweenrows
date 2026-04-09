@@ -3,6 +3,8 @@ import { useQuery } from '@tanstack/react-query'
 import { format } from 'sql-formatter'
 import { listAuditLogs } from '../api/audit'
 import type { AuditLogEntry } from '../api/audit'
+import { EntitySelect } from '../components/EntitySelect'
+import { searchUsers, searchDataSources } from '../utils/entitySearchFns'
 
 function formatSql(sql: string): string {
   try {
@@ -117,26 +119,20 @@ export function QueryAuditPage() {
       {/* Filters */}
       <form onSubmit={handleFilter} className="bg-white rounded-xl border border-gray-200 p-4 mb-4">
         <div className="grid grid-cols-5 gap-3 mb-3">
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">User ID</label>
-            <input
-              type="text"
-              value={filterUser}
-              onChange={(e) => setFilterUser(e.target.value)}
-              placeholder="UUID…"
-              className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Data Source ID</label>
-            <input
-              type="text"
-              value={filterDs}
-              onChange={(e) => setFilterDs(e.target.value)}
-              placeholder="UUID…"
-              className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-            />
-          </div>
+          <EntitySelect
+            label="User"
+            value={filterUser}
+            onChange={setFilterUser}
+            searchFn={searchUsers}
+            placeholder="Search users…"
+          />
+          <EntitySelect
+            label="Data Source"
+            value={filterDs}
+            onChange={setFilterDs}
+            searchFn={searchDataSources}
+            placeholder="Search data sources…"
+          />
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">From</label>
             <input

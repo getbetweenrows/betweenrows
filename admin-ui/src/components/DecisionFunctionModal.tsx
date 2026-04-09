@@ -57,13 +57,15 @@ function buildCtxCompletions(evaluateContext: EvaluateContext, configStr: string
     { label: 'ctx.session.datasource.access_mode', type: 'variable' as const },
   ]
 
-  // Add per-attribute completions from definitions
+  // Add per-attribute completions from definitions (with default value hint)
   for (const def of attrDefs) {
-    const detail = def.value_type === 'list' ? 'string[]' : def.value_type
+    const typeLabel = def.value_type === 'list' ? 'string[]' : def.value_type
+    const defaultHint =
+      def.default_value != null ? `default: ${def.default_value}` : 'default: null'
     items.push({
       label: `ctx.session.user.${def.key}`,
       type: 'variable' as const,
-      detail,
+      detail: `${typeLabel} (${defaultHint})`,
     })
   }
 
@@ -722,6 +724,13 @@ export function DecisionFunctionModal({
               }}
             />
           </div>
+
+          <p className="text-xs text-gray-400 -mt-3">
+            Custom user attributes (e.g. <code className="bg-gray-100 px-1 rounded">ctx.session.user.clearance</code>) are <code className="bg-gray-100 px-1 rounded">null</code> when
+            not set on a user or when their default is null. Use defensive checks
+            like <code className="bg-gray-100 px-1 rounded">{'if (ctx.session.user.clearance == null)'}</code> before
+            numeric comparisons, since <code className="bg-gray-100 px-1 rounded">null &gt;= 0</code> is <code className="bg-gray-100 px-1 rounded">true</code> in JavaScript.
+          </p>
 
           {/* Config JSON */}
           <div>

@@ -6,7 +6,6 @@ use axum::{
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -19,6 +18,7 @@ use crate::role_resolver;
 
 use super::{
     AdminState, ApiErr,
+    admin_audit::{AuditAction, AuditedTxn},
     decision_function_handlers::df_summary,
     dto::{
         AssignPolicyRequest, CreatePolicyRequest, DecisionFunctionSummary, ListPoliciesQuery,
@@ -347,7 +347,9 @@ pub async fn create_policy(
         .transpose()
         .map_err(ApiErr::internal)?;
 
-    let txn = state.db.begin().await.map_err(ApiErr::internal)?;
+    let mut txn = AuditedTxn::begin(&state.db)
+        .await
+        .map_err(ApiErr::internal)?;
 
     let policy_model = policy::ActiveModel {
         id: Set(policy_id),
@@ -364,7 +366,7 @@ pub async fn create_policy(
         created_at: Set(now),
         updated_at: Set(now),
     }
-    .insert(&txn)
+    .insert(&*txn)
     .await
     .map_err(|e| {
         let msg = e.to_string();
@@ -375,7 +377,33 @@ pub async fn create_policy(
         }
     })?;
 
-    create_snapshot(&txn, policy_id, 1, claims.sub, "create", &policy_model, &[]).await?;
+    create_snapshot(
+        &*txn,
+        policy_id,
+        1,
+        claims.sub,
+        "create",
+        &policy_model,
+        &[],
+    )
+    .await?;
+
+    txn.audit(
+        "policy",
+        policy_id,
+        AuditAction::Create,
+        claims.sub,
+        serde_json::json!({
+            "after": {
+                "name": &body.name,
+                "description": &body.description,
+                "policy_type": body.policy_type.to_string(),
+                "targets": &body.targets,
+                "is_enabled": body.is_enabled,
+                "decision_function_id": body.decision_function_id.map(|id| id.to_string()),
+            }
+        }),
+    );
 
     txn.commit().await.map_err(ApiErr::internal)?;
 
@@ -504,31 +532,47 @@ pub async fn update_policy(
     let now = Utc::now().naive_utc();
     let new_version = p.version + 1;
 
-    let txn = state.db.begin().await.map_err(ApiErr::internal)?;
+    let mut txn = AuditedTxn::begin(&state.db)
+        .await
+        .map_err(ApiErr::internal)?;
+
+    let mut changes_before = serde_json::Map::new();
+    let mut changes_after = serde_json::Map::new();
 
     let mut active: policy::ActiveModel = p.clone().into();
-    if let Some(name) = body.name {
-        active.name = Set(name);
+    if let Some(ref name) = body.name {
+        changes_before.insert("name".into(), serde_json::json!(p.name));
+        changes_after.insert("name".into(), serde_json::json!(name));
+        active.name = Set(name.clone());
     }
     if let Some(pt) = body.policy_type {
+        changes_before.insert("policy_type".into(), serde_json::json!(p.policy_type));
+        changes_after.insert("policy_type".into(), serde_json::json!(pt.to_string()));
         active.policy_type = Set(pt.to_string());
     }
-    if let Some(desc) = body.description {
-        active.description = Set(Some(desc));
+    if let Some(ref desc) = body.description {
+        changes_before.insert("description".into(), serde_json::json!(p.description));
+        changes_after.insert("description".into(), serde_json::json!(desc));
+        active.description = Set(Some(desc.clone()));
     }
     if let Some(enabled) = body.is_enabled {
+        changes_before.insert("is_enabled".into(), serde_json::json!(p.is_enabled));
+        changes_after.insert("is_enabled".into(), serde_json::json!(enabled));
         active.is_enabled = Set(enabled);
     }
-    if let Some(targets) = body.targets {
-        let json = serde_json::to_string(&targets).map_err(ApiErr::internal)?;
+    if let Some(ref targets) = body.targets {
+        changes_before.insert("targets".into(), serde_json::json!(p.targets));
+        changes_after.insert("targets".into(), serde_json::json!(targets));
+        let json = serde_json::to_string(targets).map_err(ApiErr::internal)?;
         active.targets = Set(json);
     }
     // Definition is type-driven: clear it for types that don't use one so that a type
     // change never leaves a stale filter_expression / mask_expression in the DB.
     match final_policy_type {
         PolicyType::RowFilter | PolicyType::ColumnMask => {
-            if let Some(definition) = body.definition {
-                let json = serde_json::to_string(&definition).map_err(ApiErr::internal)?;
+            if let Some(ref definition) = body.definition {
+                changes_after.insert("definition_changed".into(), serde_json::json!(true));
+                let json = serde_json::to_string(definition).map_err(ApiErr::internal)?;
                 active.definition = Set(Some(json));
             }
         }
@@ -538,13 +582,23 @@ pub async fn update_policy(
     }
     // Decision function FK: 3-state — absent=no change, null=detach, uuid=attach
     if let Some(df_id_val) = body.decision_function_id {
+        changes_before.insert(
+            "decision_function_id".into(),
+            serde_json::json!(p.decision_function_id.map(|id| id.to_string())),
+        );
+        changes_after.insert(
+            "decision_function_id".into(),
+            serde_json::json!(df_id_val.map(|id| id.to_string())),
+        );
         active.decision_function_id = Set(df_id_val);
     }
+    changes_before.insert("version".into(), serde_json::json!(p.version));
+    changes_after.insert("version".into(), serde_json::json!(new_version));
     active.version = Set(new_version);
     active.updated_by = Set(claims.sub);
     active.updated_at = Set(now);
 
-    let updated = active.update(&txn).await.map_err(|e| {
+    let updated = active.update(&*txn).await.map_err(|e| {
         let msg = e.to_string();
         if msg.contains("UNIQUE") || msg.contains("unique") {
             ApiErr::conflict("Policy name already exists")
@@ -555,12 +609,12 @@ pub async fn update_policy(
 
     let assignments = policy_assignment::Entity::find()
         .filter(policy_assignment::Column::PolicyId.eq(id))
-        .all(&txn)
+        .all(&*txn)
         .await
         .map_err(ApiErr::internal)?;
 
     create_snapshot(
-        &txn,
+        &*txn,
         id,
         new_version,
         claims.sub,
@@ -569,6 +623,14 @@ pub async fn update_policy(
         &assignments,
     )
     .await?;
+
+    txn.audit(
+        "policy",
+        id,
+        AuditAction::Update,
+        claims.sub,
+        serde_json::json!({ "before": changes_before, "after": changes_after }),
+    );
 
     txn.commit().await.map_err(ApiErr::internal)?;
 
@@ -638,10 +700,12 @@ pub async fn delete_policy(
         .await
         .map_err(ApiErr::internal)?;
 
-    let txn = state.db.begin().await.map_err(ApiErr::internal)?;
+    let mut txn = AuditedTxn::begin(&state.db)
+        .await
+        .map_err(ApiErr::internal)?;
 
     create_snapshot(
-        &txn,
+        &*txn,
         id,
         p.version + 1,
         claims.sub,
@@ -651,8 +715,25 @@ pub async fn delete_policy(
     )
     .await?;
 
+    txn.audit(
+        "policy",
+        id,
+        AuditAction::Delete,
+        claims.sub,
+        serde_json::json!({
+            "before": {
+                "name": &p.name,
+                "description": &p.description,
+                "policy_type": &p.policy_type,
+                "is_enabled": p.is_enabled,
+                "version": p.version,
+                "decision_function_id": p.decision_function_id.map(|id| id.to_string()),
+            }
+        }),
+    );
+
     let active: policy::ActiveModel = p.into();
-    active.delete(&txn).await.map_err(ApiErr::internal)?;
+    active.delete(&*txn).await.map_err(ApiErr::internal)?;
 
     txn.commit().await.map_err(ApiErr::internal)?;
 
@@ -814,7 +895,9 @@ pub async fn assign_policy(
     }
 
     let now = Utc::now().naive_utc();
-    let txn = state.db.begin().await.map_err(ApiErr::internal)?;
+    let mut txn = AuditedTxn::begin(&state.db)
+        .await
+        .map_err(ApiErr::internal)?;
 
     let assignment = policy_assignment::ActiveModel {
         id: Set(Uuid::now_v7()),
@@ -827,7 +910,7 @@ pub async fn assign_policy(
         created_at: Set(now),
         updated_at: Set(now),
     }
-    .insert(&txn)
+    .insert(&*txn)
     .await
     .map_err(|e| {
         let msg = e.to_string();
@@ -843,16 +926,16 @@ pub async fn assign_policy(
     active.version = Set(new_version);
     active.updated_by = Set(claims.sub);
     active.updated_at = Set(now);
-    let updated_p = active.update(&txn).await.map_err(ApiErr::internal)?;
+    let updated_p = active.update(&*txn).await.map_err(ApiErr::internal)?;
 
     let all_assignments = policy_assignment::Entity::find()
         .filter(policy_assignment::Column::PolicyId.eq(p.id))
-        .all(&txn)
+        .all(&*txn)
         .await
         .map_err(ApiErr::internal)?;
 
     create_snapshot(
-        &txn,
+        &*txn,
         p.id,
         new_version,
         claims.sub,
@@ -861,6 +944,21 @@ pub async fn assign_policy(
         &all_assignments,
     )
     .await?;
+
+    txn.audit(
+        "policy",
+        p.id,
+        AuditAction::Assign,
+        claims.sub,
+        serde_json::json!({
+            "assignment_id": assignment.id.to_string(),
+            "datasource_id": ds_id.to_string(),
+            "scope": &scope,
+            "user_id": body.user_id.map(|id| id.to_string()),
+            "role_id": body.role_id.map(|id| id.to_string()),
+            "priority": body.priority,
+        }),
+    );
 
     txn.commit().await.map_err(ApiErr::internal)?;
 
@@ -932,27 +1030,39 @@ pub async fn remove_assignment(
         .map_err(ApiErr::internal)?
         .ok_or_else(|| ApiErr::not_found("Policy not found"))?;
 
+    // Capture assignment fields before .into() consumes it
+    let removed_id = assignment.id;
+    let removed_scope = assignment.assignment_scope.clone();
+    let removed_user_id = assignment.user_id;
+    let removed_role_id = assignment.role_id;
+    let removed_ds_id = assignment.data_source_id;
+
     let now = Utc::now().naive_utc();
-    let txn = state.db.begin().await.map_err(ApiErr::internal)?;
+    let mut txn = AuditedTxn::begin(&state.db)
+        .await
+        .map_err(ApiErr::internal)?;
 
     let active: policy_assignment::ActiveModel = assignment.into();
-    active.delete(&txn).await.map_err(ApiErr::internal)?;
+    active.delete(&*txn).await.map_err(ApiErr::internal)?;
 
     let new_version = p.version + 1;
     let mut policy_active: policy::ActiveModel = p.clone().into();
     policy_active.version = Set(new_version);
     policy_active.updated_by = Set(claims.sub);
     policy_active.updated_at = Set(now);
-    let updated_p = policy_active.update(&txn).await.map_err(ApiErr::internal)?;
+    let updated_p = policy_active
+        .update(&*txn)
+        .await
+        .map_err(ApiErr::internal)?;
 
     let remaining_assignments = policy_assignment::Entity::find()
         .filter(policy_assignment::Column::PolicyId.eq(p.id))
-        .all(&txn)
+        .all(&*txn)
         .await
         .map_err(ApiErr::internal)?;
 
     create_snapshot(
-        &txn,
+        &*txn,
         p.id,
         new_version,
         claims.sub,
@@ -961,6 +1071,20 @@ pub async fn remove_assignment(
         &remaining_assignments,
     )
     .await?;
+
+    txn.audit(
+        "policy",
+        p.id,
+        AuditAction::Unassign,
+        claims.sub,
+        serde_json::json!({
+            "assignment_id": removed_id.to_string(),
+            "datasource_id": removed_ds_id.to_string(),
+            "scope": &removed_scope,
+            "user_id": removed_user_id.map(|id| id.to_string()),
+            "role_id": removed_role_id.map(|id| id.to_string()),
+        }),
+    );
 
     txn.commit().await.map_err(ApiErr::internal)?;
 
@@ -1710,5 +1834,234 @@ mod tests {
             "After type change to column_deny, definition must be SQL NULL, got: {:?}",
             p.definition
         );
+    }
+
+    // ===== Audit logging tests =====
+
+    use crate::entity::admin_audit_log;
+
+    async fn get_audit_entries(
+        db: &DatabaseConnection,
+        resource_type: &str,
+    ) -> Vec<admin_audit_log::Model> {
+        use sea_orm::{EntityTrait, QueryFilter};
+        admin_audit_log::Entity::find()
+            .filter(admin_audit_log::Column::ResourceType.eq(resource_type))
+            .all(db)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn audit_create_policy() {
+        let db = setup_db().await;
+        let admin_id = Uuid::now_v7();
+        insert_user(&db, admin_id, "admin").await;
+        let token = admin_token(admin_id);
+
+        let res = make_router(make_state(db.clone()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(row_filter_payload("audit-create")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let policy_id: Uuid = body_json(res).await["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let entries = get_audit_entries(&db, "policy").await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].resource_id, policy_id);
+        assert_eq!(entries[0].action, "create");
+        assert_eq!(entries[0].actor_id, admin_id);
+
+        let changes: serde_json::Value =
+            serde_json::from_str(entries[0].changes.as_deref().unwrap()).unwrap();
+        assert_eq!(changes["after"]["name"], "audit-create");
+        assert_eq!(changes["after"]["policy_type"], "row_filter");
+        assert_eq!(changes["after"]["is_enabled"], true);
+    }
+
+    #[tokio::test]
+    async fn audit_update_policy() {
+        let db = setup_db().await;
+        let admin_id = Uuid::now_v7();
+        insert_user(&db, admin_id, "admin").await;
+        let token = admin_token(admin_id);
+
+        let create_res = make_router(make_state(db.clone()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(row_filter_payload("audit-update")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let id = body_json(create_res).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let _update_res = make_router(make_state(db.clone()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/policies/{id}"))
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "name": "renamed",
+                        "is_enabled": false,
+                        "version": 1
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let entries = get_audit_entries(&db, "policy").await;
+        let update_entry = entries.iter().find(|e| e.action == "update").unwrap();
+        let changes: serde_json::Value =
+            serde_json::from_str(update_entry.changes.as_deref().unwrap()).unwrap();
+        assert_eq!(changes["before"]["name"], "audit-update");
+        assert_eq!(changes["after"]["name"], "renamed");
+        assert_eq!(changes["before"]["is_enabled"], true);
+        assert_eq!(changes["after"]["is_enabled"], false);
+        // version always tracked
+        assert_eq!(changes["before"]["version"], 1);
+        assert_eq!(changes["after"]["version"], 2);
+    }
+
+    #[tokio::test]
+    async fn audit_delete_policy() {
+        let db = setup_db().await;
+        let admin_id = Uuid::now_v7();
+        insert_user(&db, admin_id, "admin").await;
+        let token = admin_token(admin_id);
+
+        let create_res = make_router(make_state(db.clone()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(row_filter_payload("audit-delete")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let id = body_json(create_res).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let _del_res = make_router(make_state(db.clone()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/policies/{id}"))
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let entries = get_audit_entries(&db, "policy").await;
+        let del_entry = entries.iter().find(|e| e.action == "delete").unwrap();
+        let changes: serde_json::Value =
+            serde_json::from_str(del_entry.changes.as_deref().unwrap()).unwrap();
+        assert_eq!(changes["before"]["name"], "audit-delete");
+        assert_eq!(changes["before"]["policy_type"], "row_filter");
+    }
+
+    #[tokio::test]
+    async fn audit_assign_and_unassign_policy() {
+        let db = setup_db().await;
+        let admin_id = Uuid::now_v7();
+        let ds_id = Uuid::now_v7();
+        insert_user(&db, admin_id, "admin").await;
+        insert_datasource(&db, ds_id, "audit-ds").await;
+        let token = admin_token(admin_id);
+
+        let create_res = make_router(make_state(db.clone()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/policies")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(row_filter_payload("audit-assign")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let policy_id = body_json(create_res).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let assign_res = make_router(make_state(db.clone()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/datasources/{ds_id}/policies"))
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(json_body(serde_json::json!({
+                        "policy_id": policy_id,
+                        "priority": 10
+                    })))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let assignment_id = body_json(assign_res).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Verify assign audit
+        let entries = get_audit_entries(&db, "policy").await;
+        let assign_entry = entries.iter().find(|e| e.action == "assign").unwrap();
+        let changes: serde_json::Value =
+            serde_json::from_str(assign_entry.changes.as_deref().unwrap()).unwrap();
+        assert_eq!(changes["datasource_id"], ds_id.to_string());
+        assert_eq!(changes["scope"], "all");
+        assert_eq!(changes["priority"], 10);
+
+        // Remove assignment
+        make_router(make_state(db.clone()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/datasources/{ds_id}/policies/{assignment_id}"))
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let entries = get_audit_entries(&db, "policy").await;
+        let unassign_entry = entries.iter().find(|e| e.action == "unassign").unwrap();
+        let changes: serde_json::Value =
+            serde_json::from_str(unassign_entry.changes.as_deref().unwrap()).unwrap();
+        assert_eq!(changes["datasource_id"], ds_id.to_string());
+        assert_eq!(changes["scope"], "all");
     }
 }

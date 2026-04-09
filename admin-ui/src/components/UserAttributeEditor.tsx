@@ -169,6 +169,9 @@ function AddAttributeDropdown({
             {definitions.map((d) => (
               <option key={d.id} value={d.key}>
                 {d.display_name} ({d.value_type})
+                {d.default_value != null
+                  ? ` — default: ${d.default_value}`
+                  : ' — no default (null)'}
               </option>
             ))}
           </select>
@@ -228,11 +231,14 @@ function AttributeField({
   const hasEnum = definition.allowed_values && definition.allowed_values.length > 0
 
   return (
-    <div className="flex items-center gap-3">
-      <label className="block text-sm font-medium text-gray-700 w-40 truncate" title={definition.key}>
+    <div className="flex items-start gap-3">
+      <label className="block text-sm font-medium text-gray-700 w-40 truncate pt-2" title={definition.key}>
         {definition.display_name}
+        <span className="block text-xs font-normal text-gray-400 font-mono mt-0.5">
+          {'{'}user.{definition.key}{'}'}
+        </span>
         {definition.description && (
-          <span className="block text-xs font-normal text-gray-400 truncate" title={definition.description}>
+          <span className="block text-xs font-normal text-gray-400 truncate mt-0.5" title={definition.description}>
             {definition.description}
           </span>
         )}
@@ -269,14 +275,10 @@ function AttributeField({
         />
       )}
 
-      <span className="text-xs text-gray-400 font-mono w-16 text-right">
-        {'{'}user.{definition.key}{'}'}
-      </span>
-
       <button
         type="button"
         onClick={onRemove}
-        className="text-gray-400 hover:text-red-500 text-sm"
+        className="text-gray-400 hover:text-red-500 text-sm pt-2"
         title="Remove attribute"
       >
         &times;
@@ -324,8 +326,11 @@ function ListAttributeField({
     <div className="flex gap-3">
       <label className="block text-sm font-medium text-gray-700 w-40 truncate pt-2" title={definition.key}>
         {definition.display_name}
+        <span className="block text-xs font-normal text-gray-400 font-mono mt-0.5">
+          {'{'}user.{definition.key}{'}'}
+        </span>
         {definition.description && (
-          <span className="block text-xs font-normal text-gray-400 truncate" title={definition.description}>
+          <span className="block text-xs font-normal text-gray-400 truncate mt-0.5" title={definition.description}>
             {definition.description}
           </span>
         )}
@@ -382,10 +387,6 @@ function ListAttributeField({
           </div>
         )}
       </div>
-
-      <span className="text-xs text-gray-400 font-mono w-16 text-right pt-2">
-        {'{'}user.{definition.key}{'}'}
-      </span>
 
       <button
         type="button"

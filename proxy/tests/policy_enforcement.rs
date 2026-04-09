@@ -7760,3 +7760,372 @@ async fn count_star_with_join() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0], "3");
 }
+
+// ===========================================================================
+// Missing attribute default resolution
+// ===========================================================================
+
+/// Row filter: user lacks attribute, definition has default_value → uses default.
+#[tokio::test]
+async fn row_filter_missing_attr_uses_default() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "t_rf_def01";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT, tenant TEXT);
+             INSERT INTO {schema}.items VALUES (1, 'acme'), (2, 'globex'), (3, 'acme');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rfdef01", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    // Create attribute definition WITH default_value
+    server
+        .create_attribute_definition_with_default("tenant", "user", "string", None, Some("acme"))
+        .await;
+
+    // Create user WITHOUT setting tenant attribute
+    let _user_id = server.create_user("bob", "BobPass123!", ds_id).await;
+    // Do NOT call set_user_attributes — user has no tenant
+
+    server
+        .create_row_filter(
+            "rf-tenant",
+            schema,
+            "items",
+            "tenant = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("allow-all-rfdef01", schema, "items", &["*"], ds_id, None)
+        .await;
+
+    let client = server.connect_as("bob", "BobPass123!", "ds_rfdef01").await;
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT id, tenant FROM {schema}.items ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    assert_eq!(rows.len(), 2, "Should see acme rows (from default_value)");
+    assert_eq!(rows[0][1], "acme");
+    assert_eq!(rows[1][1], "acme");
+}
+
+/// Row filter: user lacks attribute, no default_value → SQL NULL → zero rows.
+#[tokio::test]
+async fn row_filter_missing_attr_null_default() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "t_rf_def02";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT, tenant TEXT);
+             INSERT INTO {schema}.items VALUES (1, 'acme'), (2, 'globex');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rfdef02", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    // Create attribute definition WITHOUT default_value (null)
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+
+    let _user_id = server.create_user("carol", "CarolPass1!", ds_id).await;
+    // No tenant attribute set
+
+    server
+        .create_row_filter(
+            "rf-tenant2",
+            schema,
+            "items",
+            "tenant = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("allow-all-rfdef02", schema, "items", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("carol", "CarolPass1!", "ds_rfdef02")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.items"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    assert_eq!(rows.len(), 0, "NULL default → tenant = NULL → zero rows");
+}
+
+/// Row filter: user HAS attribute → uses actual value, ignores default.
+#[tokio::test]
+async fn row_filter_attr_present_ignores_default() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "t_rf_def03";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT, tenant TEXT);
+             INSERT INTO {schema}.items VALUES (1, 'acme'), (2, 'globex');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_rfdef03", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    // Default is "acme" but user explicitly has "globex"
+    server
+        .create_attribute_definition_with_default("tenant", "user", "string", None, Some("acme"))
+        .await;
+
+    let user_id = server.create_user("dave", "DavePass12!", ds_id).await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "globex"}))
+        .await;
+
+    server
+        .create_row_filter(
+            "rf-tenant3",
+            schema,
+            "items",
+            "tenant = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("allow-all-rfdef03", schema, "items", &["*"], ds_id, None)
+        .await;
+
+    let client = server.connect_as("dave", "DavePass12!", "ds_rfdef03").await;
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT id, tenant FROM {schema}.items ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    assert_eq!(
+        rows.len(),
+        1,
+        "Should see globex row (actual value, not default)"
+    );
+    assert_eq!(rows[0][1], "globex");
+}
+
+/// Column mask: user lacks attribute, default set → mask uses default.
+#[tokio::test]
+async fn column_mask_missing_attr_uses_default() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "t_cm_def01";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.users;
+             CREATE TABLE {schema}.users (id INT, name TEXT, role TEXT);
+             INSERT INTO {schema}.users VALUES (1, 'Alice', 'admin'), (2, 'Bob', 'viewer');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_cmdef01", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    // Mask expression: replace name with default role value
+    // CONCAT(LEFT(name, 1), '***_', {user.role})
+    server
+        .create_attribute_definition_with_default("role", "user", "string", None, Some("guest"))
+        .await;
+
+    let _user_id = server.create_user("eve", "EvePass123!", ds_id).await;
+    // No role attribute set — should use default "guest"
+
+    server
+        .create_column_mask(
+            "mask-name",
+            schema,
+            "users",
+            "name",
+            "CONCAT(LEFT(name, 1), '***_', {user.role})",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("allow-all-cmdef01", schema, "users", &["*"], ds_id, None)
+        .await;
+
+    let client = server.connect_as("eve", "EvePass123!", "ds_cmdef01").await;
+    let msgs = client
+        .simple_query(&format!("SELECT id, name FROM {schema}.users ORDER BY id"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0][1], "A***_guest",
+        "mask should use default role 'guest'"
+    );
+    assert_eq!(rows[1][1], "B***_guest");
+}
+
+/// Column mask: user lacks attribute, no default → mask uses NULL.
+#[tokio::test]
+async fn column_mask_missing_attr_null_default() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "t_cm_def02";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.users;
+             CREATE TABLE {schema}.users (id INT, name TEXT);
+             INSERT INTO {schema}.users VALUES (1, 'Alice'), (2, 'Bob');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_cmdef02", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    // Attribute definition with no default → NULL
+    server
+        .create_attribute_definition("label", "user", "string", None)
+        .await;
+
+    let _user_id = server.create_user("frank", "FrankPass1!", ds_id).await;
+
+    // Mask: COALESCE({user.label}, 'REDACTED')
+    // When label is NULL: COALESCE(NULL, 'REDACTED') → 'REDACTED'
+    server
+        .create_column_mask(
+            "mask-name2",
+            schema,
+            "users",
+            "name",
+            "COALESCE({user.label}, 'REDACTED')",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("allow-all-cmdef02", schema, "users", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("frank", "FrankPass1!", "ds_cmdef02")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT id, name FROM {schema}.users ORDER BY id"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0][1], "REDACTED",
+        "NULL default in COALESCE → 'REDACTED'"
+    );
+    assert_eq!(rows[1][1], "REDACTED");
+}
+
+/// Decision function: user lacks attribute, default set → fn receives the default value.
+#[tokio::test]
+async fn decision_fn_missing_attr_uses_default() {
+    let _pg = require_postgres!();
+    require_javy!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "t_df_def01";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.items;
+             CREATE TABLE {schema}.items (id INT, tenant TEXT);
+             INSERT INTO {schema}.items VALUES (1, 'acme'), (2, 'globex');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_dfdef01", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    // Attribute definition with default_value = "0" (integer)
+    server
+        .create_attribute_definition_with_default("clearance", "user", "integer", None, Some("0"))
+        .await;
+
+    // User WITHOUT clearance attribute set
+    let _user_id = server.create_user("gina", "GinaPass12!", ds_id).await;
+
+    // Decision function: fire only if clearance === 0 (the default)
+    // If the user had no attribute and no default injection, ctx.session.user.clearance
+    // would be undefined → undefined === 0 is false → filter would NOT fire → all rows visible.
+    let decision_fn_id = create_decision_fn(
+        &server,
+        "df-clearance-check",
+        "function evaluate(ctx, config) { return { fire: ctx.session.user.clearance === 0 }; }",
+        "session",
+        "deny",
+        None,
+    )
+    .await;
+
+    // Row filter with decision function: only applies when decision fn fires
+    // Filter: tenant = 'acme' (static — not using template var for simplicity)
+    create_policy_with_decision_fn(
+        &server,
+        "filter-dfdef01",
+        "row_filter",
+        vec![json!({"schemas": [schema], "tables": ["items"]})],
+        Some(json!({"filter_expression": "tenant = 'acme'"})),
+        ds_id,
+        None,
+        decision_fn_id,
+    )
+    .await;
+
+    server
+        .create_column_allow("allow-all-dfdef01", schema, "items", &["*"], ds_id, None)
+        .await;
+
+    let client = server.connect_as("gina", "GinaPass12!", "ds_dfdef01").await;
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT id, tenant FROM {schema}.items ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    // Decision fn should fire (clearance === 0 is true due to default injection)
+    // → row filter applied → only acme rows visible
+    assert_eq!(
+        rows.len(),
+        1,
+        "Decision fn should fire with default clearance=0 → filter applied → only acme"
+    );
+    assert_eq!(rows[0][1], "acme");
+}

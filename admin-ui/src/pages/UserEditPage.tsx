@@ -138,25 +138,32 @@ export function UserEditPage() {
             />
           </div>
 
-          <div className="flex gap-6">
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input
-                type="checkbox"
-                checked={isAdmin}
-                onChange={(e) => setIsAdmin(e.target.checked)}
-                className="rounded"
-              />
-              Admin
-            </label>
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input
-                type="checkbox"
-                checked={isActive}
-                onChange={(e) => setIsActive(e.target.checked)}
-                className="rounded"
-              />
-              Active
-            </label>
+          <div>
+            <div className="flex gap-6">
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={isAdmin}
+                  onChange={(e) => setIsAdmin(e.target.checked)}
+                  className="rounded"
+                />
+                Admin
+              </label>
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={isActive}
+                  onChange={(e) => setIsActive(e.target.checked)}
+                  className="rounded"
+                />
+                Active
+              </label>
+            </div>
+            <p className="text-xs text-gray-500 mt-2">
+              Admins can manage users, roles, policies, data sources, decision functions, and
+              attribute definitions, and can view audit logs. Non-admin users can sign in and
+              query data sources they have access to, but cannot access the admin UI.
+            </p>
           </div>
 
           {/* Attributes */}

@@ -78,7 +78,6 @@ export function RolesListPage() {
               <tr>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Name</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">ID</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Description</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Status</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Direct Members</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Created</th>
@@ -94,18 +93,17 @@ export function RolesListPage() {
                 >
                   <td className="px-4 py-3">
                     <div className="font-medium text-gray-900">{role.name}</div>
+                    {role.description && (
+                      <div
+                        className="text-xs text-gray-500 mt-0.5 truncate max-w-xs"
+                        title={role.description}
+                      >
+                        {role.description}
+                      </div>
+                    )}
                   </td>
                   <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                     <CopyableId id={role.id} short />
-                  </td>
-                  <td className="px-4 py-3">
-                    {role.description ? (
-                      <div className="text-xs text-gray-500 truncate max-w-xs">
-                        {role.description}
-                      </div>
-                    ) : (
-                      <span className="text-xs text-gray-300 italic">none</span>
-                    )}
                   </td>
                   <td className="px-4 py-3">
                     <span

@@ -148,7 +148,7 @@ export function Layout() {
         <div className="px-4 py-4 border-t border-gray-700 space-y-2">
           <p className="text-xs text-gray-400 truncate">@{user?.username}</p>
           {version && (
-            <p className="text-xs text-gray-500">v{version.current} ({version.commit})</p>
+            <p className="text-xs text-gray-500">v{version.current}</p>
           )}
           <div className="flex items-center gap-3">
             <button

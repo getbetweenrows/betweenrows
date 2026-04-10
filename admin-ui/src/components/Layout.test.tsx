@@ -60,6 +60,6 @@ describe('Layout', () => {
   it('displays current version in sidebar', async () => {
     mockGetVersion.mockResolvedValue(makeVersionInfo({ current: '0.13.0' }))
     renderWithProviders(<WrappedLayout />, { authenticated: true, routerEntries: ['/'] })
-    await waitFor(() => expect(screen.getByText('v0.13.0 (abc1234)')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('v0.13.0')).toBeInTheDocument())
   })
 })

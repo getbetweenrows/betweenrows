@@ -108,7 +108,6 @@ pub fn admin_router(state: AdminState) -> Router {
             get(|| async {
                 Json(serde_json::json!({
                     "version": env!("CARGO_PKG_VERSION"),
-                    "commit": env!("GIT_COMMIT_SHORT"),
                 }))
             }),
         )

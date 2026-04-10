@@ -14,20 +14,6 @@ const JAVY_VERSION: &str = "8.1.0";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    // Tracks branch switches but not new commits on the same branch during
-    // local incremental builds. This is acceptable — CI always does a clean
-    // build where build.rs runs unconditionally.
-    println!("cargo:rerun-if-changed=../.git/HEAD");
-
-    // Capture short commit hash at build time
-    let commit = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    println!("cargo:rustc-env=GIT_COMMIT_SHORT={commit}");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let javy_bin = out_dir.join("javy");

@@ -7,13 +7,22 @@ import {
   deleteAttributeDefinition,
 } from '../api/attributeDefinitions'
 import { CopyableId } from '../components/CopyableId'
-import { SUPPORTED_ENTITY_TYPES } from '../types/attributeDefinition'
+import {
+  SUPPORTED_ENTITY_TYPES,
+  type AttributeDefinition,
+} from '../types/attributeDefinition'
 
-const VALUE_TYPE_BADGE: Record<string, string> = {
-  string: 'bg-blue-100 text-blue-700',
-  integer: 'bg-purple-100 text-purple-700',
-  boolean: 'bg-amber-100 text-amber-700',
-  list: 'bg-green-100 text-green-700',
+// Renders a value_type as a type-signature string, e.g.:
+//   string
+//   string ∈ {read, write, admin}
+//   list<string>
+//   list<string> ∈ {us, eu}
+function formatValueType(def: AttributeDefinition): string {
+  const base = def.value_type === 'list' ? 'list<string>' : def.value_type
+  if (def.allowed_values && def.allowed_values.length > 0) {
+    return `${base} ∈ {${def.allowed_values.join(', ')}}`
+  }
+  return base
 }
 
 export function AttributeDefinitionsPage() {
@@ -147,12 +156,10 @@ export function AttributeDefinitionsPage() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
+                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Name</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Key</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">ID</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Entity</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Display Name</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Type</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Allowed Values</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600 text-xs">Default</th>
                 <th className="px-4 py-3 font-medium text-gray-600 text-xs text-right">Actions</th>
               </tr>
@@ -160,23 +167,27 @@ export function AttributeDefinitionsPage() {
             <tbody className="divide-y divide-gray-100">
               {items.map((def) => (
                 <tr key={def.id} className="hover:bg-gray-50 transition-colors">
-                  <td className="px-4 py-3 font-mono text-sm">{def.key}</td>
+                  <td className="px-4 py-3">
+                    <div className="font-medium text-gray-900">{def.display_name}</div>
+                    {def.description && (
+                      <div
+                        className="text-xs text-gray-500 mt-0.5 truncate max-w-xs"
+                        title={def.description}
+                      >
+                        {def.description}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    <code className="inline-block font-mono text-xs text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">
+                      {`{${def.entity_type}.${def.key}}`}
+                    </code>
+                  </td>
                   <td className="px-4 py-3">
                     <CopyableId id={def.id} short />
                   </td>
-                  <td className="px-4 py-3 text-gray-500">{def.entity_type}</td>
-                  <td className="px-4 py-3">{def.display_name}</td>
-                  <td className="px-4 py-3">
-                    <span
-                      className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${VALUE_TYPE_BADGE[def.value_type] ?? 'bg-gray-100 text-gray-700'}`}
-                    >
-                      {def.value_type}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-gray-500">
-                    {def.allowed_values
-                      ? def.allowed_values.join(', ')
-                      : <span className="text-gray-300">any</span>}
+                  <td className="px-4 py-3 font-mono text-xs text-gray-600">
+                    {formatValueType(def)}
                   </td>
                   <td className="px-4 py-3 text-gray-500">
                     {def.default_value != null

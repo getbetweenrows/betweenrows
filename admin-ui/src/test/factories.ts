@@ -187,7 +187,6 @@ export function makePolicy(overrides: Partial<PolicyResponse> = {}): PolicyRespo
 export function makeVersionInfo(overrides: Partial<VersionInfo> = {}): VersionInfo {
   return {
     current: '0.13.0',
-    commit: 'abc1234',
     ...overrides,
   }
 }

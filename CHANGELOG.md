@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-04-09
+
+### Changed
+
+- **[Both] Remove git commit hash from version display** — simplifies the build and `/health` endpoint
+  - drops `GIT_COMMIT_SHORT` env var and git-based `build.rs` logic from the proxy
+  - sidebar now shows `vX.Y.Z` instead of `vX.Y.Z (abc1234)`
+- **[Admin UI] Polish admin UI tables and forms**
+  - attribute definitions table: combine display name + description into a single column, show `entity.key` as a monospaced code chip, and render value type as a type signature (e.g. `list<string> ∈ {us, eu}`)
+  - roles list: fold description under role name, drop the standalone description column
+  - user form: add a permissions description explaining what admin access grants
+- **[Admin UI] Rename audit nav and standardize route paths**
+  - sidebar section renamed from "Activity" to "Audit"
+  - nav labels changed to "Query Logs" / "Admin Logs"
+  - `/audit` route renamed to `/query-audit` for consistency with `/admin-audit`
+
 ## [0.14.0] - 2026-04-08
 
 ### Added

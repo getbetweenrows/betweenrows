@@ -8129,3 +8129,1243 @@ async fn decision_fn_missing_attr_uses_default() {
     );
     assert_eq!(rows[0][1], "acme");
 }
+
+// ===========================================================================
+// Vector #71: unqualified table references must not bypass policies
+//
+// Regression guard: a user who issues `SELECT * FROM orders` (no schema
+// prefix) must see the same policy enforcement as a user who issues
+// `SELECT * FROM <schema>.orders`. DataFusion's parsed `TableScan.table_name`
+// carries an empty schema segment for bare references, so policy resolution
+// must read the schema from the resolved `SqlTable` source instead of the
+// parsed name. These tests connect through real pgwire and hit a real
+// upstream Postgres, so they exercise the production `SqlTable` downcast in
+// `scan_policy_key` — not the unit-test fallback path.
+// ===========================================================================
+
+#[tokio::test]
+async fn bare_reference_row_filter_still_applies() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "bareref_rf";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT, amount INT);
+             INSERT INTO {schema}.orders VALUES
+               (1, 'acme', 100),
+               (2, 'globex', 200),
+               (3, 'acme', 300);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_bareref_rf", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server.create_user("brenda", "BrendaPass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
+        .await;
+
+    server
+        .create_row_filter(
+            "bareref-rf",
+            schema,
+            "orders",
+            "tenant = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow(
+            "allow-all-bareref-rf",
+            schema,
+            "orders",
+            &["*"],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("brenda", "BrendaPass1!", "ds_bareref_rf")
+        .await;
+
+    // NOTE: no schema prefix. This is the bare reference that previously
+    // bypassed policy matching.
+    let msgs = client
+        .simple_query("SELECT id, tenant FROM orders ORDER BY id")
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    assert_eq!(
+        rows.len(),
+        2,
+        "bare `FROM orders` must still apply tenant filter — got {rows:?}"
+    );
+    assert_eq!(rows[0][1], "acme");
+    assert_eq!(rows[1][1], "acme");
+    assert_eq!(rows[0][0], "1");
+    assert_eq!(rows[1][0], "3");
+}
+
+#[tokio::test]
+async fn bare_reference_column_mask_still_applies() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "bareref_cm";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.customers;
+             CREATE TABLE {schema}.customers (id INT, name TEXT, ssn TEXT);
+             INSERT INTO {schema}.customers VALUES
+               (1, 'Alice', '111-22-3333'),
+               (2, 'Bob',   '444-55-6666');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_bareref_cm", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    server.create_user("carla", "CarlaPass1!", ds_id).await;
+
+    server
+        .create_column_mask(
+            "bareref-mask",
+            schema,
+            "customers",
+            "ssn",
+            "'***-**-' || RIGHT(ssn, 4)",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow(
+            "allow-all-bareref-cm",
+            schema,
+            "customers",
+            &["*"],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("carla", "CarlaPass1!", "ds_bareref_cm")
+        .await;
+
+    // Bare reference — no schema prefix.
+    let msgs = client
+        .simple_query("SELECT id, name, ssn FROM customers ORDER BY id")
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    assert_eq!(rows.len(), 2);
+    // Mask must apply: real SSN values are never returned.
+    assert!(
+        rows.iter().all(|r| !r[2].contains("111-22-3333")),
+        "raw SSN leaked through bare reference: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|r| !r[2].contains("444-55-6666")),
+        "raw SSN leaked through bare reference: {rows:?}"
+    );
+    assert_eq!(rows[0][2], "***-**-3333");
+    assert_eq!(rows[1][2], "***-**-6666");
+}
+
+#[tokio::test]
+async fn bare_reference_column_deny_still_applies() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "bareref_cd";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.events;
+             CREATE TABLE {schema}.events (id INT, kind TEXT, ssn TEXT);
+             INSERT INTO {schema}.events VALUES
+               (1, 'login',  '111-22-3333'),
+               (2, 'logout', '444-55-6666');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_bareref_cd", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    server.create_user("dave", "DavePass12!", ds_id).await;
+
+    server
+        .create_column_allow(
+            "allow-all-bareref-cd",
+            schema,
+            "events",
+            &["*"],
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_deny("bareref-deny-ssn", schema, "events", &["ssn"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("dave", "DavePass12!", "ds_bareref_cd")
+        .await;
+
+    // Bare reference. Explicit `ssn` in the projection must be rejected
+    // because the column is denied for this user.
+    let err = client
+        .simple_query("SELECT id, kind, ssn FROM events")
+        .await;
+    assert!(
+        err.is_err(),
+        "denied column must fail even with bare reference — got {err:?}"
+    );
+
+    // `SELECT *` through the bare reference must still hide the denied
+    // column, returning id and kind only.
+    let msgs = client
+        .simple_query("SELECT * FROM events ORDER BY id")
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0].len(),
+        2,
+        "ssn column must be stripped via bare reference: {rows:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Vector #71 (expanded): bare reference bypass applies to ALL five policy
+// types via the shared `user_tables` pipeline in `PolicyEffects::collect`.
+// The four tests below cover the remaining corners the initial fix missed:
+//   - table_deny with evaluate_context="query" decision fn (the only case
+//     where table_deny enforcement depends on the patched codepath, since
+//     visibility-layer is skipped for query-context DFs per vector #58)
+//   - column_allow in policy_required mode (symmetric fail-closed variant)
+//   - CTE-wrapped bare reference (guards vector #4 + #71 combined)
+//   - 3-part reference using the datasource name as catalog label (new
+//     capability unlocked by the catalog-label rename)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bare_reference_table_deny_query_ctx_still_applies() {
+    let _pg = require_postgres!();
+    require_javy!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "bareref_td";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.secrets;
+             CREATE TABLE {schema}.secrets (id INT, data TEXT);
+             INSERT INTO {schema}.secrets VALUES (1, 'top-secret');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_bareref_td", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    server.create_user("emma", "EmmaPass12!", ds_id).await;
+
+    // Decision fn with evaluate_context="query", always returns fire:true.
+    // With "query" context the visibility layer skips evaluation per vector
+    // #58 — the table stays visible at connect time, and enforcement relies
+    // entirely on query-time matching in PolicyEffects::collect. This is the
+    // only table_deny code path that depends on the bare-reference fix.
+    let df_id = create_decision_fn(
+        &server,
+        "bareref-td-always-fire",
+        r#"function evaluate(ctx, config) { return { fire: true }; }"#,
+        "query",
+        "deny",
+        None,
+    )
+    .await;
+
+    create_policy_with_decision_fn(
+        &server,
+        "bareref-td-deny",
+        "table_deny",
+        vec![json!({"schemas": [schema], "tables": ["secrets"]})],
+        None,
+        ds_id,
+        None,
+        df_id,
+    )
+    .await;
+
+    let client = server
+        .connect_as("emma", "EmmaPass12!", "ds_bareref_td")
+        .await;
+
+    // Bare reference. Before the fix, PolicyEffects::collect's table_deny
+    // loop saw user_tables = [("", "secrets")] and matches_table failed the
+    // empty-vs-{schema} comparison, silently skipping the policy and
+    // returning rows.
+    let result = client.simple_query("SELECT * FROM secrets").await;
+    assert!(
+        result.is_err(),
+        "bare `FROM secrets` must still trigger table_deny via query-ctx decision fn — got {result:?}"
+    );
+
+    // Qualified reference must also fail, as a sanity check that the policy
+    // is actually active (not just breaking on unrelated grounds).
+    let result = client
+        .simple_query(&format!("SELECT * FROM {schema}.secrets"))
+        .await;
+    assert!(
+        result.is_err(),
+        "qualified `FROM {schema}.secrets` must also trigger table_deny — got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn bare_reference_column_allow_policy_required_still_applies() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "bareref_ca";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, amount INT);
+             INSERT INTO {schema}.orders VALUES (1, 100), (2, 200);"
+        ))
+        .await;
+
+    // policy_required: tables are invisible unless a column_allow policy
+    // explicitly grants access. This is the symmetric variant of #71 — if
+    // bare-reference matching fails, the column_allow doesn't fire, the
+    // table falls through to `Filter(lit(false))`, and the user sees zero
+    // rows for a legitimate query.
+    let ds_id = server
+        .create_datasource("ds_bareref_ca", "policy_required")
+        .await;
+    server.discover(ds_id, &[schema]).await;
+    server.create_user("frank", "FrankPass1!", ds_id).await;
+
+    server
+        .create_column_allow("bareref-ca-allow", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("frank", "FrankPass1!", "ds_bareref_ca")
+        .await;
+
+    let msgs = client
+        .simple_query("SELECT id, amount FROM orders ORDER BY id")
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(
+        rows.len(),
+        2,
+        "bare `FROM orders` in policy_required must see rows when column_allow is in place — got {rows:?}"
+    );
+    assert_eq!(rows[0][0], "1");
+    assert_eq!(rows[1][0], "2");
+}
+
+#[tokio::test]
+async fn bare_reference_cte_wrapping_still_applies() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "bareref_cte";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT, amount INT);
+             INSERT INTO {schema}.orders VALUES
+               (1, 'acme', 100),
+               (2, 'globex', 200),
+               (3, 'acme', 300);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_bareref_cte", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let user_id = server.create_user("greta", "GretaPass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
+        .await;
+
+    server
+        .create_row_filter(
+            "bareref-cte-rf",
+            schema,
+            "orders",
+            "tenant = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow(
+            "allow-all-bareref-cte",
+            schema,
+            "orders",
+            &["*"],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("greta", "GretaPass1!", "ds_bareref_cte")
+        .await;
+
+    // CTE wraps a bare reference. The inner `TableScan` for `orders` still
+    // has `scan.table_name` as a bare ref; the row filter must still inject
+    // against it via `transform_up`.
+    let msgs = client
+        .simple_query("WITH data AS (SELECT * FROM orders) SELECT id, tenant FROM data ORDER BY id")
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    assert_eq!(
+        rows.len(),
+        2,
+        "CTE-wrapped bare `FROM orders` must still apply tenant filter — got {rows:?}"
+    );
+    assert_eq!(rows[0][1], "acme");
+    assert_eq!(rows[1][1], "acme");
+}
+
+#[tokio::test]
+async fn three_part_reference_with_datasource_catalog() {
+    // New capability unlocked by the catalog-label rename: users can write
+    // `SELECT * FROM <datasource>.<schema>.<table>` and DataFusion resolves
+    // it correctly because the catalog is now registered under the BR
+    // datasource name (not the hardcoded "postgres" literal). Same policy
+    // enforcement applies to 1-, 2-, and 3-part references.
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "threepart";
+    let ds_name = "ds_threepart";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT, tenant TEXT);
+             INSERT INTO {schema}.orders VALUES
+               (1, 'acme'),
+               (2, 'globex');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource(ds_name, "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let user_id = server.create_user("harry", "HarryPass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
+        .await;
+
+    server
+        .create_row_filter(
+            "threepart-rf",
+            schema,
+            "orders",
+            "tenant = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("allow-all-threepart", schema, "orders", &["*"], ds_id, None)
+        .await;
+
+    let client = server.connect_as("harry", "HarryPass1!", ds_name).await;
+
+    // 3-part reference: datasource_name.schema.table. This used to fail
+    // because the hardcoded "postgres" catalog label didn't match the
+    // datasource name, so DataFusion reported the table as not found.
+    let sql = format!("SELECT id, tenant FROM {ds_name}.{schema}.orders ORDER BY id");
+    let msgs = client.simple_query(&sql).await.unwrap_or_else(|e| {
+        panic!("3-part reference `{sql}` must resolve and be policy-enforced, got {e:?}")
+    });
+    let rows = extract_rows(&msgs);
+
+    assert_eq!(
+        rows.len(),
+        1,
+        "3-part reference must apply tenant filter — got {rows:?}"
+    );
+    assert_eq!(rows[0][1], "acme");
+    assert_eq!(rows[0][0], "1");
+}
+
+// ===========================================================================
+// Aggregate / HAVING / window / string_agg verification
+// (security vectors #60, #62, #63, #65)
+//
+// These tests verify claims documented in docs/security-vectors.md:
+// column_mask is enforced at the TableScan level via a Projection wrapper,
+// so every downstream operator (aggregates, HAVING, window functions,
+// string_agg) operates on masked values rather than raw values. For
+// column_deny, references to denied columns in any of these contexts must
+// fail at plan time, not silently leak raw data.
+// ===========================================================================
+
+// ---- Vector #60: aggregate inference on masked/denied columns ----
+
+#[tokio::test]
+async fn aggregate_count_distinct_on_masked_column() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "emp_agg60";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.employees;
+             CREATE TABLE {schema}.employees (id INT, dept TEXT, ssn TEXT);
+             INSERT INTO {schema}.employees VALUES
+                 (1, 'eng', '111-11-1111'),
+                 (2, 'eng', '222-22-2222'),
+                 (3, 'eng', '333-33-3333'),
+                 (4, 'sales', '444-44-4444'),
+                 (5, 'sales', '555-55-5555');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_agg60", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server.create_user("agg60_user", "AggPass1!", ds_id).await;
+    server
+        .create_column_mask(
+            "mask-ssn-agg60",
+            schema,
+            "employees",
+            "ssn",
+            "'***'",
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("agg60_user", "AggPass1!", "ds_agg60")
+        .await;
+
+    // Every masked SSN is the literal '***' so COUNT(DISTINCT ssn) must be 1,
+    // not 5. A value of 5 would mean the aggregate saw raw distinct SSNs.
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT COUNT(DISTINCT ssn) FROM {schema}.employees"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0][0], "1",
+        "COUNT(DISTINCT masked_col) must collapse to masked cardinality — vector #60"
+    );
+}
+
+#[tokio::test]
+async fn aggregate_min_max_on_masked_column() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "emp_agg60b";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.employees;
+             CREATE TABLE {schema}.employees (id INT, salary INT);
+             INSERT INTO {schema}.employees VALUES (1, 50000), (2, 100000), (3, 200000);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_agg60b", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server.create_user("agg60b_user", "AggPass1!", ds_id).await;
+    server
+        .create_column_mask(
+            "mask-salary-agg60b",
+            schema,
+            "employees",
+            "salary",
+            "0",
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("agg60b_user", "AggPass1!", "ds_agg60b")
+        .await;
+
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT MIN(salary), MAX(salary) FROM {schema}.employees"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0][0], "0",
+        "MIN(masked_col) must reflect mask, not raw salary — vector #60"
+    );
+    assert_eq!(
+        rows[0][1], "0",
+        "MAX(masked_col) must reflect mask, not raw salary — vector #60"
+    );
+}
+
+#[tokio::test]
+async fn aggregate_count_distinct_on_denied_column() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "emp_agg60c";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.employees;
+             CREATE TABLE {schema}.employees (id INT, ssn TEXT);
+             INSERT INTO {schema}.employees VALUES (1, '111-11-1111'), (2, '222-22-2222');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_agg60c", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server.create_user("agg60c_user", "AggPass1!", ds_id).await;
+    server
+        .create_column_deny(
+            "deny-ssn-agg60c",
+            schema,
+            "employees",
+            &["ssn"],
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("allow-all-agg60c", schema, "employees", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("agg60c_user", "AggPass1!", "ds_agg60c")
+        .await;
+
+    let result = client
+        .simple_query(&format!(
+            "SELECT COUNT(DISTINCT ssn) FROM {schema}.employees"
+        ))
+        .await;
+    assert!(
+        result.is_err(),
+        "COUNT(DISTINCT denied_col) must error — vector #60"
+    );
+}
+
+#[tokio::test]
+async fn aggregate_min_max_on_denied_column() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "emp_agg60d";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.employees;
+             CREATE TABLE {schema}.employees (id INT, salary INT);
+             INSERT INTO {schema}.employees VALUES (1, 50000), (2, 100000);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_agg60d", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server.create_user("agg60d_user", "AggPass1!", ds_id).await;
+    server
+        .create_column_deny(
+            "deny-salary-agg60d",
+            schema,
+            "employees",
+            &["salary"],
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("allow-all-agg60d", schema, "employees", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("agg60d_user", "AggPass1!", "ds_agg60d")
+        .await;
+
+    let result = client
+        .simple_query(&format!(
+            "SELECT MIN(salary), MAX(salary) FROM {schema}.employees"
+        ))
+        .await;
+    assert!(
+        result.is_err(),
+        "MIN/MAX(denied_col) must error — vector #60"
+    );
+}
+
+// ---- Vector #62: HAVING clause raw masked column values ----
+
+#[tokio::test]
+async fn having_clause_on_masked_column_constant_mask() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "emp_hav62";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.employees;
+             CREATE TABLE {schema}.employees (id INT, dept TEXT, salary INT);
+             INSERT INTO {schema}.employees VALUES
+                 (1, 'eng',   50000),
+                 (2, 'eng',  150000),
+                 (3, 'sales', 90000),
+                 (4, 'sales', 250000);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_hav62", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server.create_user("hav62_user", "HavPass1!", ds_id).await;
+    server
+        .create_column_mask(
+            "mask-salary-hav62",
+            schema,
+            "employees",
+            "salary",
+            "0",
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("hav62_user", "HavPass1!", "ds_hav62")
+        .await;
+
+    // Masked MAX(salary) is 0 in every group, so HAVING > 100000 must be false
+    // for all groups. Any result row would indicate HAVING is evaluating raw values.
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT dept FROM {schema}.employees GROUP BY dept HAVING MAX(salary) > 100000"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(
+        rows.len(),
+        0,
+        "HAVING on masked column must see masked values (0), not raw — vector #62. Got {rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn having_clause_on_masked_column_derived_mask() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "emp_hav62b";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.employees;
+             CREATE TABLE {schema}.employees (id INT, dept TEXT, salary INT);
+             INSERT INTO {schema}.employees VALUES
+                 (1, 'eng',   12345),
+                 (2, 'eng',   54321),
+                 (3, 'sales', 87654),
+                 (4, 'sales', 11023);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_hav62b", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server.create_user("hav62b_user", "HavPass1!", ds_id).await;
+    // Mask yields last 2 digits as INTEGER — distinct per row, always < 100,
+    // so per-group MAX is always < 100000 and HAVING > 100000 is false.
+    server
+        .create_column_mask(
+            "mask-salary-hav62b",
+            schema,
+            "employees",
+            "salary",
+            "CAST(RIGHT(CAST(salary AS VARCHAR), 2) AS INTEGER)",
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("hav62b_user", "HavPass1!", "ds_hav62b")
+        .await;
+
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT dept FROM {schema}.employees GROUP BY dept HAVING MAX(salary) > 100000"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(
+        rows.len(),
+        0,
+        "HAVING on derived-masked column must see masked values, not raw — vector #62. Got {rows:?}"
+    );
+
+    // Secondary assertion: SELECT dept, MAX(salary) returns masked (< 100) values,
+    // not raw. Expected masks: eng MAX(45, 21) = 45; sales MAX(54, 23) = 54.
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT dept, MAX(salary) FROM {schema}.employees GROUP BY dept ORDER BY dept"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0][0], "eng");
+    assert_eq!(
+        rows[0][1], "45",
+        "eng MAX must be masked (45), not raw (54321)"
+    );
+    assert_eq!(rows[1][0], "sales");
+    assert_eq!(
+        rows[1][1], "54",
+        "sales MAX must be masked (54), not raw (87654)"
+    );
+}
+
+#[tokio::test]
+async fn having_clause_on_denied_column() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "emp_hav62c";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.employees;
+             CREATE TABLE {schema}.employees (id INT, dept TEXT, salary INT);
+             INSERT INTO {schema}.employees VALUES (1, 'eng', 50000), (2, 'sales', 150000);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_hav62c", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server.create_user("hav62c_user", "HavPass1!", ds_id).await;
+    server
+        .create_column_deny(
+            "deny-salary-hav62c",
+            schema,
+            "employees",
+            &["salary"],
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("allow-all-hav62c", schema, "employees", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("hav62c_user", "HavPass1!", "ds_hav62c")
+        .await;
+
+    let result = client
+        .simple_query(&format!(
+            "SELECT dept FROM {schema}.employees GROUP BY dept HAVING MAX(salary) > 100000"
+        ))
+        .await;
+    assert!(
+        result.is_err(),
+        "HAVING on denied column must error — vector #62"
+    );
+}
+
+// ---- Vector #63: string_agg bulk collection ----
+
+#[tokio::test]
+async fn string_agg_on_masked_column() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "cust63";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.customers;
+             CREATE TABLE {schema}.customers (id INT, ssn TEXT);
+             INSERT INTO {schema}.customers VALUES
+                 (1, '111-11-1111'),
+                 (2, '222-22-2222'),
+                 (3, '333-33-3333');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_sagg63", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server.create_user("sagg63_user", "SaggPass1!", ds_id).await;
+    server
+        .create_column_mask(
+            "mask-ssn-sagg63",
+            schema,
+            "customers",
+            "ssn",
+            "'***'",
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("sagg63_user", "SaggPass1!", "ds_sagg63")
+        .await;
+
+    // Primary assertion: string_agg result is all masked values.
+    // Every ssn maps to '***', so the aggregated string must be exactly three
+    // '***' tokens separated by commas — regardless of row order.
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT string_agg(ssn, ',') FROM {schema}.customers"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 1);
+    let agg = &rows[0][0];
+    let parts: Vec<&str> = agg.split(',').collect();
+    assert_eq!(
+        parts.len(),
+        3,
+        "string_agg should join 3 values, got {agg:?}"
+    );
+    for p in &parts {
+        assert_eq!(
+            *p, "***",
+            "string_agg part must be masked value, got {agg:?}"
+        );
+    }
+    // Defense-in-depth: raw SSNs must never appear in the aggregated string.
+    assert!(!agg.contains("111-11"), "raw SSN leaked: {agg:?}");
+    assert!(!agg.contains("222-22"), "raw SSN leaked: {agg:?}");
+    assert!(!agg.contains("333-33"), "raw SSN leaked: {agg:?}");
+
+    // Secondary assertion: inspect rewritten_query via audit log. Whether
+    // string_agg was pushed down to upstream Postgres or computed locally by
+    // DataFusion, the outgoing SQL must not carry any raw SSN substring —
+    // the mask Projection sits above the TableScan, so upstream only ever
+    // receives '***' values.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let entry = loop {
+        let resp = server
+            .admin
+            .get("/api/v1/audit/queries")
+            .authorization_bearer(&server.admin_token)
+            .await;
+        resp.assert_status_ok();
+        let body = resp.json::<serde_json::Value>();
+        let entries = body["data"].as_array().cloned().unwrap_or_default();
+        if let Some(e) = entries.iter().find(|e| {
+            e["username"].as_str() == Some("sagg63_user")
+                && e["original_query"]
+                    .as_str()
+                    .map(|q| q.contains("string_agg"))
+                    .unwrap_or(false)
+        }) {
+            break e.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "audit entry for sagg63_user string_agg query did not appear within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    let rewritten = entry["rewritten_query"].as_str().unwrap_or("");
+    assert!(
+        !rewritten.contains("111-11-1111"),
+        "rewritten_query leaks raw SSN — vector #63 pushdown check. Got: {rewritten}"
+    );
+    assert!(
+        !rewritten.contains("222-22-2222"),
+        "rewritten_query leaks raw SSN — vector #63 pushdown check. Got: {rewritten}"
+    );
+    assert!(
+        !rewritten.contains("333-33-3333"),
+        "rewritten_query leaks raw SSN — vector #63 pushdown check. Got: {rewritten}"
+    );
+}
+
+#[tokio::test]
+async fn string_agg_on_denied_column() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "cust63b";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.customers;
+             CREATE TABLE {schema}.customers (id INT, ssn TEXT);
+             INSERT INTO {schema}.customers VALUES (1, '111-11-1111'), (2, '222-22-2222');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_sagg63b", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server
+        .create_user("sagg63b_user", "SaggPass1!", ds_id)
+        .await;
+    server
+        .create_column_deny(
+            "deny-ssn-sagg63b",
+            schema,
+            "customers",
+            &["ssn"],
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow(
+            "allow-all-sagg63b",
+            schema,
+            "customers",
+            &["*"],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("sagg63b_user", "SaggPass1!", "ds_sagg63b")
+        .await;
+
+    let result = client
+        .simple_query(&format!(
+            "SELECT string_agg(ssn, ',') FROM {schema}.customers"
+        ))
+        .await;
+    assert!(
+        result.is_err(),
+        "string_agg on denied column must error — vector #63"
+    );
+}
+
+// ---- Vector #65: window function ordering on masked/denied columns ----
+
+#[tokio::test]
+async fn window_row_number_order_by_masked_column_constant_mask() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "emp_win65";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.employees;
+             CREATE TABLE {schema}.employees (id INT, salary INT);
+             INSERT INTO {schema}.employees VALUES (1, 50000), (2, 200000), (3, 100000);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_win65", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server.create_user("win65_user", "WinPass1!", ds_id).await;
+    server
+        .create_column_mask(
+            "mask-salary-win65",
+            schema,
+            "employees",
+            "salary",
+            "0",
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("win65_user", "WinPass1!", "ds_win65")
+        .await;
+
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT id, salary, ROW_NUMBER() OVER (ORDER BY salary) AS rn \
+             FROM {schema}.employees ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 3);
+
+    // All salary values must be masked to 0 — window function sees identical
+    // values, so tie-breaking order is implementation-defined but rn values
+    // must still form a valid permutation of {1, 2, 3}.
+    let mut seen_rn: Vec<String> = rows.iter().map(|r| r[2].clone()).collect();
+    seen_rn.sort();
+    assert_eq!(
+        seen_rn,
+        vec!["1".to_string(), "2".to_string(), "3".to_string()],
+        "rn values must be a permutation of {{1,2,3}}"
+    );
+    for r in &rows {
+        assert_eq!(
+            r[1], "0",
+            "salary must be masked to 0 in the window function's output — vector #65"
+        );
+    }
+}
+
+#[tokio::test]
+async fn window_row_number_order_by_masked_column_derived_mask() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "emp_win65b";
+
+    // Salaries chosen so raw-ordering and masked-ordering produce different
+    // rn assignments for every row:
+    //   id | raw      | last digit (mask)
+    //    1 | 12340    | 0
+    //    2 | 56781    | 1
+    //    3 |  9002    | 2
+    // Raw ORDER BY salary: id=3, id=1, id=2 → rn mapping (id→rn): 1→2, 2→3, 3→1
+    // Masked ORDER BY salary: id=1(0), id=2(1), id=3(2) → rn mapping: 1→1, 2→2, 3→3
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.employees;
+             CREATE TABLE {schema}.employees (id INT, salary INT);
+             INSERT INTO {schema}.employees VALUES (1, 12340), (2, 56781), (3, 9002);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_win65b", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server.create_user("win65b_user", "WinPass1!", ds_id).await;
+    server
+        .create_column_mask(
+            "mask-salary-win65b",
+            schema,
+            "employees",
+            "salary",
+            "CAST(RIGHT(CAST(salary AS VARCHAR), 1) AS INTEGER)",
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("win65b_user", "WinPass1!", "ds_win65b")
+        .await;
+
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT id, salary, ROW_NUMBER() OVER (ORDER BY salary) AS rn \
+             FROM {schema}.employees ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    assert_eq!(rows.len(), 3);
+
+    // Expected under masked ordering (correct behavior):
+    //   id=1 → salary=0, rn=1
+    //   id=2 → salary=1, rn=2
+    //   id=3 → salary=2, rn=3
+    assert_eq!(rows[0][0], "1");
+    assert_eq!(rows[0][1], "0");
+    assert_eq!(
+        rows[0][2], "1",
+        "id=1 rn must be 1 under masked ordering — vector #65"
+    );
+    assert_eq!(rows[1][0], "2");
+    assert_eq!(rows[1][1], "1");
+    assert_eq!(
+        rows[1][2], "2",
+        "id=2 rn must be 2 under masked ordering — vector #65"
+    );
+    assert_eq!(rows[2][0], "3");
+    assert_eq!(rows[2][1], "2");
+    assert_eq!(
+        rows[2][2], "3",
+        "id=3 rn must be 3 under masked ordering — vector #65"
+    );
+}
+
+#[tokio::test]
+async fn window_row_number_order_by_denied_column() {
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "emp_win65c";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.employees;
+             CREATE TABLE {schema}.employees (id INT, salary INT);
+             INSERT INTO {schema}.employees VALUES (1, 50000), (2, 100000);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_win65c", "open").await;
+    server.discover(ds_id, &[schema]).await;
+    let _user_id = server.create_user("win65c_user", "WinPass1!", ds_id).await;
+    server
+        .create_column_deny(
+            "deny-salary-win65c",
+            schema,
+            "employees",
+            &["salary"],
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("allow-all-win65c", schema, "employees", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("win65c_user", "WinPass1!", "ds_win65c")
+        .await;
+
+    let result = client
+        .simple_query(&format!(
+            "SELECT id, ROW_NUMBER() OVER (ORDER BY salary) FROM {schema}.employees"
+        ))
+        .await;
+    assert!(
+        result.is_err(),
+        "ROW_NUMBER OVER (ORDER BY denied_col) must error — vector #65"
+    );
+}

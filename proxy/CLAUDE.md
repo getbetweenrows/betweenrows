@@ -218,7 +218,7 @@ Run with `cargo test --test policy_enforcement` or `cargo test --test protocol`.
 
 ### Documentation requirements (non-optional)
 After completing any feature or adding tests, always update:
-- **`docs/security-vectors.md`** — add a new vector entry for any new attack surface or bypass that was tested (Vector → Bug/Defense → Test format).
+- **`docs/security-vectors.md`** — add a new vector entry for any new attack surface or bypass that was tested. Follow the schema defined at the top of that file: `**Vector**` → `**Attacks**` → `**Defense**` → `**Previously**` *(optional)* → `**Status**` *(optional)* → `**Tests**`. Every attack variant must back-reference a test (`— attack N`) or be explicitly marked under `**Status**`.
 - **`docs/permission-system.md`** — keep the conceptual model, policy type descriptions, and examples in sync with the current implementation.
 
 ## Bug Fix Protocol
@@ -226,7 +226,18 @@ Use TDD: write the failing test(s) first to reproduce the bug, then fix the code
 
 1. Write unit and integration tests that reproduce the bug and fail on the current code. Cover all relevant edge cases — add as many tests as needed, not just one of each.
 2. Fix the code until the test passes.
-3. Security-related bugs (policy bypass, access control, injection) MUST also be documented in `docs/security-vectors.md` following the existing Vector → Bug → Defense → Test format.
+3. Security-related bugs (policy bypass, access control, injection) MUST also be documented in `docs/security-vectors.md`. If the fix strengthens an existing vector's defense, add or extend the `**Previously**` section in past tense describing what was wrong — do not use the word "bug" in the doc. If the fix introduces a new threat class, add a new numbered vector following the schema at the top of that file.
+
+## Known cross-cutting concerns
+
+### Rename fragility (label-based identifiers)
+BetweenRows uses user-facing labels — `datasource.name`, schema aliases — as identifiers in SQL, policy targets, and decision function context (`ctx.query.tables[*].datasource` / `.schema`). This is deliberate for UX (nobody wants to hand-write UUIDs in policy targets) but makes admin renames breaking changes for:
+- SQL queries using the old name
+- Decision function JS that hardcoded the old label
+- Stored queries, dashboards, and audit log entries tagged with the old name
+- `ctx.session.datasource.name` and `ctx.query.tables[*]` matches
+
+Policy **enforcement** continues to work across renames: policies are assigned by `datasource.id` (UUID) and `matches_table` resolves schema aliases to upstream names via `df_to_upstream` at session build time. Only user-typed identifiers are affected. See `docs/permission-system.md` → "Rename fragility and label-based identifiers" for the full impact matrix and admin guidance. A future rename-warning UX is tracked via `// TODO(rename-warning)` comments in the admin-ui edit handlers.
 
 ## Known Issues
 - **regclass / regproc not supported** — `datafusion-table-providers` drops these columns. Catalog stores `arrow_type = NULL`; `build_arrow_schema` skips them.

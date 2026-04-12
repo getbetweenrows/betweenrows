@@ -71,7 +71,10 @@ function buildCtxCompletions(evaluateContext: EvaluateContext, configStr: string
 
   if (evaluateContext === 'query') {
     items.push(
-      { label: 'ctx.query.tables', type: 'variable' as const, detail: 'string[]' },
+      { label: 'ctx.query.tables', type: 'variable' as const, detail: '{datasource, schema, table}[]' },
+      { label: 'ctx.query.tables[0].datasource', type: 'variable' as const, detail: 'string' },
+      { label: 'ctx.query.tables[0].schema', type: 'variable' as const, detail: 'string' },
+      { label: 'ctx.query.tables[0].table', type: 'variable' as const, detail: 'string' },
       { label: 'ctx.query.columns', type: 'variable' as const, detail: 'string[]' },
       { label: 'ctx.query.join_count', type: 'variable' as const, detail: 'number' },
       { label: 'ctx.query.has_aggregation', type: 'variable' as const, detail: 'boolean' },

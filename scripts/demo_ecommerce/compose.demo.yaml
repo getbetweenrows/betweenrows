@@ -1,0 +1,47 @@
+# BetweenRows demo stack: proxy + pre-configured upstream postgres.
+#
+# Used by the docs screenshot capture workflow and for contributors who
+# want a deterministic local demo. Not part of the user-facing install
+# story — see ../../compose.quickstart.yaml for that.
+#
+# Usage:
+#   docker compose -f compose.demo.yaml up -d
+#   ./setup.sh
+#   # ... use the demo ...
+#   docker compose -f compose.demo.yaml down -v    # -v wipes the data volume
+
+services:
+  upstream:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: demo_ecommerce
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d demo_ecommerce"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  proxy:
+    # Locally-built proxy image (`docker build --target prod -t betweenrows:dev .`
+    # from the repo root). Uses the proxy fix for cross-database table
+    # reference pushdown — the published `ghcr.io/getbetweenrows/betweenrows`
+    # image has the bug and rejects any upstream database not named "postgres".
+    image: betweenrows:dev
+    environment:
+      BR_ADMIN_USER: admin
+      BR_ADMIN_PASSWORD: changeme
+    ports:
+      - "5434:5434"
+      - "5435:5435"
+    volumes:
+      - betweenrows_demo_data:/data
+    depends_on:
+      upstream:
+        condition: service_healthy
+
+volumes:
+  betweenrows_demo_data:

@@ -1,37 +1,23 @@
 version: 1
 policies:
-  # MT-01: Tenant isolation — users only see their org's rows (orders, customers, products)
+  # MT-01: Tenant isolation — users only see their org's rows (orders, customers, products, support_tickets)
   - name: tenant-isolation
     policy_type: row_filter
-    description: Filter tables to the authenticated user's organization
+    description: Filter tables to the authenticated user's tenant
     is_enabled: true
     targets:
       - schemas: [public]
-        tables: [orders, customers, products]
+        tables: [orders, customers, products, support_tickets]
     definition:
-      filter_expression: "organization_id = {user.tenant}"
+      filter_expression: "org = {user.tenant}"
 
-  # MT-01 (payments): payments filtered via orders join
-  - name: tenant-isolation-payments
-    policy_type: row_filter
-    description: Filter payments to the authenticated user's organization via orders
-    is_enabled: true
-    targets:
-      - schemas: [public]
-        tables: [payments]
-    definition:
-      filter_expression: "order_id IN (SELECT id FROM orders WHERE organization_id = {user.tenant})"
-
-  # RE-01: Join-based row filter for order_items (no direct organization_id column)
-  - name: tenant-isolation-order-items
-    policy_type: row_filter
-    description: Filter order_items via parent orders table
-    is_enabled: true
-    targets:
-      - schemas: [public]
-        tables: [order_items]
-    definition:
-      filter_expression: "order_id IN (SELECT id FROM orders WHERE organization_id = {user.tenant})"
+  # Note: `payments` and `order_items` don't carry an `org` column — they
+  # reference `orders` via `order_id`. The proxy's filter expression parser
+  # rejects subqueries in filter expressions, so we can't write
+  # `order_id IN (SELECT id FROM orders WHERE ...)`. In `policy_required`
+  # mode, tables without a matching policy return zero rows by default,
+  # which is the correct safe behavior here. The docs guides only query
+  # customers/orders/products/support_tickets, so this gap doesn't show.
 
   # DS-01: Partial SSN masking for support staff
   - name: mask-ssn-partial

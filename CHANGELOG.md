@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **[Proxy] BREAKING: `ctx.query.tables` is now an array of objects, not strings** — decision functions with `evaluate_context = "query"` previously received `ctx.query.tables` as `string[]` (e.g. `["public.orders"]`). It is now `Array<{datasource, schema, table}>`, so decision function JS must access the fields explicitly. Bare references like `SELECT * FROM orders` now also resolve to the session's default schema (e.g. `public`) rather than an empty schema segment, so qualified and unqualified references produce identical entries.
+
+  Migration for any decision function that inspected `ctx.query.tables`:
+
+  ```js
+  // Before:
+  ctx.query.tables.includes("public.orders")
+  ctx.query.tables.some(t => t.startsWith("public."))
+
+  // After:
+  ctx.query.tables.some(t => t.schema === "public" && t.table === "orders")
+  ctx.query.tables.some(t => t.schema === "public")
+  ```
+
 ## [0.14.1] - 2026-04-09
 
 ### Changed

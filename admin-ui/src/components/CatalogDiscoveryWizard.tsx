@@ -198,6 +198,15 @@ export function CatalogDiscoveryWizard({ datasourceId }: Props) {
   }
 
   async function runSaveCatalog() {
+    // TODO(rename-warning): if any entry in schemaAliases differs from the
+    // existing schema_alias on the already-persisted schema, surface the
+    // impact of the rename to the admin before saving — schema alias changes
+    // break SQL queries using the old alias, decision function JS matching on
+    // `ctx.query.tables[*].schema`, stored queries/dashboards, and audit logs
+    // tagged with the old alias. Policy *enforcement* continues to work
+    // because `matches_table` resolves aliases to upstream schema names via
+    // `df_to_upstream` at session build time. See `docs/permission-system.md`
+    // → "Rename fragility and label-based identifiers".
     setError(null)
     setProgress(null)
     setIsWorking(true)

@@ -29,6 +29,14 @@ export function DataSourceEditPage() {
     is_active: boolean
     access_mode?: string
   }) {
+    // TODO(rename-warning): if values.name differs from ds.name, surface the
+    // impact of the rename to the admin before committing — datasource name
+    // changes break SQL 3-part references (`oldName.schema.table`), connection
+    // strings, decision function JS matching on `ctx.query.tables[*].datasource`
+    // or `ctx.session.datasource.name`, and audit log consumers keyed on the
+    // old name. Policy *enforcement* continues to work because policies are
+    // assigned by datasource_id. See `docs/permission-system.md` → "Rename
+    // fragility and label-based identifiers" for the full impact matrix.
     setIsSubmitting(true)
     try {
       await updateDataSource(dsId, {

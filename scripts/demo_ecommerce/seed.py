@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""
-Seed demo e-commerce data for BetweenRows permission system demo.
+"""Seed the demo e-commerce database for BetweenRows.
+
+Produces the deterministic canonical state used by the docs guides and
+screenshot capture. Three tenants (acme, globex, stark); per-tenant:
+10 customers, 20 products, 34 orders, 1-4 items per order, payments for
+shipped/delivered orders, ~5 support tickets per customer.
+
+Re-running against an existing database WILL duplicate rows — the
+`organizations` upsert is safe but customers/products/orders insert
+fresh rows every time. To reset, drop and recreate the database
+(or `docker compose down -v` on the demo stack).
 
 Usage:
     pip install -r requirements.txt
-    DATABASE_URL=postgres://user:pass@host/db python seed.py
-
-Or with a .env file containing DATABASE_URL.
+    DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/demo_ecommerce \\
+        python3 seed.py
 """
 
 import os
@@ -31,34 +39,30 @@ if not DATABASE_URL:
     print("ERROR: DATABASE_URL environment variable not set", file=sys.stderr)
     sys.exit(1)
 
-ORGANIZATIONS = [
-    {"name": "Acme Corp"},
-    {"name": "Widgets Inc"},
-    {"name": "Global Trade"},
-]
+# Canonical tenants used by the docs guides. Change these only in lockstep
+# with the guide prose and the policies.yaml filter expressions.
+ORGS = ["acme", "globex", "stark"]
 
-STATUSES = ["pending", "processing", "shipped", "delivered", "cancelled"]
+ORDER_STATUSES = ["pending", "processing", "shipped", "delivered", "cancelled"]
 PAYMENT_METHODS = ["credit_card", "bank_transfer", "paypal"]
+TICKET_STATUSES = ["open", "in_progress", "resolved", "closed"]
 
 conn = psycopg2.connect(DATABASE_URL)
 cur = conn.cursor()
 
 print("Seeding organizations…")
-org_ids = {}
-for org in ORGANIZATIONS:
-    oid = str(uuid.uuid4())
-    org_ids[org["name"]] = oid
+for org in ORGS:
     cur.execute(
-        "INSERT INTO organizations (id, name) VALUES (%s, %s) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
-        (oid, org["name"]),
+        "INSERT INTO organizations (name) VALUES (%s) "
+        "ON CONFLICT (name) DO NOTHING",
+        (org,),
     )
-    org_ids[org["name"]] = cur.fetchone()[0]
 conn.commit()
-print(f"  {len(org_ids)} organizations")
+print(f"  {len(ORGS)} organizations")
 
 print("Seeding customers…")
-customer_ids_by_org = {name: [] for name in org_ids}
-for org_name, org_id in org_ids.items():
+customer_ids_by_org: dict[str, list[str]] = {org: [] for org in ORGS}
+for org in ORGS:
     for _ in range(10):
         cid = str(uuid.uuid4())
         first = fake.first_name()
@@ -69,32 +73,32 @@ for org_name, org_id in org_ids.items():
         cc = fake.credit_card_number()
         cur.execute(
             """
-            INSERT INTO customers (id, organization_id, first_name, last_name, email, phone, ssn, credit_card)
+            INSERT INTO customers (id, org, first_name, last_name, email, phone, ssn, credit_card)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
             """,
-            (cid, org_id, first, last, email, phone, ssn, cc),
+            (cid, org, first, last, email, phone, ssn, cc),
         )
-        customer_ids_by_org[org_name].append(cur.fetchone()[0])
+        customer_ids_by_org[org].append(cur.fetchone()[0])
 conn.commit()
 total_customers = sum(len(v) for v in customer_ids_by_org.values())
 print(f"  {total_customers} customers")
 
 print("Seeding products…")
-product_ids_by_org = {name: [] for name in org_ids}
-for org_name, org_id in org_ids.items():
-    for i in range(20):
+product_ids_by_org: dict[str, list[str]] = {org: [] for org in ORGS}
+for org in ORGS:
+    for _ in range(20):
         pid = str(uuid.uuid4())
         price = decimal.Decimal(str(round(random.uniform(9.99, 499.99), 2)))
         cost = price * decimal.Decimal("0.6")
         margin = (price - cost) / price
         cur.execute(
             """
-            INSERT INTO products (id, organization_id, name, description, price, cost_price, margin)
+            INSERT INTO products (id, org, name, description, price, cost_price, margin)
             VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
             """,
             (
                 pid,
-                org_id,
+                org,
                 fake.catch_phrase(),
                 fake.text(max_nb_chars=100),
                 price,
@@ -102,28 +106,28 @@ for org_name, org_id in org_ids.items():
                 round(margin, 4),
             ),
         )
-        product_ids_by_org[org_name].append(cur.fetchone()[0])
+        product_ids_by_org[org].append(cur.fetchone()[0])
 conn.commit()
 total_products = sum(len(v) for v in product_ids_by_org.values())
 print(f"  {total_products} products")
 
-print("Seeding orders and order items…")
+print("Seeding orders, order items, and payments…")
 order_count = 0
 item_count = 0
 payment_count = 0
-for org_name, org_id in org_ids.items():
-    customers = customer_ids_by_org[org_name]
-    products = product_ids_by_org[org_name]
+for org in ORGS:
+    customers = customer_ids_by_org[org]
+    products = product_ids_by_org[org]
     for _ in range(34):
         order_id = str(uuid.uuid4())
         customer_id = random.choice(customers)
-        status = random.choice(STATUSES)
+        status = random.choice(ORDER_STATUSES)
         cur.execute(
             """
-            INSERT INTO orders (id, organization_id, customer_id, status)
+            INSERT INTO orders (id, org, customer_id, status)
             VALUES (%s, %s, %s, %s) RETURNING id
             """,
-            (order_id, org_id, customer_id, status),
+            (order_id, org, customer_id, status),
         )
         order_id = cur.fetchone()[0]
         order_count += 1
@@ -165,6 +169,28 @@ for org_name, org_id in org_ids.items():
 
 conn.commit()
 print(f"  {order_count} orders, {item_count} order items, {payment_count} payments")
+
+print("Seeding support tickets…")
+ticket_count = 0
+for org in ORGS:
+    for customer_id in customer_ids_by_org[org]:
+        for _ in range(5):
+            cur.execute(
+                """
+                INSERT INTO support_tickets (id, org, customer_id, subject, status)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    org,
+                    customer_id,
+                    fake.sentence(nb_words=6),
+                    random.choice(TICKET_STATUSES),
+                ),
+            )
+            ticket_count += 1
+conn.commit()
+print(f"  {ticket_count} support tickets")
 
 cur.close()
 conn.close()

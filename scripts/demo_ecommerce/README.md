@@ -1,117 +1,120 @@
-# Demo E-Commerce Schema
+# Demo e-commerce
 
-A demo multi-tenant e-commerce database for testing the BetweenRows permission system.
+The canonical BetweenRows demo. A deterministic seed of a multi-tenant
+e-commerce database plus a matching set of policies, used by the public
+docs guides and the screenshot capture workflow. Also handy for ad-hoc
+local demos.
 
-## Tables
+## What the demo contains
 
-| Table | Description |
-|---|---|
-| `organizations` | Three tenants: Acme Corp, Widgets Inc, Global Trade |
-| `customers` | ~30 customers with SSN and credit card data |
-| `products` | ~60 products with cost_price and margin |
-| `orders` | ~100 orders |
-| `order_items` | ~200 order items |
-| `payments` | ~80 payments |
+Three tenants (`acme`, `globex`, `stark`), each with:
 
-## Setup
-
-### 1. Create the schema
-
-```bash
-psql $DATABASE_URL < schema.sql
-```
-
-### 2. Install Python dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 3. Seed data
-
-```bash
-DATABASE_URL=postgres://user:pass@host/dbname python seed.py
-```
-
-Or create a `.env` file:
-```
-DATABASE_URL=postgres://user:pass@host/dbname
-```
-
-## Using with BetweenRows
-
-### 1. Create a datasource in the admin UI
-
-Point it at your demo database. Set `access_mode` to `policy_required` to ensure policies are required.
-
-### 2. Discover the catalog
-
-Run the catalog discovery wizard to import the schema.
-
-### 3. Import the demo policies
-
-```bash
-export TOKEN=$(curl -s -X POST http://localhost:5435/api/v1/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"your-password"}' | jq -r .token)
-
-curl -X POST \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: text/plain" \
-  --data-binary @policies.yaml \
-  "http://localhost:5435/api/v1/policies/import"
-```
-
-### 4. Create test users
-
-Create proxy users and set their tenant attribute:
-
-```bash
-cargo run -p proxy -- user create \
-  --username alice --password secret
-
-cargo run -p proxy -- user create \
-  --username bob --password secret
-```
-
-### 5. Assign users to the datasource and set tenant attributes
-
-In the admin UI:
-1. Create a `tenant` attribute definition (Attributes → Create, key: `tenant`, entity type: `user`, value type: `string`)
-2. Go to the datasource edit page and assign Alice and Bob
-3. On each user's edit page, set their `tenant` attribute: Alice → `Acme Corp`, Bob → `Widgets Inc`
-
-### 6. Assign policies
-
-Assign the demo policies to the datasource in the admin UI. For per-user assignments (e.g. mask-ssn-partial vs mask-ssn-full), specify the target user.
-
-### 7. Verify policies via psql
-
-```bash
-# Connect as Alice (tenant attribute: Acme Corp)
-psql "postgresql://alice:secret@localhost:5434/betweenrows"
-
--- Should return only Acme Corp's orders
-SELECT id, status, total_amount FROM orders LIMIT 5;
-
--- SSN should be masked
-SELECT first_name, ssn FROM customers LIMIT 3;
-
--- credit_card should be absent
-SELECT * FROM customers LIMIT 1;
-
--- order_items filtered via join
-SELECT * FROM order_items LIMIT 5;
-```
-
-## Policy scenarios
-
-| Policy | Story | Effect |
+| Table | Count per tenant | Notes |
 |---|---|---|
-| `tenant-isolation` | MT-01 | Users see only their org's rows |
-| `tenant-isolation-order-items` | RE-01 | order_items filtered via orders join |
-| `mask-ssn-partial` | DS-01 | `***-**-1234` format |
-| `mask-ssn-full` | DS-04 | `[RESTRICTED]` |
-| `hide-credit-card` | DS-10 | credit_card absent from results |
-| `hide-product-financials` | DS-02 | cost_price, margin absent |
-| `admin-full-access` | MT-05 | Assigned to admin users for full access |
+| `customers` | 10 | with ssn, credit_card (both redacted by policies) |
+| `products` | 20 | with cost_price, margin (hidden by policy DS-02) |
+| `orders` | 34 | ~1–4 items per order |
+| `order_items` | ~3× orders | filtered via join on `orders` |
+| `payments` | ~shipped+delivered orders | filtered via join on `orders` |
+| `support_tickets` | ~5× customers | filtered by `org` |
+
+All rows carry an `org TEXT` column holding the tenant name
+(`acme`/`globex`/`stark`). Row filters use
+`org = {user.tenant}` against a string user attribute.
+
+## One-shot setup
+
+Run the entire demo stack + bootstrap in two commands:
+
+```sh
+cd scripts/demo_ecommerce
+
+# 1. Bring up proxy + upstream postgres
+docker compose -f compose.demo.yaml up -d
+
+# 2. Install Python deps (first run only)
+pip install -r requirements.txt
+
+# 3. Apply schema, seed data, and configure BR admin
+./setup.sh
+```
+
+The script is idempotent for the BR admin bootstrap (phase 2 and 3 —
+users, policies, assignments) but **not** for the upstream seed
+(phase 1). Re-running `setup.sh` against an existing database will
+duplicate customers, orders, etc. To reset cleanly:
+
+```sh
+docker compose -f compose.demo.yaml down -v
+docker compose -f compose.demo.yaml up -d
+./setup.sh
+```
+
+## Env var overrides
+
+| Var | Default | Purpose |
+|---|---|---|
+| `BR_HOST` | `http://127.0.0.1:5435` | BR admin API base URL |
+| `BR_ADMIN_USER` | `admin` | BR admin username |
+| `BR_ADMIN_PASSWORD` | `changeme` | BR admin password |
+| `UPSTREAM_DSN` | `postgresql://postgres:postgres@127.0.0.1:5432/demo_ecommerce` | DSN psql/seed.py use from the host |
+| `BR_UPSTREAM_HOST` | `upstream` | Hostname the BR proxy uses to reach upstream (service name in compose network) |
+| `BR_UPSTREAM_PORT` | `5432` | |
+| `BR_UPSTREAM_DB` | `demo_ecommerce` | Upstream database name |
+| `BR_UPSTREAM_USER` | `postgres` | |
+| `BR_UPSTREAM_PASS` | `postgres` | |
+| `DATASOURCE_NAME` | `demo_ecommerce` | BR datasource name users connect through the proxy with |
+
+## Using the demo
+
+After `setup.sh` finishes:
+
+- **Admin UI:** <http://127.0.0.1:5435> (log in as `admin`/`changeme`)
+- **Proxy:** `127.0.0.1:5434` (postgres wire protocol)
+
+Connect through the proxy as one of the seeded users:
+
+```sh
+psql 'postgresql://alice:Demo1234!@127.0.0.1:5434/demo_ecommerce'
+psql 'postgresql://bob:Demo1234!@127.0.0.1:5434/demo_ecommerce'
+psql 'postgresql://charlie:Demo1234!@127.0.0.1:5434/demo_ecommerce'
+```
+
+Each user sees only their own tenant's rows:
+
+```sql
+SELECT DISTINCT org FROM orders;
+-- alice   → acme
+-- bob     → globex
+-- charlie → stark
+```
+
+SSNs are masked via `mask-ssn-partial` (`***-**-<last 4>`), credit card
+numbers are hidden (`column_deny`), and product cost/margin columns are
+hidden for everyone.
+
+## Policies
+
+See `policies.yaml` for the full list. Summary:
+
+| Policy | Type | Story | Effect |
+|---|---|---|---|
+| `tenant-isolation` | `row_filter` | MT-01 | Users see only their tenant's rows (customers/orders/products/support_tickets) |
+| `mask-ssn-partial` | `column_mask` | DS-01 | `customers.ssn` → `***-**-NNNN` |
+| `mask-ssn-full` | `column_mask` | DS-04 | `customers.ssn` → `[RESTRICTED]` (unassigned by default) |
+| `hide-credit-card` | `column_deny` | DS-10 | `customers.credit_card` removed from all queries |
+| `hide-product-financials` | `column_deny` | DS-02 | `products.cost_price`, `products.margin` removed |
+| `admin-full-access` | `column_allow` | MT-05 | Full access (assign per user) |
+
+`setup.sh` assigns `tenant-isolation`, `mask-ssn-partial`, `hide-credit-card`,
+and `hide-product-financials` to `prod-db` with scope=all. The other
+policies are created but unassigned — assign manually in the admin UI
+to explore different scenarios.
+
+**Note:** `payments` and `order_items` don't carry an `org` column — they
+reference `orders` via `order_id`. The proxy's filter expression parser
+rejects subqueries in filter expressions, so we can't write
+`order_id IN (SELECT id FROM orders WHERE ...)`. In `policy_required`
+mode, tables without a matching policy return zero rows by default, which
+is the correct safe default here. The docs guides only query
+customers/orders/products/support_tickets, so this gap doesn't show up.

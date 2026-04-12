@@ -488,6 +488,33 @@ function evaluate(ctx, config) {
 
 `time.now` is an ISO 8601 / RFC 3339 timestamp representing the **evaluation time** — the moment the context is built. For visibility-level functions this is when the connection context is computed; for query-level functions it is when the query is processed. This enables time-windowed decision functions (e.g., break-glass temporary access).
 
+#### `ctx.query.tables` — structured table references
+
+Each entry in `ctx.query.tables` is an object with three string fields:
+
+```js
+ctx.query.tables; // Array of { datasource, schema, table }
+```
+
+| Field | What it contains |
+|-------|------------------|
+| `datasource` | The BetweenRows datasource name the session is connected to (e.g. `"prod"`). Same value as `ctx.session.datasource.name`. |
+| `schema` | The schema alias the user referenced (or the upstream schema name if no alias is configured). For bare references like `FROM orders`, this is the session's default schema (e.g. `"public"`) — **never** an empty string. |
+| `table` | The table name as referenced in the SQL. |
+
+A bare reference `SELECT * FROM orders JOIN users` and a qualified reference `SELECT * FROM public.orders JOIN public.users` produce **identical** `ctx.query.tables` arrays, so decision function logic doesn't need to handle both forms:
+
+```js
+// Matches regardless of whether the user wrote bare `orders` or `public.orders`
+const touchesOrders = ctx.query.tables.some(
+  t => t.schema === "public" && t.table === "orders"
+);
+```
+
+System tables (`pg_catalog.*`, `information_schema.*`) are filtered out of `ctx.query.tables` entirely — decision functions never see them.
+
+**Identifier stability**: `datasource` and `schema` are **user-facing labels** that admins can rename (see "Rename fragility and label-based identifiers" below). If an admin renames the `prod` datasource to `production`, decision functions that hardcoded `t.datasource === "prod"` will silently stop matching. Prefer matching on `table` (which is stable with the upstream name) plus `schema` (which is generally stable unless an alias is reconfigured) for rules you want to survive renames. A future rename-warning UX will surface the impact of renames before admins commit them.
+
 Custom user attributes are flattened as first-class fields on the `user` object with correctly typed values (string/number/boolean/array) — e.g., `ctx.session.user.region`, not `ctx.session.user.attributes.region`. This matches the flat `{user.KEY}` namespace used in template variables. In the API, the same attributes are nested under `attributes` (see [Namespace design](#namespace-design-flat-in-expressions-nested-in-api)). List attributes appear as JSON arrays of strings. Built-in fields (`id`, `username`, `roles`) always take priority. See [User Attributes (ABAC)](#user-attributes-abac) for details.
 
 **Visibility-level enforcement**: `column_deny`, `table_deny`, and `column_allow` policies are enforced at connect time (visibility level) by removing columns/tables from the per-user schema. Decision functions on these policy types are evaluated at visibility time when `evaluate_context = "session"`. If the decision function returns `fire: false`, the policy is skipped and the column/table remains visible. For `evaluate_context = "query"`, the policy's visibility effect is skipped entirely (deferred to query time), since query metadata is not available at connect time — the column/table stays visible in the schema and the decision function runs at query time as normal.
@@ -1307,4 +1334,27 @@ Attach this to a `table_deny` policy targeting `executive_comp` — executives s
 | Tiered masking by clearance | Nested `CASE WHEN` in `column_mask` | `CASE WHEN {user.clearance} >= 5 THEN val WHEN ... END` |
 | Mask using row data + user attributes | `CASE WHEN` referencing both | `CASE WHEN region = {user.region} THEN val ELSE ... END` |
 | Conditional deny/allow | Decision function | `{ fire: ctx.session.user.team !== 'x' }` |
+
+## Rename fragility and label-based identifiers
+
+BetweenRows uses **user-facing labels** for identifiers everywhere users touch the system: datasource names, schema aliases, policy names, and decision function contexts. This is intentional — stable IDs (UUIDs) would be unusable as SQL identifiers and would force admins to hand-write UUIDs in policy targets.
+
+The tradeoff is that **renames are breaking changes** for anything that references the old label. Three rename operations matter:
+
+| Rename | What breaks | What keeps working |
+|--------|-------------|--------------------|
+| **Datasource name** (e.g. `prod` → `production`) | Connection strings (`dbname=prod`); 3-part SQL references (`prod.public.orders`); `ctx.session.datasource.name` checks; `ctx.query.tables[*].datasource` checks in decision function JS; audit log rows tagged with the old name | Policy enforcement for in-flight queries: policies are assigned by `datasource.id` (UUID), not name, so they continue to match after the rename |
+| **Schema alias** (e.g. `public` → `main`) | SQL queries using the old alias; `ctx.query.tables[*].schema` checks; `{user.KEY}` expressions that embed the alias; dashboards and stored queries | Policy target matching: `TargetEntry::matches_table` resolves the new alias to the upstream schema name via `df_to_upstream` at session build time, and policy targets store upstream names — so enforcement is stable across alias renames |
+| **Upstream schema or database rename** (performed in the actual Postgres, not BR) | Everything that references it — catalog discovery must be re-run, and `df_to_upstream` entries rebuilt | Policies need to be retargeted manually |
+
+**Guidance for decision function authors**: prefer matching on `t.table` (stable with upstream) plus `t.schema` (usually stable unless an alias is reconfigured) over `t.datasource`. If a rule must survive datasource renames, gate it on `ctx.session.user.roles` or attributes, not on datasource identity.
+
+**Guidance for admins**: when renaming a datasource or schema alias, audit existing:
+
+1. Decision function JS for references to the old name
+2. Stored queries, dashboards, and SQL snippets in external tools (BR cannot see these)
+3. Connection strings in deployed applications
+4. Audit logs and any downstream log aggregators keyed on the old name
+
+A future rename-warning feature will surface a list of affected entities before the rename commits. Until then, renames should be treated as a coordinated operation, not a casual UI edit. Policy *enforcement* (the security layer) is the one thing that stays correct across renames automatically.
 | Combine multiple filters | Separate policies (AND-combined) | Two `row_filter` policies on same table |

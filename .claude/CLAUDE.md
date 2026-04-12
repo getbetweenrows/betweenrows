@@ -71,6 +71,8 @@ Every feature plan MUST include a comprehensive test case inventory before imple
 
 **Test naming convention:** Group tests by category with descriptive names. Map security-relevant tests to vector numbers in `docs/security-vectors.md`.
 
+**Adding a new security vector:** When a new feature or bug fix touches access control, policy resolution, or data visibility, add (or update) an entry in `docs/security-vectors.md` using the standard schema defined at the top of that file. Section order is fixed: `**Vector**` → `**Attacks**` → `**Defense**` → `**Previously**` *(only if strengthening an earlier defense)* → `**Status**` *(only for unmitigated threats or accepted trade-offs)* → `**Tests**`. Every attack variant must either have a test back-reference (`— attack N`) in the `**Tests**` section or be explicitly marked under `**Status**`. Never use `**Bug**` as a section label — historical fix context goes in `**Previously**` in past tense. See the top of `docs/security-vectors.md` for the full schema description and `### 13` for a canonical example with multiple attack variants plus a `Previously` section.
+
 ### Security-First Thinking
 This is a data security product. Every feature that touches access control, policy resolution, or data visibility must be evaluated through a security lens:
 - **What can an attacker do?** — enumerate bypass vectors before building defenses

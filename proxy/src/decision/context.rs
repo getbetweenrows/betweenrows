@@ -10,6 +10,7 @@
 //! query is processed.
 
 use chrono::Utc;
+use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -25,10 +26,23 @@ pub struct SessionInfo {
     pub attributes: HashMap<String, serde_json::Value>,
 }
 
+/// A three-part identifier for a table referenced in a query. Surfaces to
+/// decision functions as `ctx.query.tables[*]`. All three fields are BR
+/// user-facing labels (not upstream PG identifiers): `datasource` is the BR
+/// datasource name, `schema` is the discovered-schema alias (or the real
+/// name if no alias was set). See `docs/permission-system.md` for the
+/// rename-fragility note on label-based identifiers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct TableRef {
+    pub datasource: String,
+    pub schema: String,
+    pub table: String,
+}
+
 /// Query-level metadata extracted from the logical plan.
 #[derive(Debug, Clone, Default)]
 pub struct QueryMetadata {
-    pub tables: Vec<String>,
+    pub tables: Vec<TableRef>,
     pub columns: Vec<String>,
     pub join_count: usize,
     pub has_aggregation: bool,
@@ -184,7 +198,7 @@ mod tests {
         let user = &ctx["session"]["user"];
         assert_eq!(user["region"].as_str().unwrap(), "us-east");
         assert_eq!(user["clearance"].as_i64().unwrap(), 3);
-        assert_eq!(user["is_vip"].as_bool().unwrap(), true);
+        assert!(user["is_vip"].as_bool().unwrap());
     }
 
     #[test]

@@ -44,6 +44,27 @@ jobs:
         run: npm run test:run
         working-directory: admin-ui
 
+  docs-site:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+
+      - name: Install docs-site dependencies
+        run: npm ci
+        working-directory: docs-site
+
+      - name: VitePress build
+        run: npm run build
+        working-directory: docs-site
+
   publish:
     needs: test
     if: startsWith(github.ref, 'refs/tags/v')

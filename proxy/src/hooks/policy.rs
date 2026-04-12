@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::registry::FunctionRegistry;
-use datafusion::logical_expr::{LogicalPlan, LogicalPlanBuilder, col, lit};
+use datafusion::logical_expr::{LogicalPlan, LogicalPlanBuilder, TableScan, col, lit};
 use datafusion::prelude::SessionContext;
 use datafusion::sql::sqlparser::ast::{
     BinaryOperator as SqlBinaryOp, Expr as SqlExpr, FunctionArg, FunctionArgExpr,
@@ -1109,35 +1109,67 @@ fn clone_session_data(s: &SessionData) -> SessionDataRef {
     })
 }
 
-/// Collect all user-table (df_schema, table) pairs from a logical plan.
-fn collect_user_tables(plan: &LogicalPlan) -> Vec<(String, String)> {
+/// Return the `(df_schema, table)` policy key for a `TableScan`.
+///
+/// SECURITY INVARIANT: `scan.table_name.schema()` is the parsed schema
+/// segment — empty for bare references like `FROM orders`. Using `""` as the
+/// policy key would let a user bypass any policy targeting `schemas:
+/// ["public"]` simply by omitting the schema prefix (vector #71 in
+/// `docs/security-vectors.md`). We fall back to the session's default schema,
+/// which is the same value `create_session_context_from_catalog` configured
+/// DataFusion with at connect time — so a bare reference resolves against
+/// exactly that one schema and nothing else (`SET search_path` is blocked
+/// upstream by `ReadOnlyHook`).
+fn scan_policy_key(scan: &TableScan, default_schema: &str) -> (String, String) {
+    let schema = scan
+        .table_name
+        .schema()
+        .unwrap_or(default_schema)
+        .to_string();
+    (schema, scan.table_name.table().to_string())
+}
+
+/// Collect all user-table `(df_schema, table)` policy keys from a logical plan,
+/// deduplicating consecutive repeats. System tables (`pg_catalog`,
+/// `information_schema`, etc.) are filtered out.
+fn collect_user_tables(plan: &LogicalPlan, default_schema: &str) -> Vec<(String, String)> {
     let mut tables = Vec::new();
-    collect_tables_inner(plan, &mut tables);
+    collect_tables_inner(plan, default_schema, &mut tables);
     tables.dedup();
     tables
 }
 
-fn collect_tables_inner(plan: &LogicalPlan, tables: &mut Vec<(String, String)>) {
+fn collect_tables_inner(
+    plan: &LogicalPlan,
+    default_schema: &str,
+    tables: &mut Vec<(String, String)>,
+) {
     if let LogicalPlan::TableScan(scan) = plan {
-        let df_schema = scan.table_name.schema().unwrap_or("").to_string();
-        let table = scan.table_name.table().to_string();
-        let is_system = SYSTEM_SCHEMAS.contains(&df_schema.as_str())
-            || table.starts_with("pg_")
-            || df_schema == "information_schema";
+        let (df_schema, table) = scan_policy_key(scan, default_schema);
+        let is_system = SYSTEM_SCHEMAS.contains(&df_schema.as_str()) || table.starts_with("pg_");
         if !is_system {
             tables.push((df_schema, table));
         }
         return;
     }
     for input in plan.inputs() {
-        collect_tables_inner(input, tables);
+        collect_tables_inner(input, default_schema, tables);
     }
 }
 
 // ---------- query metadata extraction ----------
 
 /// Extract query metadata from a logical plan for decision function evaluation.
-fn extract_query_metadata(plan: &LogicalPlan) -> crate::decision::context::QueryMetadata {
+///
+/// `default_schema` is used as the fallback for bare table references (see
+/// `scan_policy_key` and vector #71). `datasource_name` is the BR datasource
+/// label attached to every `TableRef` so decision functions can match on the
+/// full `(datasource, schema, table)` identity without parsing strings.
+fn extract_query_metadata(
+    plan: &LogicalPlan,
+    default_schema: &str,
+    datasource_name: &str,
+) -> crate::decision::context::QueryMetadata {
     let mut tables = Vec::new();
     let mut join_count = 0usize;
     let mut has_aggregation = false;
@@ -1145,6 +1177,8 @@ fn extract_query_metadata(plan: &LogicalPlan) -> crate::decision::context::Query
     let mut has_where = false;
     extract_metadata_inner(
         plan,
+        default_schema,
+        datasource_name,
         &mut tables,
         &mut join_count,
         &mut has_aggregation,
@@ -1172,9 +1206,12 @@ fn extract_query_metadata(plan: &LogicalPlan) -> crate::decision::context::Query
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract_metadata_inner(
     plan: &LogicalPlan,
-    tables: &mut Vec<String>,
+    default_schema: &str,
+    datasource_name: &str,
+    tables: &mut Vec<crate::decision::context::TableRef>,
     join_count: &mut usize,
     has_aggregation: &mut bool,
     has_subquery: &mut bool,
@@ -1182,18 +1219,20 @@ fn extract_metadata_inner(
 ) {
     match plan {
         LogicalPlan::TableScan(scan) => {
-            let schema = scan.table_name.schema().unwrap_or("");
-            let table = scan.table_name.table();
-            let is_system = SYSTEM_SCHEMAS.contains(&schema)
-                || table.starts_with("pg_")
-                || schema == "information_schema";
+            // Use `scan_policy_key` so bare references (`FROM orders`) are
+            // reported to decision functions with the session's default
+            // schema (`public.orders`) rather than an empty schema segment.
+            // This keeps decision-function JS that inspects
+            // `ctx.query.tables[*]` consistent regardless of how the user
+            // qualified the reference.
+            let (schema, table) = scan_policy_key(scan, default_schema);
+            let is_system = SYSTEM_SCHEMAS.contains(&schema.as_str()) || table.starts_with("pg_");
             if !is_system {
-                let name = if schema.is_empty() {
-                    table.to_string()
-                } else {
-                    format!("{schema}.{table}")
-                };
-                tables.push(name);
+                tables.push(crate::decision::context::TableRef {
+                    datasource: datasource_name.to_string(),
+                    schema,
+                    table,
+                });
             }
         }
         LogicalPlan::Join(_) => {
@@ -1213,6 +1252,8 @@ fn extract_metadata_inner(
     for input in plan.inputs() {
         extract_metadata_inner(
             input,
+            default_schema,
+            datasource_name,
             tables,
             join_count,
             has_aggregation,
@@ -1284,6 +1325,11 @@ impl PolicyError {
 
 /// Collected effects from all policies — separates "what to apply" from "how to apply it".
 struct PolicyEffects {
+    /// Session default schema, used as the fallback when `scan.table_name.schema()`
+    /// is empty (bare references). Read from `session_context` at `collect` time;
+    /// same value `create_session_context_from_catalog` configured DataFusion with
+    /// at connect time. See vector #71.
+    default_schema: String,
     /// Combined row filter per (df_schema, table): AND within a policy, AND across policies.
     row_filters: HashMap<(String, String), datafusion::logical_expr::Expr>,
     /// Raw column allow patterns per (df_schema, table). Populated by `column_allow` policies.
@@ -1422,7 +1468,20 @@ impl PolicyEffects {
         session_context: &SessionContext,
         decision_eval: Option<&DecisionEvalContext<'_>>,
     ) -> Self {
+        // Read the session's default schema from the SessionContext. This is
+        // the same value `engine/mod.rs::create_session_context_from_catalog`
+        // configured via `with_default_catalog_and_schema` at connect time,
+        // and it's the single schema a bare reference like `FROM orders`
+        // resolves against (SET search_path is blocked upstream).
+        let default_schema = session_context
+            .state()
+            .config_options()
+            .catalog
+            .default_schema
+            .clone();
+
         let mut effects = PolicyEffects {
+            default_schema,
             row_filters: HashMap::new(),
             column_allow_patterns: HashMap::new(),
             column_deny_patterns: HashMap::new(),
@@ -1643,9 +1702,7 @@ impl PolicyEffects {
             let LogicalPlan::TableScan(ref scan) = node else {
                 return Ok(Transformed::no(node));
             };
-            let df_schema = scan.table_name.schema().unwrap_or("").to_string();
-            let table = scan.table_name.table().to_string();
-            let key = (df_schema, table);
+            let key = scan_policy_key(scan, &self.default_schema);
 
             let Some(filter_expr) = self.row_filters.get(&key) else {
                 return Ok(Transformed::no(node));
@@ -1691,8 +1748,7 @@ impl PolicyEffects {
             let LogicalPlan::TableScan(ref scan) = node else {
                 return Ok(Transformed::no(node));
             };
-            let df_schema = scan.table_name.schema().unwrap_or("").to_string();
-            let table = scan.table_name.table().to_string();
+            let (df_schema, table) = scan_policy_key(scan, &self.default_schema);
 
             // Check if any column in this table has a mask
             let has_masks = masks.keys().any(|(s, t, _)| s == &df_schema && t == &table);
@@ -1794,10 +1850,13 @@ impl PolicyEffects {
         for (qualifier, field) in output_schema.iter() {
             let col_name = field.name();
 
-            // Extract (df_schema, table) from the DFSchema qualifier for this field.
+            // Resolve the DFSchema field qualifier to a `(df_schema, table)`
+            // policy key. For bare references the qualifier's schema segment
+            // is empty; fall back to the session's default schema — same
+            // invariant `scan_policy_key` relies on. See vector #71.
             let (df_schema, table) = match qualifier {
                 Some(tref) => (
-                    tref.schema().unwrap_or("").to_string(),
+                    tref.schema().unwrap_or(&self.default_schema).to_string(),
                     tref.table().to_string(),
                 ),
                 None => (String::new(), String::new()),
@@ -1903,7 +1962,17 @@ async fn apply_policies(
     ),
     PolicyError,
 > {
-    let user_tables = collect_user_tables(&logical_plan);
+    // Read the session's default schema once — same value used in
+    // `PolicyEffects::collect` and passed to the scan walker. This is
+    // the single schema a bare reference resolves against.
+    let default_schema = session_context
+        .state()
+        .config_options()
+        .catalog
+        .default_schema
+        .clone();
+
+    let user_tables = collect_user_tables(&logical_plan, &default_schema);
 
     let mut effects = PolicyEffects::collect(
         session,
@@ -2055,7 +2124,17 @@ impl QueryHook for PolicyHook {
                 access_mode: session.access_mode.clone(),
                 attributes: json_attrs,
             };
-            let query_meta = extract_query_metadata(&logical_plan);
+            // Read the session's default schema for the metadata extraction,
+            // so bare references appear as `public.orders` (not `orders`) in
+            // `ctx.query.tables`. Same value `apply_policies` reads below.
+            let default_schema = session_context
+                .state()
+                .config_options()
+                .catalog
+                .default_schema
+                .clone();
+            let query_meta =
+                extract_query_metadata(&logical_plan, &default_schema, &session.datasource_name);
             let decision_ctx =
                 crate::decision::context::build_query_context(&session_info, &query_meta);
             let decision_eval = DecisionEvalContext {
@@ -2551,7 +2630,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let tables = collect_user_tables(&plan);
+        let tables = collect_user_tables(&plan, "public");
         assert!(
             tables.is_empty(),
             "pg_catalog tables should be excluded: {tables:?}"
@@ -2569,9 +2648,28 @@ mod tests {
             .build()
             .unwrap();
 
-        let tables = collect_user_tables(&plan);
+        let tables = collect_user_tables(&plan, "public");
         assert_eq!(tables.len(), 1);
-        assert_eq!(tables[0].1, "orders");
+        assert_eq!(tables[0], ("public".to_string(), "orders".to_string()));
+    }
+
+    #[test]
+    fn test_collect_user_tables_bare_reference_uses_default_schema() {
+        // Security invariant for vector #71: bare references must inherit the
+        // session's default schema, NOT empty string. Otherwise a policy
+        // targeting `schemas: ["public"]` would silently skip bare queries
+        // like `SELECT * FROM orders`.
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let table = Arc::new(EmptyTable::new(schema));
+        let source = Arc::new(DefaultTableSource::new(table));
+
+        let plan = LogicalPlanBuilder::scan("orders", source, None)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let tables = collect_user_tables(&plan, "public");
+        assert_eq!(tables, vec![("public".to_string(), "orders".to_string())]);
     }
 
     #[test]
@@ -2589,7 +2687,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let tables = collect_user_tables(&plan);
+        let tables = collect_user_tables(&plan, "public");
         assert!(
             tables.is_empty(),
             "information_schema should be excluded: {tables:?}"
@@ -3697,9 +3795,9 @@ mod tests {
             vec![("id", DataType::Int32), ("ssn", DataType::Utf8)],
         );
 
-        let user_tables = collect_user_tables(&plan);
+        let tables = collect_user_tables(&plan, "public");
         let vars = default_vars();
-        let effects = PolicyEffects::collect(&session, &user_tables, &vars, &ctx, None).await;
+        let effects = PolicyEffects::collect(&session, &tables, &vars, &ctx, None).await;
 
         // Pattern is stored as-is; expansion happens at injection time.
         let key = ("public".to_string(), "events".to_string());
@@ -4050,7 +4148,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
         let wasm_runtime = shared_wasm_runtime();
         let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
         let eval = DecisionEvalContext {
-            wasm_runtime: &wasm_runtime,
+            wasm_runtime,
             decision_ctx,
         };
 
@@ -4105,7 +4203,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
         let wasm_runtime = shared_wasm_runtime();
         let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
         let eval = DecisionEvalContext {
-            wasm_runtime: &wasm_runtime,
+            wasm_runtime,
             decision_ctx,
         };
 
@@ -4181,7 +4279,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
         let wasm_runtime = shared_wasm_runtime();
         let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
         let eval = DecisionEvalContext {
-            wasm_runtime: &wasm_runtime,
+            wasm_runtime,
             decision_ctx,
         };
 
@@ -4232,7 +4330,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
         let wasm_runtime = shared_wasm_runtime();
         let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
         let eval = DecisionEvalContext {
-            wasm_runtime: &wasm_runtime,
+            wasm_runtime,
             decision_ctx,
         };
 
@@ -4282,7 +4380,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
         let wasm_runtime = shared_wasm_runtime();
         let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
         let eval = DecisionEvalContext {
-            wasm_runtime: &wasm_runtime,
+            wasm_runtime,
             decision_ctx,
         };
 
@@ -4349,7 +4447,11 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
                 attributes: HashMap::new(),
             },
             &crate::decision::context::QueryMetadata {
-                tables: vec!["public.orders".to_string()],
+                tables: vec![crate::decision::context::TableRef {
+                    datasource: "test_ds".to_string(),
+                    schema: "public".to_string(),
+                    table: "orders".to_string(),
+                }],
                 columns: vec!["id".to_string(), "status".to_string()],
                 join_count: 0,
                 has_aggregation: false,
@@ -4359,7 +4461,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             },
         );
         let eval = DecisionEvalContext {
-            wasm_runtime: &wasm_runtime,
+            wasm_runtime,
             decision_ctx,
         };
 
@@ -4428,7 +4530,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
             },
         );
         let eval = DecisionEvalContext {
-            wasm_runtime: &wasm_runtime,
+            wasm_runtime,
             decision_ctx,
         };
 
@@ -4490,7 +4592,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
         let wasm_runtime = shared_wasm_runtime();
         let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
         let eval = DecisionEvalContext {
-            wasm_runtime: &wasm_runtime,
+            wasm_runtime,
             decision_ctx,
         };
 
@@ -4539,7 +4641,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
         let wasm_runtime = shared_wasm_runtime();
         let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
         let eval = DecisionEvalContext {
-            wasm_runtime: &wasm_runtime,
+            wasm_runtime,
             decision_ctx,
         };
 
@@ -4584,7 +4686,7 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
         let wasm_runtime = shared_wasm_runtime();
         let decision_ctx = serde_json::json!({"session": {"user": {"username": "alice"}}});
         let eval = DecisionEvalContext {
-            wasm_runtime: &wasm_runtime,
+            wasm_runtime,
             decision_ctx,
         };
 

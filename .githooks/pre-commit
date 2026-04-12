@@ -22,3 +22,15 @@ echo "→ admin-ui typecheck"
 
 echo "→ admin-ui tests"
 (cd admin-ui && npm run test:run)
+
+# Only run docs-site checks if files under docs-site/ are staged AND the
+# docs-site deps are installed (first clone won't have them yet).
+if git diff --cached --name-only --diff-filter=ACMR | grep -q '^docs-site/'; then
+  if [ -d "docs-site/node_modules" ]; then
+    echo "→ docs-site vitepress build"
+    (cd docs-site && npm run build)
+  else
+    echo "→ docs-site has staged changes but node_modules is missing; skipping build check"
+    echo "  Run 'cd docs-site && npm ci' once to enable docs checks in the hook."
+  fi
+fi

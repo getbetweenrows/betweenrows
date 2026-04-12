@@ -517,11 +517,21 @@ impl SchemaProvider for VirtualSchemaProvider {
             datafusion::error::DataFusionError::External(Box::new(std::io::Error::other(e)))
         })?;
 
+        // Use a *partial* table reference (schema.table) instead of a full
+        // 3-part reference (catalog.schema.table). The SqlTable's stored
+        // reference is emitted verbatim in the SQL pushed down to upstream
+        // PostgreSQL, and PG rejects 3-part names with
+        // "cross-database references are not implemented" whenever the
+        // catalog segment doesn't match the connected database. DataFusion's
+        // catalog lookup is still handled by VirtualCatalogProvider at the
+        // CatalogProvider layer — the SqlTable's internal reference is only
+        // used for SQL generation, so dropping the catalog qualifier here is
+        // safe and matches what every other postgres client emits.
         let table = SqlTable::new_with_schema(
             "postgres",
             &pool,
             arrow_schema,
-            TableReference::full("postgres", self.schema_name.as_str(), name),
+            TableReference::partial(self.schema_name.as_str(), name),
         )
         .with_dialect(Arc::new(BetweenRowsPostgresDialect));
 
@@ -773,11 +783,22 @@ impl datafusion::optimizer::OptimizerRule for EmptyProjectionFixRule {
 /// information_schema queries complete instantly without an upstream connection.
 ///
 /// `default_schema` is the alias (or real name when no alias) of the schema to
-/// use as the default search path (replaces the hard-coded `"public"`).
+/// use as the default (replaces the hard-coded `"public"`).
+///
+/// `datasource_name` is the BetweenRows datasource label (not the upstream
+/// PG database name). It's used as DataFusion's catalog identifier so users
+/// can write 3-part references like `SELECT * FROM prod.public.orders` where
+/// `prod` is the datasource they connected to. Keeping this label stable
+/// across the three DataFusion call sites below (default, register_catalog,
+/// setup_pg_catalog) is required — they must all agree or the catalog
+/// lookup fails. The upstream PG database name stays confined to
+/// `DataSourceConfig.database` for connection setup and is never exposed as
+/// an identifier users can type.
 async fn create_session_context_from_catalog(
     catalog_schemas: HashMap<String, VirtualCatalogSchema>,
     lazy_pool: Arc<LazyPool>,
     default_schema: &str,
+    datasource_name: &str,
 ) -> Result<SessionContext, Box<dyn std::error::Error + Send + Sync>> {
     // Build VirtualSchemaProviders — all share the same lazy pool.
     // The HashMap key is the alias (user-facing); schema_name inside the
@@ -807,13 +828,13 @@ async fn create_session_context_from_catalog(
 
     let config = SessionConfig::new()
         .with_information_schema(true)
-        .with_default_catalog_and_schema("postgres", default_schema);
+        .with_default_catalog_and_schema(datasource_name, default_schema);
     let mut ctx = SessionContext::new_with_config(config);
     ctx.add_optimizer_rule(Arc::new(ScanFilterProjectionFixRule));
     ctx.add_optimizer_rule(Arc::new(EmptyProjectionFixRule));
-    ctx.register_catalog("postgres", Arc::new(catalog));
+    ctx.register_catalog(datasource_name, Arc::new(catalog));
 
-    setup_pg_catalog(&ctx, "postgres", ProxyCatalogContext)
+    setup_pg_catalog(&ctx, datasource_name, ProxyCatalogContext)
         .map_err(|e| format!("Failed to setup pg_catalog: {}", e))?;
 
     datafusion_functions_json::register_all(&mut ctx)
@@ -1515,8 +1536,13 @@ impl EngineCache {
             select_default_schema(&filtered_schemas)
         };
 
-        let ctx = create_session_context_from_catalog(filtered_schemas, lazy_pool, &default_schema)
-            .await?;
+        let ctx = create_session_context_from_catalog(
+            filtered_schemas,
+            lazy_pool,
+            &default_schema,
+            datasource_name,
+        )
+        .await?;
         Ok(Arc::new(ctx))
     }
 

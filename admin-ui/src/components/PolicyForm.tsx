@@ -276,7 +276,7 @@ export function PolicyForm({ initial, onSubmit, submitLabel, isSubmitting, error
   const [attrDefs, setAttrDefs] = useState<AttributeDefinition[]>([])
   useEffect(() => {
     listAttributeDefinitions({ entity_type: 'user', page_size: 200 })
-      .then((res) => setAttrDefs(res.data))
+      .then((res) => setAttrDefs(res.data ?? []))
       .catch(() => {})
   }, [])
   const templateItems = useMemo(

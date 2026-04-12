@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-04-11
+
+### Added
+
+- **[Proxy] Extensive policy enforcement tests for aggregates, HAVING, window functions, CTEs, and subqueries** — +1240 lines in `policy_enforcement.rs` covering how column masks, column denies, and column allows interact with `COUNT(DISTINCT)`, `GROUP BY` / `HAVING`, `ROW_NUMBER() OVER (ORDER BY ...)`, CTEs, and subqueries. Ensures masked values cannot leak through aggregates or window ordering.
+- **[Docs] Security vectors documentation overhaul** — major expansion of `docs/security-vectors.md` with new attack vectors, defenses, and test back-references; `docs/permission-system.md` updated in lockstep.
+- **[Demo] Ecommerce demo refresh** — new `compose.demo.yaml`, new `setup.sh` automation script, updated `schema.sql` and `seed.py`, refreshed `policies.yaml` and `requirements.txt`, and a rewritten README.
+
 ### Changed
 
 - **[Proxy] BREAKING: `ctx.query.tables` is now an array of objects, not strings** — decision functions with `evaluate_context = "query"` previously received `ctx.query.tables` as `string[]` (e.g. `["public.orders"]`). It is now `Array<{datasource, schema, table}>`, so decision function JS must access the fields explicitly. Bare references like `SELECT * FROM orders` now also resolve to the session's default schema (e.g. `public`) rather than an empty schema segment, so qualified and unqualified references produce identical entries.
@@ -22,6 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ctx.query.tables.some(t => t.schema === "public" && t.table === "orders")
   ctx.query.tables.some(t => t.schema === "public")
   ```
+- **[Admin UI] Form polish** — small tweaks to `CatalogDiscoveryWizard`, `DecisionFunctionModal`, `PolicyForm`, and `DataSourceEditPage`.
+
+### Fixed
+
+- **[Proxy] Security: bare table references could bypass schema-scoped policies** — unqualified references like `FROM orders` previously used an empty schema segment as the policy lookup key, so a policy targeting `schemas: ["public"]` would not match and could be bypassed by omitting the prefix. Bare references now fall back to the session's default schema, which DataFusion is already configured with at connect time (`SET search_path` is blocked upstream by `ReadOnlyHook`). Tracked as vector #71 in `docs/security-vectors.md`.
+
+### Infrastructure
+
+- **[CI] Pre-commit hook runs `docs-site` VitePress build when docs-site changes are staged** — guarded by a `docs-site/node_modules` check so fresh clones without docs deps installed are not blocked.
+- **[CI] `docs-site` GitHub Actions job added then disabled** — the job is commented out until `docs-site/` lands in the repo.
 
 ## [0.14.1] - 2026-04-09
 

@@ -102,12 +102,22 @@ export function PoliciesListPage() {
               {data?.data.map((policy) => (
                 <tr key={policy.id} className="hover:bg-gray-50">
                   <td className="px-4 py-3">
-                    <div className="font-medium text-gray-900">{policy.name}</div>
-                    {policy.description && (
-                      <div className="text-xs text-gray-500 mt-0.5 truncate max-w-xs">
-                        {policy.description}
+                    <div className="max-w-xs">
+                      <div
+                        className="font-medium text-gray-900 truncate"
+                        title={policy.name}
+                      >
+                        {policy.name}
                       </div>
-                    )}
+                      {policy.description && (
+                        <div
+                          className="text-xs text-gray-500 mt-0.5 truncate"
+                          title={policy.description}
+                        >
+                          {policy.description}
+                        </div>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-3">
                     <CopyableId id={policy.id} short />

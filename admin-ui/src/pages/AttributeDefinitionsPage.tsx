@@ -168,15 +168,22 @@ export function AttributeDefinitionsPage() {
               {items.map((def) => (
                 <tr key={def.id} className="hover:bg-gray-50 transition-colors">
                   <td className="px-4 py-3">
-                    <div className="font-medium text-gray-900">{def.display_name}</div>
-                    {def.description && (
+                    <div className="max-w-xs">
                       <div
-                        className="text-xs text-gray-500 mt-0.5 truncate max-w-xs"
-                        title={def.description}
+                        className="font-medium text-gray-900 truncate"
+                        title={def.display_name}
                       >
-                        {def.description}
+                        {def.display_name}
                       </div>
-                    )}
+                      {def.description && (
+                        <div
+                          className="text-xs text-gray-500 mt-0.5 truncate"
+                          title={def.description}
+                        >
+                          {def.description}
+                        </div>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-3">
                     <code className="inline-block font-mono text-xs text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">

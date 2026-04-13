@@ -571,17 +571,87 @@ Given complexity of new policy system (interaction with DataFusion and PostgreSQ
 
 ### Multi Data Source Type Support
 
-- Expand beyond PostgreSQL to support additional data source types:
-  - SQLite
-  - MySQL
-  - Amazon Athena
-  - Amazon Redshift
-  - Snowflake
-  - DuckDB
-  - S3 files (Parquet, CSV, JSON)
-- Abstract data source connection layer to support multiple backends
-- Preserve existing policy enforcement (row filter, column mask, deny) across all source types
-- Catalog discovery and schema introspection per source type
+Expand beyond PostgreSQL to support additional upstream datasource types. Policy enforcement (row filters, column masks, deny/allow rules, decision functions) operates at the DataFusion `LogicalPlan` level and is already backend-agnostic — the work is in the connection/discovery/dialect plumbing.
+
+#### `datafusion-table-providers` Backends
+
+The same crate we already depend on (`v0.10`, `postgres` feature) ships multiple backends behind Cargo feature flags:
+
+| Feature | Backend | Covers |
+|---|---|---|
+| `postgres` | PostgreSQL | PG, Redshift, CockroachDB, Aurora, AlloyDB |
+| `mysql` | MySQL | MySQL, MariaDB, TiDB |
+| `sqlite` | SQLite | SQLite |
+| `duckdb` | DuckDB | DuckDB (+ extensions for Iceberg, Delta, S3) |
+| `clickhouse` | ClickHouse | ClickHouse |
+| `flight` | Arrow Flight SQL | Databricks, Dremio, Trino (experimental) |
+| `adbc` | Arrow Database Connectivity | Snowflake (via `adbc_snowflake` driver) |
+| `odbc` | ODBC | Anything with an ODBC driver |
+
+All backends implement the same `SqlTable` / `TableProvider` interface with filter pushdown.
+
+#### Cloud Warehouse Paths
+
+| Backend | Best Path | Notes |
+|---|---|---|
+| **Redshift** | `postgres` feature — Redshift speaks PG wire protocol | Dialect differences (forked from PG 8.x) |
+| **Snowflake** | ADBC — official `adbc_snowflake` Rust driver exists | Medium maturity |
+| **Databricks** | Flight SQL — native support in SQL Warehouses | Good maturity |
+| **Trino/Presto** | Flight SQL (experimental in Trino 411+) or ODBC | Low-medium maturity |
+| **BigQuery** | Custom `TableProvider` using Storage Read API | Must build — returns Arrow natively |
+| **Athena** | ODBC or custom REST wrapper | Hardest target — async REST-only API |
+
+#### Recommended Priority
+
+1. **PostgreSQL wire protocol as a "type"** — immediately unlocks Redshift, CockroachDB, Aurora, AlloyDB with minimal work (mostly dialect-aware SQL unparsing)
+2. **Flight SQL** — gets Databricks, positions for Trino/Dremio
+3. **ADBC** — gets Snowflake specifically
+4. **MySQL** — large user base, mature support in `datafusion-table-providers`
+
+#### Design: `DatasourceBackend` Trait
+
+Introduce a `DatasourceBackend` trait with a factory function, matching the existing `DiscoveryProvider` pattern. Three concerns, three traits:
+
+| Concern | Trait | Status |
+|---|---|---|
+| Config field definitions | `DataSourceTypeDef` | Exists (`admin/datasource_types.rs`) |
+| Catalog discovery | `DiscoveryProvider` | Exists (`discovery/mod.rs`) |
+| Engine / connection / dialect | `DatasourceBackend` | **New — this is the work** |
+
+The `DatasourceBackend` trait covers:
+- **Pool creation** — build the backend-specific connection pool
+- **Table provider creation** — create a DataFusion `TableProvider` for a specific table
+- **SQL dialect** — return the backend-specific `Dialect` impl for filter pushdown unparsing
+- **Connection params** — translate decrypted config into backend-specific parameter format
+
+All backend-specific code lives in one directory per backend:
+
+```
+proxy/src/backend/
+    mod.rs                # DatasourceBackend trait + create_backend() factory
+    postgres/             # PostgresBackend, PostgresDiscoveryProvider, BetweenRowsPostgresDialect
+    mysql/                # MySQLBackend, MySQLDiscoveryProvider, MySQLDialect
+    flight/               # FlightSqlBackend, FlightDiscoveryProvider
+```
+
+Adding a new backend = one new directory + one match arm in the factory. Zero changes to engine, policies, RBAC, audit, or admin UI.
+
+#### Key Risk
+
+SQL dialect differences are the main source of bugs. Each backend has different function names, quoting rules, type casting syntax, and JSON operator support. Filter pushdown can generate invalid SQL for a specific backend if the dialect unparser doesn't handle an expression correctly. Per-backend dialect integration tests are essential.
+
+#### Isolation Rules
+
+Each backend must be fully isolated so that changes to one cannot break another:
+
+- **Cargo feature flags** — each backend module is gated behind `#[cfg(feature = "mysql")]` etc. Compiling with `--features postgres` must not pull in MySQL deps or fail to compile. The `postgres` feature is the only default.
+- **No cross-backend imports** — `postgres/` never imports from `mysql/`, and vice versa. The only shared surface is the trait interface in `backend/mod.rs`.
+- **No `match ds_type` outside the factory** — backend-specific logic lives in the trait impl, not in `if ds_type == "snowflake"` branches scattered through engine code.
+- **Test isolation** — each backend's integration tests are in a separate test binary or behind a feature flag so `cargo test --features postgres` doesn't require MySQL Docker to be running.
+
+#### Testing
+
+Two tiers: (1) **DataFusion-native tests** — register in-memory Arrow tables as `TableProvider`s, test all policy logic regardless of backend, free and fast in CI. (2) **Per-backend integration tests** — Docker-based databases or emulators (Postgres, MySQL, LocalStack Snowflake emulator, Trino for Athena), test catalog discovery, SQL unparser correctness, filter pushdown, and type mapping.
 
 ## Infrastructure & Deployment
 

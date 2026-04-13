@@ -1,6 +1,6 @@
-# Security Vectors
+# Threat Model
 
-BetweenRows' threat model. Each entry describes a potential bypass or information leak, the concrete attacks that realize it, the defense that prevents them, and the tests that verify the defense holds.
+Each entry describes a potential bypass or information leak, the concrete attacks that realize it, the defense that prevents them, and the tests that verify the defense holds.
 
 ## Entry format
 
@@ -801,7 +801,7 @@ Integration tests live in `proxy/tests/policy_enforcement.rs` and spin up a real
 
 ### 46. Effective members source annotation must identify the actual direct-member role
 
-**Vector**: The admin UI's Members tab for a parent role lists all effective members reachable through inheritance and annotates each entry with "via role '<name>'" to show how the membership arose. If the annotation names the wrong role, admins make incorrect decisions about where to revoke a membership — removing a user from the wrong role either fails to revoke their access or over-revokes from an unrelated role.
+**Vector**: The admin UI's Members tab for a parent role lists all effective members reachable through inheritance and annotates each entry with "via role '(name)'" to show how the membership arose. If the annotation names the wrong role, admins make incorrect decisions about where to revoke a membership — removing a user from the wrong role either fails to revoke their access or over-revokes from an unrelated role.
 
 **Attacks**:
   1. **Annotation shows top-level role instead of direct-member role** — parent role `data-analysts`, child role `data-architect` (which inherits from `data-analysts`), user U is a direct member of `data-architect`; when viewing `data-analysts`'s effective members, U's annotation must say "via role 'data-architect'" (the role U is actually a member of), not "via role 'data-analysts'" (the role being viewed)

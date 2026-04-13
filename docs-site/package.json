@@ -1,0 +1,23 @@
+{
+  "name": "betweenrows-docs",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vitepress dev docs --port 5174",
+    "build": "vitepress build docs",
+    "preview": "vitepress preview docs --port 5174",
+    "check": "vitepress build docs"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitepress": "^1.6.4",
+    "vitepress-plugin-llms": "^1.12.0",
+    "vue": "^3.5.13"
+  },
+  "dependencies": {
+    "@fontsource-variable/geist": "^5.2.8",
+    "@fontsource-variable/geist-mono": "^5.2.7",
+    "medium-zoom": "^1.1.0"
+  }
+}

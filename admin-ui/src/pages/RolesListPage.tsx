@@ -92,15 +92,22 @@ export function RolesListPage() {
                   onClick={() => navigate(`/roles/${role.id}`)}
                 >
                   <td className="px-4 py-3">
-                    <div className="font-medium text-gray-900">{role.name}</div>
-                    {role.description && (
+                    <div className="max-w-xs">
                       <div
-                        className="text-xs text-gray-500 mt-0.5 truncate max-w-xs"
-                        title={role.description}
+                        className="font-medium text-gray-900 truncate"
+                        title={role.name}
                       >
-                        {role.description}
+                        {role.name}
                       </div>
-                    )}
+                      {role.description && (
+                        <div
+                          className="text-xs text-gray-500 mt-0.5 truncate"
+                          title={role.description}
+                        >
+                          {role.description}
+                        </div>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                     <CopyableId id={role.id} short />

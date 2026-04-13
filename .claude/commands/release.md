@@ -10,7 +10,15 @@ description: Prepare and tag a new release for this project. Both apps (proxy an
 - Run `git log --oneline $(git describe --tags --abbrev=0 2>/dev/null)..HEAD` to get commits since the last tag (or all commits if no tag exists).
 - Run `git describe --tags --abbrev=0 2>/dev/null` to find the current version.
 
-### 2. Draft changelog entries
+### 2. Sync docs-site against the release window
+
+Invoke `/docs-sync <prev-tag>..HEAD` (where `<prev-tag>` is the tag from step 1) to detect drift between the release window's changes and the public docs. The command prints any drifts inline and waits for your decision before modifying anything. Review the findings and reply with `apply`, `apply N,M`, `skip N`, `skip all`, or `explain N`.
+
+Docs-site edits become part of the release commit in step 4, so the published documentation matches the released version when the tag pushes. Do not proceed until `/docs-sync` reports either "no drift detected" or has finished applying your approved edits and `npm run build` has passed.
+
+If this is the first release after adding `/docs-sync` to the workflow (or if drift looks suspicious), run `/docs-sync --full` once instead for a whole-codebase audit — it spawns parallel subagents against every docs-site cluster and surfaces accumulated drift.
+
+### 3. Draft changelog entries
 
 Draft entries **solely from the commit messages** gathered in step 1. Do not use the existing `## [Unreleased]` section in `CHANGELOG.md` as a source — it may contain entries for features that were planned but never implemented. The commits are the ground truth.
 
@@ -38,7 +46,7 @@ Do not include merge commits, formatting-only commits, or version bump commits. 
 
 Show the draft to the user and ask them to confirm or edit it before proceeding. Also ask for the new version number (suggest one based on the changes: patch for fixes only, minor for new features, major for breaking changes).
 
-### 3. Update files
+### 4. Update files
 
 Once the user confirms the version and changelog entries:
 
@@ -50,13 +58,13 @@ Once the user confirms the version and changelog entries:
 
 4. **`admin-ui/package.json`** — Update the `"version": "..."` field.
 
-### 4. Commit and tag
+### 5. Commit and tag
 
-- Stage the four files above plus `Cargo.lock` (updated when Cargo.toml versions change).
+- Stage the four files above plus `Cargo.lock` (updated when Cargo.toml versions change) **and any docs-site edits applied in step 2**.
 - Commit with message: `Release vX.Y.Z`
 - Create an annotated tag: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
 
-### 5. Finish
+### 6. Finish
 
 Tell the user the release is ready and show the exact command to push:
 

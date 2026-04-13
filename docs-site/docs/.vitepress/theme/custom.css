@@ -1,0 +1,6 @@
+:root {
+  --vp-font-family-base: 'Geist Variable', system-ui, -apple-system,
+    'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --vp-font-family-mono: 'Geist Mono Variable', ui-monospace, 'SF Mono',
+    Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+}

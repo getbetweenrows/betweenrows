@@ -4,7 +4,7 @@
 Always use context7 when I need code generation, setup or configuration steps, or library/API documentation. Automatically use the Context7 MCP tools to resolve library id and get library docs without me having to explicitly ask.
 
 ## Project Overview
-QueryProxy is a Rust PostgreSQL wire protocol proxy with a React admin UI. See `README.md` for full details.
+BetweenRows is a Rust PostgreSQL wire protocol proxy with a React admin UI that enforces row-level security, column masking, and access control without changing your application or database. See `README.md` for full details.
 
 App-level instructions:
 - Rust proxy → `proxy/CLAUDE.md`
@@ -15,9 +15,24 @@ App-level instructions:
 proxy/          Rust proxy server (pgwire, DataFusion, axum)
 admin-ui/       React admin frontend (Vite, TanStack Query, Tailwind)
 migration/      SeaORM migrations
+docs/           Design docs, philosophy, roadmap rationale, security vectors, story catalog
+docs-site/      Public documentation site (VitePress) — downstream consumer of this repo
 .githooks/      pre-commit: cargo fmt, clippy, admin-ui tests
 .github/workflows/cicd.yml   CI test → Docker publish → Fly deploy
 ```
+
+## Documentation architecture
+
+Two documentation trees exist and they have a **one-way dependency**:
+
+- **`docs/`** is design-time material owned by betweenrows development: policy system philosophy, roadmap rationale and tech-debt notes, user story catalog, security vector taxonomy. Code comments, `README.md`, `CONTRIBUTING.md`, `proxy/CLAUDE.md`, and this file may reference `docs/*.md` freely — these are the canonical source of design rationale.
+- **`docs-site/`** is the public VitePress site published at `docs.getbetweenrows.com`. It is a **downstream consumer** of betweenrows: it reads from `../docs/` via `@include:` transclusion (e.g., `concepts/threat-model.md` transcludes `docs/security-vectors.md`) and reads source code directly for guide field tables.
+
+**The dependency flows one way.** Nothing in `proxy/`, `admin-ui/`, `migration/`, `scripts/`, `.githooks/`, `.github/`, `README.md`, `CONTRIBUTING.md`, or `docs/` may reference `docs-site/`. betweenrows developers never need to think about `docs-site/` when building features — that separation is the whole point.
+
+Drift between `docs/` and `docs-site/docs/` is addressed by the `/docs-sync` command (see `.claude/commands/docs-sync.md`). It runs automatically as step 2 of `/release` (right after pre-flight checks, before the changelog is drafted), and can also be run manually mid-cycle (`/docs-sync main..HEAD`) or as a whole-codebase deep audit (`/docs-sync --full`). The command prints any drift findings inline and waits for explicit confirmation before editing any docs-site page. Enforcement of the one-way rule is by convention, not by CI — the rule holds today by virtue of how the trees grew, and `/docs-sync` surfaces any violations as drift findings.
+
+**Default scope for ambiguous doc references.** When the user says "docs", "the docs", "documentation", "update the docs", "fix the docs", "check the docs", or similar without explicitly naming `docs-site`, VitePress, or "the public docs site", assume they mean **everything outside `docs-site/`**: the design docs under `docs/`, code comments, `README.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, and CLAUDE.md files. Only treat a request as targeting `docs-site/` when the user says so explicitly (e.g., "update docs-site", "fix the VitePress page", "the public docs site"). Otherwise the request is about the betweenrows development side of the boundary, and `docs-site/` is off-limits — it has its own sync path via `/docs-sync`.
 
 ## Pre-commit Hook
 `.githooks/pre-commit` runs `cargo fmt --check`, `cargo clippy`, and `admin-ui` tests. Enable once per clone:
@@ -30,7 +45,7 @@ git config core.hooksPath .githooks
 - Push `v*` tag → tests → build & publish Docker image (tagged `X.Y.Z` + `X.Y`) → deploy to Fly.io
 - `workflow_dispatch` in GitHub Actions → redeploy a specific existing version
 
-Use `/release` to prepare the changelog, bump versions, commit, and tag. Use `/commit` for day-to-day commits.
+Use `/release` to prepare the changelog, bump versions, commit, and tag — it invokes `/docs-sync` as step 2 to reconcile `docs-site/` with the release window's changes. Use `/commit` for day-to-day commits. Run `/docs-sync` directly when you want to update `docs-site/` mid-cycle after landing a significant feature, and `/docs-sync --full` for an occasional whole-codebase drift audit.
 
 ## General Rules
 - **Never hardcode secrets** — API keys, passwords, credentials, and tokens must come from environment variables or encrypted config, never literals in source code.

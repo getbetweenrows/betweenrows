@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-04-13
+
+### Added
+
+- **[Docs] Public documentation site** — full VitePress site at `docs-site/` published to `docs.getbetweenrows.com`.
+  - Installation (Docker, Fly, from source), Start (introduction, quickstart), Concepts (architecture, policy model, security overview, threat model), Guides (policies, users/roles, attributes, data sources, decision functions, audit debugging, recipes), Reference (REST API, config, CLI, policy types, template expressions, audit fields, glossary, demo schema), Operations (backups, upgrading, troubleshooting, known limitations, rename safety), About (roadmap, changelog, license, report an issue).
+  - `concepts/threat-model.md` auto-transcludes `docs/security-vectors.md` so the public threat model stays in lockstep with the design source.
+- **[Docs] `SECURITY.md`** — root-level vulnerability disclosure policy.
+
+### Changed
+
+- **[Admin UI] List-page truncation polish** — Attributes, Policies, and Roles list tables now truncate long names and descriptions with tooltip titles instead of letting them push the table layout.
+- **[Admin UI] "Report an issue" footer link** — now points at `docs.getbetweenrows.com/about/report-an-issue` instead of the GitHub issues page.
+- **[Docs] Threat model H1** — `docs/security-vectors.md` retitled from "Security Vectors" to "Threat Model" so the transcluded public page has the right heading.
+
+### Infrastructure
+
+- **[Both] `/docs-sync` command** — new Claude Code workflow that detects drift between `docs/` + source and `docs-site/`, presents findings for review, and applies approved edits.
+  - Diff mode (`/docs-sync <range>`), full-codebase audit (`--full`), and single-page audit (`--page <path>`).
+  - Runs automatically as step 2 of `/release`.
+- **[Docs] `docs-site/.gitignore`** — `**/.vitepress/{dist,cache}/` now matches at any depth to guard against stray builds from the wrong cwd.
+
 ## [0.15.0] - 2026-04-11
 
 ### Added

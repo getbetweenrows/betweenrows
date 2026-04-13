@@ -1,6 +1,7 @@
-# VitePress build output and cache
-docs/.vitepress/dist/
-docs/.vitepress/cache/
+# VitePress build output and cache (match at any depth to guard
+# against stray builds run from the wrong cwd)
+**/.vitepress/dist/
+**/.vitepress/cache/
 
 # Dependencies
 node_modules/

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-04-14
+
+### Changed
+
+- **[Admin UI] Sidebar logo and favicon** — added a `logo.svg` next to the "BetweenRows" brand text in the admin sidebar header, and a `favicon.svg` for the browser tab.
+- **[Docs] Public documentation site sidebar restructure** — reorganized the VitePress sidebar into five top-level sections (Start, Concepts, Features, Guides, About), with Policy Types, Template Expressions, and Decision Functions nested under Policies. Deleted standalone reference pages (`reference/policy-types`, `reference/audit-log-fields`, `reference/cli`, `reference/admin-rest-api`, `about/changelog`, `about/license`) — content either folded into the guide it documents or replaced with an external link to the canonical source on GitHub (`LICENSE`, `CHANGELOG.md`).
+
 ## [0.16.1] - 2026-04-13
 
 ### Changed

@@ -58,9 +58,11 @@ Once the user confirms the version and changelog entries:
 
 4. **`admin-ui/package.json`** — Update the `"version": "..."` field.
 
+5. **`docs-site/docs/.vitepress/constants.ts`** — Update the `VERSION` constant. This is the single source of truth for the `{{VERSION}}` token substituted across every docs page at build time (see `docs-site/CLAUDE.md` → "Version-bump checklist"). Forgetting this leaves `docs.betweenrows.dev` showing the previous version in install/upgrade instructions.
+
 ### 5. Commit and tag
 
-- Stage the four files above plus `Cargo.lock` (updated when Cargo.toml versions change) **and any docs-site edits applied in step 2**.
+- Stage the five files above plus `Cargo.lock` (updated when Cargo.toml versions change) **and any docs-site edits applied in step 2**.
 - Commit with message: `Release vX.Y.Z`
 - Create an annotated tag: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
 

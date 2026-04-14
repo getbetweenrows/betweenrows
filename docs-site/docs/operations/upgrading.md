@@ -5,7 +5,7 @@ description: Safely upgrade BetweenRows between versions — pin the tag, back u
 
 # Upgrading
 
-Upgrades between minor versions can include database migrations, configuration changes, or API adjustments. Always upgrade deliberately, not automatically — pin your Docker image tag to a specific version (e.g. `0.15.0`) so that a container restart never crosses a release boundary on its own.
+Upgrades between minor versions can include database migrations, configuration changes, or API adjustments. Always upgrade deliberately, not automatically — pin your Docker image tag to a specific version (e.g. `{{VERSION}}`) so that a container restart never crosses a release boundary on its own.
 
 ## Upgrade checklist
 
@@ -25,7 +25,7 @@ Upgrades between minor versions can include database migrations, configuration c
 5. **Pull the new image.**
 
    ```sh
-   docker pull ghcr.io/getbetweenrows/betweenrows:0.15.0
+   docker pull ghcr.io/getbetweenrows/betweenrows:{{VERSION}}
    ```
 
 6. **Stop the old container, start the new one** with the same env vars and volume mount.
@@ -41,7 +41,7 @@ Upgrades between minor versions can include database migrations, configuration c
      -e BR_ADMIN_JWT_SECRET="$BR_ADMIN_JWT_SECRET" \
      -p 5434:5434 -p 5435:5435 \
      -v /srv/betweenrows/data:/data \
-     ghcr.io/getbetweenrows/betweenrows:0.15.0
+     ghcr.io/getbetweenrows/betweenrows:{{VERSION}}
    ```
 
    Or with Docker Compose: change the `image:` tag in `compose.yaml` and run `docker compose up -d`.
@@ -71,7 +71,7 @@ fly ssh console --app <your-app-name> -C "tar -czf /tmp/data.tgz /data"
 fly ssh sftp get /tmp/data.tgz ./data-backup-$(date +%F).tgz --app <your-app-name>
 
 # Deploy the new image
-fly deploy --image ghcr.io/getbetweenrows/betweenrows:0.15.0 --app <your-app-name>
+fly deploy --image ghcr.io/getbetweenrows/betweenrows:{{VERSION}} --app <your-app-name>
 
 # Tail logs during rollout
 fly logs --app <your-app-name>
@@ -109,13 +109,13 @@ If you deploy BetweenRows via an IaC or GitOps workflow, pin the tag in source c
 # compose.yaml
 services:
   betweenrows:
-    image: ghcr.io/getbetweenrows/betweenrows:0.15.0   # not :latest
+    image: ghcr.io/getbetweenrows/betweenrows:{{VERSION}}   # not :latest
 ```
 
 ```hcl
 # terraform
 resource "fly_app" "betweenrows" {
-  image = "ghcr.io/getbetweenrows/betweenrows:0.15.0"  # not :latest
+  image = "ghcr.io/getbetweenrows/betweenrows:{{VERSION}}"  # not :latest
 }
 ```
 
@@ -126,4 +126,4 @@ Treat version bumps as deliberate PRs — with changelog review in the PR descri
 - **[Changelog](/about/changelog)** — version history and breaking changes
 - **[Backups](/operations/backups)** — what to snapshot before upgrading
 - **[Troubleshooting](/operations/troubleshooting)** — if something goes wrong
-- **[License & alpha status](/about/license)** — alpha stability posture
+- **[License & Beta Status](/about/license)** — pre-1.0 stability posture

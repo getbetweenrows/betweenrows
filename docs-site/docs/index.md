@@ -43,13 +43,13 @@ features:
     link: /installation/docker
     linkText: Run in production
   - title: About
-    details: Changelog, roadmap, license, and alpha status.
+    details: Changelog, roadmap, and license.
     link: /about/changelog
     linkText: See what is new
 ---
 
 ::: tip
-Pin your Docker image to a specific version tag (e.g., `ghcr.io/getbetweenrows/betweenrows:0.15.0`) rather than `:latest` so upgrades stay deliberate. See [License & Alpha Status](/about/license) for the full release-stability picture.
+Pin your Docker image to a specific version tag (e.g., `ghcr.io/getbetweenrows/betweenrows:{{VERSION}}`) rather than `:latest` so upgrades stay deliberate. See [License & Beta Status](/about/license) for the full release-stability picture.
 :::
 
 ## For security and compliance reviewers

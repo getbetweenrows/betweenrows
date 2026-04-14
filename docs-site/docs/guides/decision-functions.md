@@ -8,7 +8,7 @@ description: Write JavaScript decision functions to conditionally gate policy en
 A decision function is a JavaScript function attached to a policy that gates whether the policy fires. When attached, the policy's effect (row filter, column mask, deny, etc.) only applies if the decision function returns `{ fire: true }`. This lets you build conditional policies — "deny access outside business hours", "mask salary only for non-HR users", "allow table access only for analysts querying fewer than 3 tables."
 
 ::: info
-Decision functions are functional, but the JS harness, context shape, and configuration options are still being refined between releases. See [License & Alpha Status](/about/license) for the release-stability picture, and the [changelog](/about/changelog) for specific changes.
+Decision functions are functional, but the JS harness, context shape, and configuration options are still being refined between releases. See [License & Beta Status](/about/license) for the release-stability picture, and the [changelog](/about/changelog) for specific changes.
 :::
 
 ## Purpose and when to use

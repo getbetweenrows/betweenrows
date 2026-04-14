@@ -91,7 +91,7 @@ fly ips allocate-v4 --app <app-name>
 Pull a specific image tag and redeploy:
 
 ```sh
-fly deploy --image ghcr.io/getbetweenrows/betweenrows:0.15.0 --app <your-app-name>
+fly deploy --image ghcr.io/getbetweenrows/betweenrows:{{VERSION}} --app <your-app-name>
 ```
 
 Or if your `fly.toml` already references a specific image tag, just:

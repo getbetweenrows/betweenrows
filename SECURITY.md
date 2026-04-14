@@ -36,15 +36,15 @@ Out of scope:
 - Denial-of-service via deliberately pathological SQL on an unprotected deployment. The proxy is not a DDoS shield.
 - Third-party integrations not maintained in this repository.
 
-## Alpha caveat
+## Known issues vs. vulnerabilities
 
-BetweenRows is pre-1.0 alpha software. The threat model, defenses, and known limitations are documented in the public docs:
+The threat model, defenses, and known limitations are documented in:
 
 - [Threat Model](docs-site/docs/concepts/threat-model.md)
 - [Security Overview](docs-site/docs/concepts/security-overview.md)
 - [Known Limitations](docs-site/docs/operations/known-limitations.md)
 
-Issues already listed in those pages are known trade-offs, not vulnerabilities — though reports that sharpen or contradict them are welcome.
+Issues already listed there are known trade-offs, not vulnerabilities — but reports that sharpen or contradict them are welcome.
 
 ## Credit
 

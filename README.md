@@ -2,26 +2,40 @@
 
 [![CI](https://github.com/getbetweenrows/betweenrows/actions/workflows/cicd.yml/badge.svg)](https://github.com/getbetweenrows/betweenrows/actions)
 [![Version](https://img.shields.io/github/v/tag/getbetweenrows/betweenrows?label=Version)](https://github.com/getbetweenrows/betweenrows/tags)
+[![Status: Beta](https://img.shields.io/badge/Status-Beta-orange.svg)](https://docs.betweenrows.dev/about/license)
 [![License: ELv2](https://img.shields.io/badge/License-ELv2-blue.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-GHCR-blue?logo=docker)](https://ghcr.io/getbetweenrows/betweenrows)
 [![Built with Rust](https://img.shields.io/badge/Built%20with-Rust-orange?logo=rust)](https://www.rust-lang.org)
 
-A SQL proxy that enforces row-level security, column masking, and access control — without changing your application or database.
+A fully customizable data access governance layer.
 
-BetweenRows sits between your users and your data sources, applying security policies on every query. Define who can see what through an admin UI, and every connection through the proxy is automatically governed. Currently supports PostgreSQL data sources.
+BetweenRows is a SQL-aware proxy that enforces fine-grained access policies — masking, filtering, and blocking — in real-time. Works with PostgreSQL today; warehouses and lakehouses on the roadmap. Free to self-host. Source-available.
 
-> **Alpha software.** BetweenRows is under active development and not yet production-ready. APIs, configuration, and data formats may change between releases. Pin your Docker image to a specific version tag (e.g., `ghcr.io/getbetweenrows/betweenrows:0.11.0`) rather than using `latest`. The software is provided as-is with no warranty — use at your own risk. We welcome feedback and bug reports via [GitHub Issues](https://github.com/getbetweenrows/betweenrows/issues).
+📖 **Full documentation:** [docs.betweenrows.dev](https://docs.betweenrows.dev)
 
-## ✨ Why
+## ✨ Why BetweenRows
 
-- **No application changes** — policies are enforced at the proxy layer, not in your app code
-- **Row-level filtering** — automatically filter rows based on user identity (role, department, tenant)
-- **Column masking** — mask sensitive columns (SSN, email, salary) with expressions, not views
-- **Column & table deny** — hide columns or entire tables from specific users or roles
-- **Full audit trail** — every query is logged with the original SQL, rewritten SQL, and policies applied
-- **RBAC + ABAC** — assign policies via roles, user attributes, or programmable decision functions (JavaScript/WASM)
+**Enforcement & audit**
+- SQL-aware — parses every query, then masks columns, filters rows, or blocks operations at the level where data actually moves.
+- Every query and every policy decision is logged end-to-end — who ran what, when, and what BetweenRows did about it.
 
-Built with **Rust**, **DataFusion**, **pgwire**, and **React**.
+**Fully customizable**
+- Composable roles, custom attributes, and JavaScript decision functions — all first-class variables in policy expressions that evaluate at query time.
+- RBAC, ABAC, and programmable logic in one unified engine.
+
+**Free and source-available**
+- Self-host with no usage limits and no seat fees.
+- Inspect the code. Run it on your infrastructure. No black-box security.
+
+Built in **Rust** on **DataFusion** — low overhead, memory-safe, production-grade query rewriting.
+
+## 📸 Screenshots
+
+| | |
+|---|---|
+| ![Admin dashboard](docs-site/docs/public/screenshots/introduction-dashboard-v0.14.png) | The admin dashboard — data sources, users, roles, and policies at a glance. |
+| ![Row filter policy editor](docs-site/docs/public/screenshots/row-filters-policy-editor-v0.15.png) | Row filter policy editor — write a `WHERE` expression with template variables like `{user.tenant}`. |
+| ![Query audit detail](docs-site/docs/public/screenshots/row-filters-audit-v0.15.png) | Query audit — see the original SQL, the rewritten SQL, and which policies fired. |
 
 ## 🏗️ Components
 
@@ -58,7 +72,7 @@ docker run -d \
   -e BR_ADMIN_PASSWORD=changeme \
   -p 5434:5434 -p 5435:5435 \
   -v betweenrows_data:/data \
-  ghcr.io/getbetweenrows/betweenrows:latest
+  ghcr.io/getbetweenrows/betweenrows:latest  # demo only — pin a specific tag for anything real
 ```
 
 | Variable                    | Required | Default | Description                                                                                                                                                                                                                                                                            |
@@ -138,7 +152,7 @@ Key concepts:
 - **Deny wins** — deny policies are evaluated before permit policies and cannot be overridden
 - **Visibility follows access** — denied columns and tables are removed from the user's schema at connection time, so they don't appear in client tools like TablePlus or DBeaver
 
-See [docs/permission-system.md](docs/permission-system.md) for the full guide.
+See [docs-site/docs/concepts/policy-model.md](docs-site/docs/concepts/policy-model.md) for the full guide.
 
 ## 📋 Catalog Workflow
 
@@ -159,7 +173,7 @@ Everything you can do in the admin UI can also be done via the API — useful fo
 
 ## 💻 CLI
 
-Create users without the UI — useful for scripting and automation. If you're locked out of the admin UI, use `--admin` to create a new admin user to regain access. You can then change passwords through the UI. A forgot/reset password feature is on the [roadmap](docs/roadmap.md):
+Create users without the UI — useful for scripting and automation. If you're locked out of the admin UI, use `--admin` to create a new admin user to regain access. You can then change passwords through the UI. A forgot/reset password feature is on the [roadmap](docs-site/docs/about/roadmap.md):
 
 ```bash
 # Docker
@@ -172,7 +186,7 @@ cargo run -p proxy -- user create --username alice --password secret
 
 ## 🗺️ Roadmap
 
-See [docs/roadmap.md](docs/roadmap.md) for planned features including shadow mode, governance workflows, and more.
+See [docs-site/docs/about/roadmap.md](docs-site/docs/about/roadmap.md) for planned features including shadow mode, governance workflows, and more.
 
 ## 🤝 Contributing
 

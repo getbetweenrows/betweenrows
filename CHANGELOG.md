@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-04-13
+
+### Changed
+
+- **[Docs] Repositioned from "alpha" to "beta"** — single canonical page (`docs-site/docs/about/license.md`, now "License & Beta Status") describes pre-1.0 stability, what's stable vs. less stable, and the recommended posture for early adopters. Scattered "alpha" caveats across README, SECURITY.md, the VitePress sidebar/footer, and a dozen docs pages have been deleted or reframed — substance kept (pin tags, read changelog, file issues), positioning dropped from places that were just repeating the canonical disclaimer. Skipping the alpha→beta transition removes a fuzzy intermediate gate; the next stage is 1.0 with API stability commitments.
+
+### Infrastructure
+
+- **[Docs] Switch public documentation site domain to `docs.betweenrows.dev`** — centralize URLs + OG image in `docs-site/docs/.vitepress/constants.ts`, add a path-gated Cloudflare Pages deploy workflow (`.github/workflows/docs-site-deploy.yml`), and enable Cloudflare Web Analytics via automatic edge injection. Remove obsolete `docs-site/internal/` notes and the commented-out docs-site CI job.
+- **[Docs] Tokenize release version across docs pages** — markdown files use a `{{VERSION}}` token substituted at build time from `constants.ts` via a Vite pre-transform. Covers rendered HTML, the copy-as-markdown `.md` output, and `llms-full.txt`. Future releases bump one file instead of ~13.
+- **[Docs] README polish and marketing alignment** — headline + pillars rewritten to match the `www` landing page (`A fully customizable data access governance layer.`), added `docs.betweenrows.dev` link and a screenshots table linking into `docs-site/docs/public/screenshots/`, replaced the stale `0.11.0` Docker tag example with a pointer to the Tags page, and routed the permission-system and roadmap cross-references into the public docs. Relaxed the documentation-architecture rule in `.claude/CLAUDE.md` so `README.md`, `SECURITY.md`, and `CONTRIBUTING.md` may link into `docs-site/` for self-contained GitHub rendering (code trees still may not).
+- **[Admin UI] "Report an issue" footer link** — bumped to the new `docs.betweenrows.dev` domain.
+- **[Repo] `.github/ISSUE_TEMPLATE/config.yml`** — directs security reports to GitHub Security Advisories and questions to Discussions.
+- **[Repo] `SECURITY.md` links** — rewritten to reference in-repo files instead of external docs URLs, so the GitHub Security tab is self-contained.
+
 ## [0.16.0] - 2026-04-13
 
 ### Added

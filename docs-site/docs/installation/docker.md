@@ -15,11 +15,11 @@ docker run -d \
   -e BR_ADMIN_PASSWORD=changeme \
   -p 5434:5434 -p 5435:5435 \
   -v betweenrows_data:/data \
-  ghcr.io/getbetweenrows/betweenrows:0.15.0
+  ghcr.io/getbetweenrows/betweenrows:{{VERSION}}
 ```
 
 ::: tip
-**Always pin the image tag** to a specific version like `:0.15.0`. `:latest` will move you across release boundaries on every container restart — upgrade deliberately instead. See [Upgrading](/operations/upgrading) for how to change versions safely.
+**Always pin the image tag** to a specific version like `:{{VERSION}}`. `:latest` will move you across release boundaries on every container restart — upgrade deliberately instead. See [Upgrading](/operations/upgrading) for how to change versions safely.
 :::
 
 Once the container is up, open `http://localhost:5435` and log in with your admin credentials:
@@ -53,7 +53,7 @@ docker run -d \
   -e RUST_LOG=info \
   -p 5434:5434 -p 5435:5435 \
   -v /srv/betweenrows/data:/data \
-  ghcr.io/getbetweenrows/betweenrows:0.15.0
+  ghcr.io/getbetweenrows/betweenrows:{{VERSION}}
 ```
 
 - `BR_ENCRYPTION_KEY` must be a **64-character hex string** (32 bytes → AES-256-GCM key). If you change this value after secrets have been stored, existing secrets become unreadable.
@@ -106,7 +106,7 @@ For reproducible local setups, a `compose.yaml` snippet:
 ```yaml
 services:
   betweenrows:
-    image: ghcr.io/getbetweenrows/betweenrows:0.15.0
+    image: ghcr.io/getbetweenrows/betweenrows:{{VERSION}}
     container_name: betweenrows
     restart: unless-stopped
     ports:

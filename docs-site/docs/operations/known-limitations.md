@@ -1,6 +1,6 @@
 ---
 title: Known Limitations
-description: Current limitations, security trade-offs, and alpha caveats — what BetweenRows does not do, what it does oddly, and what to avoid in production.
+description: Current limitations, security trade-offs, and production caveats — what BetweenRows does not do, what it does oddly, and what to avoid in production.
 ---
 
 # Known Limitations

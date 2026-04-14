@@ -11,4 +11,4 @@ Released versions are published as git tags — see **[Tags](https://github.com/
 
 ## Release cadence
 
-During alpha, releases are cut when there is something worth shipping. Versions follow semantic versioning, but pre-1.0 breaking changes can happen in minor version bumps. **Read the changelog before upgrading** — see [Upgrading](/operations/upgrading) for the safe upgrade procedure.
+Releases are cut when there is something worth shipping. Versions follow semantic versioning, but pre-1.0 means breaking changes can land in minor version bumps. **Read the changelog before upgrading** — see [Upgrading](/operations/upgrading) for the safe upgrade procedure.

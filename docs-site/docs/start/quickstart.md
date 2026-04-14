@@ -18,7 +18,7 @@ docker run -d --name betweenrows \
   -e BR_ADMIN_PASSWORD=changeme \
   -p 5434:5434 -p 5435:5435 \
   -v betweenrows_data:/data \
-  ghcr.io/getbetweenrows/betweenrows:0.15.0
+  ghcr.io/getbetweenrows/betweenrows:{{VERSION}}
 ```
 
 Port 5434 is the SQL proxy (where your users connect). Port 5435 is the admin UI and REST API. The `-v` flag persists the admin database and encryption keys — do not omit it.
@@ -32,7 +32,7 @@ Open [http://localhost:5435](http://localhost:5435) and log in as `admin` / `cha
 ![BetweenRows admin login screen](/screenshots/quickstart-login-v0.14.png)
 
 ::: tip
-Pin your Docker tag to a specific version (`:0.15.0`, not `:latest`). Breaking changes between minor versions are called out in the [changelog](/about/changelog).
+Pin your Docker tag to a specific version (`:{{VERSION}}`, not `:latest`). Breaking changes between minor versions are called out in the [changelog](/about/changelog).
 :::
 
 ## 3. Add a data source

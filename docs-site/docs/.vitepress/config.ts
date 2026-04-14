@@ -7,6 +7,7 @@ import {
   EDIT_PAGE_URL,
   LICENSE_URL,
   OG_IMAGE_URL,
+  VERSION,
 } from './constants';
 
 // IMPORTANT: VitePress builds everything under `docs/` (this directory's
@@ -34,7 +35,24 @@ export default defineConfig({
     ['meta', { name: 'twitter:image', content: OG_IMAGE_URL }],
   ],
   vite: {
-    plugins: [llmstxt()],
+    plugins: [
+      // Substitute {{VERSION}} with the current release version in every
+      // markdown source file. Runs before VitePress's own loader and before
+      // llmstxt, so both the rendered HTML and the raw .md files emitted
+      // for the copy-as-markdown button / llms-full.txt see the real
+      // version. Single source of truth lives in constants.ts so /release
+      // bumps one file instead of ~13.
+      {
+        name: 'version-substitution',
+        enforce: 'pre',
+        transform(code, id) {
+          if (id.endsWith('.md')) {
+            return code.replace(/\{\{VERSION\}\}/g, VERSION);
+          }
+        },
+      },
+      llmstxt(),
+    ],
   },
   markdown: {
     config(md) {
@@ -175,7 +193,7 @@ export default defineConfig({
             { text: 'Changelog', link: '/about/changelog' },
             { text: 'Roadmap', link: '/about/roadmap' },
             {
-              text: 'License & Alpha Status',
+              text: 'License & Beta Status',
               link: '/about/license',
             },
             { text: 'Report an Issue', link: '/about/report-an-issue' },
@@ -202,7 +220,7 @@ export default defineConfig({
 
     footer: {
       message:
-        'Released under the <a href="https://github.com/getbetweenrows/betweenrows/blob/main/LICENSE">Elastic License v2</a>. <strong>Alpha software.</strong>',
+        'Released under the <a href="https://github.com/getbetweenrows/betweenrows/blob/main/LICENSE">Elastic License v2</a>.',
       copyright: 'Copyright © 2026 BetweenRows',
     },
   },

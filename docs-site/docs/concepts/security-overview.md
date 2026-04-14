@@ -57,7 +57,7 @@ See [Architecture](/concepts/architecture) for the diagram. The short version:
 
 Use this as a pre-production gate:
 
-- [ ] **Pin the Docker tag** to a specific version (`ghcr.io/getbetweenrows/betweenrows:0.15.0`). Never use `:latest` in production.
+- [ ] **Pin the Docker tag** to a specific version (`ghcr.io/getbetweenrows/betweenrows:{{VERSION}}`). Never use `:latest` in production.
 - [ ] **Set `BR_ENCRYPTION_KEY` explicitly** to a 64-character hex string (generate with `openssl rand -hex 32`). Do not rely on the auto-generated value.
 - [ ] **Set `BR_ADMIN_JWT_SECRET` explicitly** to a strong random value (generate with `openssl rand -base64 32`). Do not rely on the auto-generated value.
 - [ ] **Persist `/data` to a durable volume** that is backed up. The encryption key, JWT secret, and admin database all live here.
@@ -68,14 +68,14 @@ Use this as a pre-production gate:
 - [ ] **Change the initial admin password** on first boot. Do not leave `BR_ADMIN_PASSWORD` set to a memorable value in your environment.
 - [ ] **Monitor the query audit log** for `status = denied` and `status = error`. A spike in either can indicate policy misconfiguration or an attack.
 - [ ] **Monitor the admin audit log** for unexpected mutations. Policy creation, role membership changes, and data source access grants are high-signal events.
-- [ ] **Subscribe to the [GitHub releases feed](https://github.com/getbetweenrows/betweenrows/releases)** for security advisories and upgrade notices.
+- [ ] **Track new versions** via the [Tags page](https://github.com/getbetweenrows/betweenrows/tags) and the [Changelog](/about/changelog).
 
 ## Where to go next
 
 - **[Threat Model](/concepts/threat-model)** — the full attack-vector catalog: every known bypass attempt, its defense, and the tests that verify it.
 - **[Architecture](/concepts/architecture)** — two-plane design, request lifecycle, trust boundaries in detail.
 - **[Policy Model](/concepts/policy-model)** — the philosophy: zero-trust defaults, deny-wins, visibility-follows-access, and how policies compose.
-- **[Known Limitations](/operations/known-limitations)** — the full honesty page: predicate probing, EXPLAIN, aggregate inference, alpha caveats.
+- **[Known Limitations](/operations/known-limitations)** — the full honesty page: predicate probing, EXPLAIN, aggregate inference, and other production trade-offs.
 - **[Audit & Debugging](/guides/audit-debugging)** — how to read the audit trail when verifying that policies are enforced as intended.
 - **[Multi-tenant isolation guide](/guides/recipes/multi-tenant-isolation)** — the flagship use case, end-to-end. A concrete demonstration that policies cannot be bypassed via aliases, CTEs, or subqueries.
-- **[License & alpha status](/about/license)** — ELv2 license summary and the alpha disclaimer.
+- **[License & Beta Status](/about/license)** — ELv2 license summary and the pre-1.0 stability picture.

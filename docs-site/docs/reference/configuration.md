@@ -72,7 +72,7 @@ docker run -d \
   -e RUST_LOG=info \
   -p 5434:5434 -p 5435:5435 \
   -v /srv/betweenrows/data:/data \
-  ghcr.io/getbetweenrows/betweenrows:0.15.0
+  ghcr.io/getbetweenrows/betweenrows:{{VERSION}}
 ```
 
 ::: tip

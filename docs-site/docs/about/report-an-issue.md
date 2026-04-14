@@ -5,7 +5,7 @@ description: How to report bugs, request features, and disclose security vulnera
 
 # Report an Issue
 
-BetweenRows is an alpha project maintained by a small team, and feedback from early users directly shapes what we build next — reports and requests are genuinely welcome. Different kinds of feedback go through different channels; pick the one that matches what you have.
+BetweenRows is maintained by a small team, and feedback from early users directly shapes what we build next — reports and requests are genuinely welcome. Different kinds of feedback go through different channels; pick the one that matches what you have.
 
 ## Security vulnerabilities
 

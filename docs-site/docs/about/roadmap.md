@@ -83,4 +83,4 @@ Natural progression: start with none, graduate to draft as a team grows, move to
 3. **Propose a design** in a GitHub Discussion for non-trivial features. We'd rather talk through the shape before a PR lands.
 4. **Send a PR** for well-scoped improvements — see [Install from source](/installation/from-source) and `CONTRIBUTING.md`.
 
-Feedback from early alpha users has an outsized effect on prioritization right now. The project is small; the signal is loud.
+Feedback from early users has an outsized effect on prioritization right now. The project is small; the signal is loud.

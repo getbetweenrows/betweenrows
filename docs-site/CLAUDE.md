@@ -299,7 +299,7 @@ The `/release` command automatically invokes `/docs-sync v<prev-tag>..HEAD` as s
 
 When the proxy releases `v0.X.Y` (manual version):
 
-- [ ] Grep-replace Docker tags / Fly commands / example version strings across `docs/`
+- [ ] Bump `VERSION` in `docs/.vitepress/constants.ts` — single source of truth for the `{{VERSION}}` token substituted across all guides at build time
 - [ ] Update `about/changelog.md` (use `git log --oneline v<prev>..v<new>` for content)
 - [ ] Re-capture screenshots if the admin UI changed visually
 - [ ] Run the code-scan pass on new source files; fold catches into relevant guides

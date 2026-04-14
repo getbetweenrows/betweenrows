@@ -142,9 +142,8 @@ If a `column_deny` removes a column, a mask on the same column is irrelevant —
 
 ## See also
 
-- [Policies overview](/guides/policies/) — when to mask vs. when to deny
+- [Policies overview](/guides/policies/) — when to mask vs. deny, structural shape, validation rules
 - [Column Allow & Deny](./column-allow-deny) — for removing columns entirely
 - [Template Expressions](/reference/template-expressions) — expression syntax and `{user.KEY}` variables
-- [Policy Types](/reference/policy-types) — structural constraints and validation rules
 
 <!-- screenshots: [column-masks-editor-v0.15.png, column-masks-result-v0.15.png] -->

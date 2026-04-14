@@ -159,7 +159,6 @@ In `policy_required` mode, creating a `column_deny` without a `column_allow` lea
 
 ## See also
 
-- [Policies overview](/guides/policies/) — when to deny vs. mask
+- [Policies overview](/guides/policies/) — when to deny vs. mask, structural shape, validation rules
 - [Column Masks](./column-masks) — for redacting values instead of hiding columns
 - [Table Deny](./table-deny) — for hiding entire tables
-- [Policy Types](/reference/policy-types) — structural constraints and glob syntax

@@ -7,6 +7,7 @@ export const WWW_URL = 'https://betweenrows.dev'
 export const GITHUB_URL = 'https://github.com/getbetweenrows/betweenrows'
 export const EDIT_PAGE_URL = `${GITHUB_URL}/edit/main/docs-site/docs/:path`
 export const LICENSE_URL = `${GITHUB_URL}/blob/main/LICENSE`
+export const CHANGELOG_URL = `${GITHUB_URL}/blob/main/CHANGELOG.md`
 // Shared with the www landing page — one brand card, one source of truth.
 export const OG_IMAGE_URL = `${WWW_URL}/og-image.png`
 

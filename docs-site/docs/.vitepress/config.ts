@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitepress';
+import { defineConfig, type DefaultTheme } from 'vitepress';
 import llmstxt from 'vitepress-plugin-llms';
 import { copyOrDownloadAsMarkdownButtons } from 'vitepress-plugin-llms';
 import {
@@ -6,9 +6,34 @@ import {
   GITHUB_URL,
   EDIT_PAGE_URL,
   LICENSE_URL,
+  CHANGELOG_URL,
   OG_IMAGE_URL,
   VERSION,
 } from './constants';
+
+// vitepress-plugin-llms warns on every sidebar entry whose link doesn't
+// resolve to a markdown file in the docs tree — including intentional
+// external links (Changelog, License) we wire into the About section.
+// This helper strips external entries before the plugin sees the sidebar,
+// so llms.txt / llms-full.txt generation stays warning-free. The public
+// site's sidebar is unaffected — this is a plugin-scoped copy.
+function stripExternalSidebarLinks(
+  sidebar: DefaultTheme.Sidebar | undefined,
+): DefaultTheme.Sidebar | undefined {
+  if (!sidebar) return sidebar;
+  const isExternal = (link: string | undefined) =>
+    typeof link === 'string' && /^(?:https?:)?\/\//.test(link);
+  const filterItems = (
+    items: DefaultTheme.SidebarItem[],
+  ): DefaultTheme.SidebarItem[] =>
+    items
+      .filter((item) => !isExternal(item.link))
+      .map((item) => (item.items ? { ...item, items: filterItems(item.items) } : item));
+  if (Array.isArray(sidebar)) return filterItems(sidebar);
+  return Object.fromEntries(
+    Object.entries(sidebar).map(([key, value]) => [key, filterItems(value)]),
+  );
+}
 
 // IMPORTANT: VitePress builds everything under `docs/` (this directory's
 // parent). `../internal/` and legacy `../../docs/` (inside the betweenrows
@@ -51,7 +76,7 @@ export default defineConfig({
           }
         },
       },
-      llmstxt(),
+      llmstxt({ sidebar: stripExternalSidebarLinks }),
     ],
   },
   markdown: {
@@ -65,10 +90,9 @@ export default defineConfig({
 
     nav: [
       { text: 'Quickstart', link: '/start/quickstart' },
-      { text: 'How It Works', link: '/concepts/architecture' },
-      { text: 'Guides', link: '/guides/data-sources' },
-      { text: 'Reference', link: '/reference/configuration' },
-      { text: 'Docs for AI', link: '/llms-full.txt' },
+      { text: 'Concepts', link: '/concepts/architecture' },
+      { text: 'Features', link: '/guides/data-sources' },
+      { text: 'Guides', link: '/installation/docker' },
     ],
 
     sidebar: {
@@ -78,10 +102,11 @@ export default defineConfig({
           items: [
             { text: 'Introduction', link: '/start/introduction' },
             { text: 'Quickstart', link: '/start/quickstart' },
+            { text: 'Demo Schema', link: '/reference/demo-schema' },
           ],
         },
         {
-          text: 'How It Works',
+          text: 'Concepts',
           items: [
             { text: 'Architecture', link: '/concepts/architecture' },
             { text: 'Policy Model', link: '/concepts/policy-model' },
@@ -90,10 +115,15 @@ export default defineConfig({
               link: '/concepts/security-overview',
             },
             { text: 'Threat Model', link: '/concepts/threat-model' },
+            {
+              text: 'Known Limitations',
+              link: '/operations/known-limitations',
+            },
+            { text: 'Glossary', link: '/reference/glossary' },
           ],
         },
         {
-          text: 'Guides',
+          text: 'Features',
           items: [
             { text: 'Data Sources', link: '/guides/data-sources' },
             { text: 'Users & Roles', link: '/guides/users-roles' },
@@ -106,25 +136,60 @@ export default defineConfig({
               link: '/guides/policies/',
               collapsed: false,
               items: [
-                { text: 'Row Filters', link: '/guides/policies/row-filters' },
                 {
-                  text: 'Column Masks',
-                  link: '/guides/policies/column-masks',
+                  text: 'Policy Types',
+                  collapsed: false,
+                  items: [
+                    { text: 'Row Filters', link: '/guides/policies/row-filters' },
+                    {
+                      text: 'Column Masks',
+                      link: '/guides/policies/column-masks',
+                    },
+                    {
+                      text: 'Column Allow & Deny',
+                      link: '/guides/policies/column-allow-deny',
+                    },
+                    { text: 'Table Deny', link: '/guides/policies/table-deny' },
+                  ],
                 },
                 {
-                  text: 'Column Allow & Deny',
-                  link: '/guides/policies/column-allow-deny',
+                  text: 'Template Expressions',
+                  link: '/reference/template-expressions',
                 },
-                { text: 'Table Deny', link: '/guides/policies/table-deny' },
+                {
+                  text: 'Decision Functions',
+                  link: '/guides/decision-functions',
+                },
               ],
-            },
-            {
-              text: 'Decision Functions',
-              link: '/guides/decision-functions',
             },
             {
               text: 'Audit & Debugging',
               link: '/guides/audit-debugging',
+            },
+          ],
+        },
+        {
+          text: 'Guides',
+          items: [
+            {
+              text: 'Deployment',
+              collapsed: false,
+              items: [
+                { text: 'Docker', link: '/installation/docker' },
+                { text: 'Fly.io', link: '/installation/fly' },
+                { text: 'From Source', link: '/installation/from-source' },
+                { text: 'Configuration', link: '/reference/configuration' },
+              ],
+            },
+            { text: 'Upgrading', link: '/operations/upgrading' },
+            { text: 'Backups & Recovery', link: '/operations/backups' },
+            {
+              text: 'Troubleshooting',
+              link: '/operations/troubleshooting',
+            },
+            {
+              text: 'Rename Safety',
+              link: '/operations/rename-safety',
             },
             {
               text: 'Recipes',
@@ -144,58 +209,11 @@ export default defineConfig({
           ],
         },
         {
-          text: 'Reference',
-          items: [
-            { text: 'Configuration', link: '/reference/configuration' },
-            { text: 'Policy Types', link: '/reference/policy-types' },
-            {
-              text: 'Template Expressions',
-              link: '/reference/template-expressions',
-            },
-            { text: 'Audit Log Fields', link: '/reference/audit-log-fields' },
-            { text: 'Demo Schema', link: '/reference/demo-schema' },
-            { text: 'CLI', link: '/reference/cli' },
-            { text: 'Admin REST API', link: '/reference/admin-rest-api' },
-            { text: 'Glossary', link: '/reference/glossary' },
-          ],
-        },
-        {
-          text: 'Operate',
-          items: [
-            {
-              text: 'Deployment',
-              collapsed: false,
-              items: [
-                { text: 'Docker', link: '/installation/docker' },
-                { text: 'Fly.io', link: '/installation/fly' },
-                { text: 'From Source', link: '/installation/from-source' },
-              ],
-            },
-            { text: 'Upgrading', link: '/operations/upgrading' },
-            { text: 'Backups & Recovery', link: '/operations/backups' },
-            {
-              text: 'Rename Safety',
-              link: '/operations/rename-safety',
-            },
-            {
-              text: 'Troubleshooting',
-              link: '/operations/troubleshooting',
-            },
-            {
-              text: 'Known Limitations',
-              link: '/operations/known-limitations',
-            },
-          ],
-        },
-        {
           text: 'About',
           items: [
-            { text: 'Changelog', link: '/about/changelog' },
+            { text: 'Changelog', link: CHANGELOG_URL },
             { text: 'Roadmap', link: '/about/roadmap' },
-            {
-              text: 'License & Beta Status',
-              link: '/about/license',
-            },
+            { text: 'License', link: LICENSE_URL },
             { text: 'Report an Issue', link: '/about/report-an-issue' },
           ],
         },

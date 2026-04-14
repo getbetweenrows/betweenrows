@@ -66,7 +66,7 @@ At query time, the virtual schema is further narrowed by `row_filter` (injecting
 | `column_deny` | deny | Removes columns from schema + results | [Column Allow & Deny](/guides/policies/column-allow-deny) |
 | `table_deny` | deny | Removes table from catalog | [Table Deny](/guides/policies/table-deny) |
 
-→ Structural reference: [Policy Types](/reference/policy-types)
+→ Structural reference: [Policies → Structural shape](/guides/policies/#structural-shape)
 
 ### Composition rules
 
@@ -124,8 +124,7 @@ Decision functions have access to a richer context than template variables: user
 
 ## See also
 
-- [Policies guide](/guides/policies/) — practical: which type, tutorials, field reference
-- [Policy Types reference](/reference/policy-types) — structural constraints, JSON shapes, validation
+- [Policies guide](/guides/policies/) — practical: which type, tutorials, structural shape, validation rules
 - [Template Expressions](/reference/template-expressions) — expression syntax and variable types
 - [Architecture](/concepts/architecture) — the two-plane design and request lifecycle
 - [Threat Model](/concepts/threat-model) — the full attack-vector catalog with defenses

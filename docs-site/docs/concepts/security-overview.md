@@ -55,20 +55,14 @@ See [Architecture](/concepts/architecture) for the diagram. The short version:
 
 ## Deployment checklist for security reviewers
 
-Use this as a pre-production gate:
+Use this as a pre-production gate. For the operational setup (Docker tag pinning, encryption key, JWT secret, volume persistence, admin password, upgrade hygiene), follow [Docker](/installation/docker) or [Fly.io](/installation/fly) and [Upgrading](/operations/upgrading) — this list covers only the security-specific items that sit on top of a clean deployment.
 
-- [ ] **Pin the Docker tag** to a specific version (`ghcr.io/getbetweenrows/betweenrows:{{VERSION}}`). Never use `:latest` in production.
-- [ ] **Set `BR_ENCRYPTION_KEY` explicitly** to a 64-character hex string (generate with `openssl rand -hex 32`). Do not rely on the auto-generated value.
-- [ ] **Set `BR_ADMIN_JWT_SECRET` explicitly** to a strong random value (generate with `openssl rand -base64 32`). Do not rely on the auto-generated value.
-- [ ] **Persist `/data` to a durable volume** that is backed up. The encryption key, JWT secret, and admin database all live here.
 - [ ] **Place the proxy on a private network.** The data plane port (5434) must be reachable only by intended clients. The admin plane port (5435) must be reachable only by admin operators and CI/CD.
 - [ ] **Terminate TLS upstream of the proxy** (load balancer, service mesh, or Cloudflare Tunnel). The current pgwire listener is plaintext.
 - [ ] **Use `access_mode: policy_required`** on every production data source. `open` mode is a dev convenience.
 - [ ] **Restrict `EXPLAIN`** to trusted users or block it upstream. See [Known Limitations](/operations/known-limitations).
-- [ ] **Change the initial admin password** on first boot. Do not leave `BR_ADMIN_PASSWORD` set to a memorable value in your environment.
 - [ ] **Monitor the query audit log** for `status = denied` and `status = error`. A spike in either can indicate policy misconfiguration or an attack.
 - [ ] **Monitor the admin audit log** for unexpected mutations. Policy creation, role membership changes, and data source access grants are high-signal events.
-- [ ] **Track new versions** via the [Tags page](https://github.com/getbetweenrows/betweenrows/tags) and the [Changelog](/about/changelog).
 
 ## Where to go next
 
@@ -78,4 +72,3 @@ Use this as a pre-production gate:
 - **[Known Limitations](/operations/known-limitations)** — the full honesty page: predicate probing, EXPLAIN, aggregate inference, and other production trade-offs.
 - **[Audit & Debugging](/guides/audit-debugging)** — how to read the audit trail when verifying that policies are enforced as intended.
 - **[Multi-tenant isolation guide](/guides/recipes/multi-tenant-isolation)** — the flagship use case, end-to-end. A concrete demonstration that policies cannot be bypassed via aliases, CTEs, or subqueries.
-- **[License & Beta Status](/about/license)** — ELv2 license summary and the pre-1.0 stability picture.

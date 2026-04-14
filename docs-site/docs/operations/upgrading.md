@@ -81,15 +81,7 @@ See [Install on Fly.io](/installation/fly) for the full deployment reference.
 
 ## Migration safety
 
-BetweenRows uses [SeaORM migrations](https://www.sea-ql.org/SeaORM/docs/migration/setting-up-migration/) that run automatically on startup. The migration framework tracks which migrations have been applied in a `seaql_migrations` table inside the admin database.
-
-**Migration conventions in this project** (from the repository's root CLAUDE.md):
-
-- **One DDL statement per file.** No multi-step migrations that could leave the database in a partial state.
-- **`IF NOT EXISTS`** on every `CREATE TABLE` and `CREATE INDEX` — so migrations are safe to retry if a previous run applied the DDL but crashed before recording.
-- **No renames or deletions of applied migration files.** Renaming an applied migration causes a fatal startup error.
-
-These rules mean migrations are generally safe to retry, but **do not manually edit the `seaql_migrations` table** or the admin database files. If a migration fails and you cannot recover cleanly, restore from your backup and file a GitHub issue with the full logs.
+Database migrations run automatically on startup. **Do not manually edit the `seaql_migrations` table** or the admin database files. If a migration fails and you cannot recover cleanly, restore from your backup and file a GitHub issue with the full logs.
 
 ## Downgrading
 
@@ -123,7 +115,6 @@ Treat version bumps as deliberate PRs — with changelog review in the PR descri
 
 ## See also
 
-- **[Changelog](/about/changelog)** — version history and breaking changes
+- **[Changelog](https://github.com/getbetweenrows/betweenrows/blob/main/CHANGELOG.md)** — version history and breaking changes
 - **[Backups](/operations/backups)** — what to snapshot before upgrading
 - **[Troubleshooting](/operations/troubleshooting)** — if something goes wrong
-- **[License & Beta Status](/about/license)** — pre-1.0 stability posture

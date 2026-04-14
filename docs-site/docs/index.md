@@ -23,33 +23,29 @@ hero:
 
 features:
   - title: Start
-    details: Introduction and Quickstart. From a single `docker run` command to a policy-protected query in under 15 minutes.
+    details: Introduction, Quickstart, and the demo schema. From a single `docker run` command to a policy-protected query in under 15 minutes.
     link: /start/quickstart
     linkText: Get started
-  - title: How It Works
-    details: Architecture, policy model, security overview, and threat model. Begin here if you are evaluating BetweenRows.
+  - title: Concepts
+    details: Architecture, policy model, security overview, threat model, known limitations, and glossary. Begin here if you are evaluating BetweenRows.
     link: /concepts/architecture
-    linkText: Read the concepts
-  - title: Guides
-    details: Data sources, users and roles, attributes, policy authoring, decision functions, audit and debugging, plus end-to-end recipes.
+    linkText: Understand the system
+  - title: Features
+    details: Data sources, users and roles, attributes, the policy system (types, template expressions, decision functions), and audit and debugging.
     link: /guides/data-sources
-    linkText: Browse guides
-  - title: Reference
-    details: Configuration, policy types, template expressions, audit log fields, demo schema, CLI, and the Admin REST API.
-    link: /reference/configuration
-    linkText: Open reference
-  - title: Operate
-    details: Docker and Fly deployment, upgrading, backups and recovery, rename safety, troubleshooting, and known limitations.
+    linkText: Explore features
+  - title: Guides
+    details: Deploy with Docker or Fly, configure, upgrade, back up, troubleshoot, and follow end-to-end recipes like multi-tenant isolation.
     link: /installation/docker
     linkText: Run in production
   - title: About
-    details: Changelog, roadmap, and license.
-    link: /about/changelog
-    linkText: See what is new
+    details: Roadmap, changelog, and license.
+    link: /about/roadmap
+    linkText: See the roadmap
 ---
 
 ::: tip
-Pin your Docker image to a specific version tag (e.g., `ghcr.io/getbetweenrows/betweenrows:{{VERSION}}`) rather than `:latest` so upgrades stay deliberate. See [License & Beta Status](/about/license) for the full release-stability picture.
+Pin your Docker image to a specific version tag (e.g., `ghcr.io/getbetweenrows/betweenrows:{{VERSION}}`) rather than `:latest` so upgrades stay deliberate.
 :::
 
 ## For security and compliance reviewers

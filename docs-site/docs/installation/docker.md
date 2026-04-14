@@ -99,6 +99,55 @@ The `/data` volume contains:
    Follow the [Quickstart](/start/quickstart) from step 2 onward to add a data source, create a user, define a policy, and verify it with psql.
 
 
+## Creating users from the shell
+
+The `proxy` binary has a built-in `user create` subcommand for bootstrap — creating the first user, scripted provisioning, or rescuing a locked-out admin when the UI is unreachable. For everything else, use the admin UI.
+
+```sh
+docker exec -it betweenrows proxy user create --username alice --password secret
+```
+
+| Flag | Description |
+|---|---|
+| `--username <name>` | Required. Must match `[a-zA-Z0-9_.-]`, 3–50 characters, start with a letter. |
+| `--password <password>` | Required. Stored as an Argon2id hash. |
+| `--admin` | Optional. Creates the user with `is_admin: true`. Use this to create a rescue admin when you're locked out of the UI. |
+
+::: warning Password complexity is not enforced from the CLI
+The shell path stores whatever password you pass without running the admin API's complexity check. A user created this way with a weak password will later fail to update their own password through the admin UI, which enforces complexity on edit.
+:::
+
+**Shell history caveat.** The password appears in `~/.bash_history` / `~/.zsh_history` if entered directly. Prefer an env var or a secrets file:
+
+```sh
+# From an env var
+docker exec -it betweenrows proxy user create --username alice --password "$ALICE_PASSWORD"
+
+# Generate a random password and display it once
+PASSWORD=$(openssl rand -base64 24)
+docker exec -it betweenrows proxy user create --username alice --password "$PASSWORD"
+echo "Alice's password: $PASSWORD"
+```
+
+**Rescue admin recipe.** If you've forgotten the admin password and have no other admin accounts:
+
+```sh
+docker exec -it betweenrows proxy user create \
+  --username rescue \
+  --password "$(openssl rand -base64 24)" \
+  --admin
+```
+
+Log in as `rescue`, then reset the original admin password through the UI (or delete `rescue` after).
+
+::: info
+A forgot/reset password feature is on the [roadmap](/about/roadmap). Until then, the shell rescue path is the only way to recover from a lost admin password.
+:::
+
+## Automation beyond the shell
+
+Everything the admin UI does is backed by a REST API at `http://localhost:5435/api/v1/`. A full OpenAPI reference is planned; until it ships, the fastest way to discover the request and response shapes for any admin action is to perform the action in the UI and inspect the request in your browser's network tab. Every UI button maps 1:1 to a single REST call under `/api/v1/`.
+
 ## Docker Compose
 
 For reproducible local setups, a `compose.yaml` snippet:

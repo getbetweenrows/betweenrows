@@ -9,25 +9,7 @@ All guide tutorials use the `demo_ecommerce` schema — a multi-tenant e-commerc
 
 ## Setup
 
-The demo stack lives at `scripts/demo_ecommerce/` in the repo root. Two commands bring up everything:
-
-```sh
-cd scripts/demo_ecommerce
-docker compose -f compose.demo.yaml up -d
-./setup.sh
-```
-
-`setup.sh` runs three phases: (1) applies the schema and seeds data in the upstream PostgreSQL, (2) creates the BetweenRows admin bootstrap (tenant attribute, users, datasource, catalog), (3) creates policies and assigns them.
-
-To reset cleanly (Phase 1 is not idempotent):
-
-```sh
-docker compose -f compose.demo.yaml down -v
-docker compose -f compose.demo.yaml up -d
-./setup.sh
-```
-
-See `scripts/demo_ecommerce/README.md` for env var overrides and advanced usage.
+The demo stack lives at `scripts/demo_ecommerce/` in the repo root. See its [README](https://github.com/getbetweenrows/betweenrows/blob/main/scripts/demo_ecommerce/README.md) for the bring-up commands and env var overrides.
 
 ## Tenants
 

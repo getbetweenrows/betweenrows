@@ -176,7 +176,7 @@ Set `exempt_until` in the decision function's `config` JSON and update it as the
 
 ### Audit trail for exception events
 
-Because the exception is stored as a user attribute, every grant and revoke is automatically captured in the admin audit log — attribute changes record which attribute changed, the before/after values, and who made the change. See [Audit Log Fields](/reference/audit-log-fields) for the schema and [Admin REST API](/reference/admin-rest-api) for querying.
+Because the exception is stored as a user attribute, every grant and revoke is automatically captured in the admin audit log — attribute changes record which attribute changed, the before/after values, and who made the change. See [Audit & Debugging → Audit log fields](/guides/audit-debugging#audit-log-fields) for the schema.
 
 This turns "who has PII access and why?" from a maintenance burden into a queryable record.
 
@@ -184,11 +184,9 @@ This turns "who has PII access and why?" from a maintenance burden into a querya
 
 ### Don't try to `column_allow` your way out
 
-The most natural-feeling "fix" is to create a `column_allow` policy scoped to the exempt user, with a high-priority assignment. **This does not work.** BetweenRows enforces deny-wins across all roles, scopes, and priorities — a permit cannot override a deny regardless of source. The allow and the deny meet in the enforcement layer, and the deny always takes precedence.
+A `column_allow` scoped to the exempt user cannot override the deny. Deny-wins is a security invariant across all roles, scopes, and priorities — see [Policy Model → Deny always wins](/concepts/policy-model#_2-deny-always-wins).
 
-See [Policy Model → Deny always wins](/concepts/policy-model#_2-deny-always-wins) and the [threat model entry on cross-role deny-wins](/concepts/threat-model#_38-deny-wins-across-roles), which defines this as a security invariant backed by an integration test.
-
-Decision functions work because they operate *before* deny-wins — they control whether the deny policy applies at all for a given user, not whether it can be overridden at enforcement time.
+Decision functions work because they run *before* deny-wins — they control whether the deny policy applies at all for a given user, not whether it can be overridden at enforcement time.
 
 ### Don't use `evaluate_context: query` for static exceptions
 

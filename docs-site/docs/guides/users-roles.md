@@ -156,6 +156,6 @@ If a user is in two roles and one role's policy denies access while the other al
 
 - [User Attributes (ABAC)](/guides/attributes) — define and assign custom attributes for policy expressions
 - [Policies overview](/guides/policies/) — how to assign policies to users and roles
-- [Audit Log Fields](/reference/audit-log-fields) — admin audit tracks user/role mutations
+- [Audit & Debugging → Admin audit log](/guides/audit-debugging#admin-audit-log) — admin audit tracks user/role mutations
 
 <!-- screenshots: [users-roles-create-user-v0.15.png, users-roles-create-role-v0.15.png, users-roles-role-inheritance-v0.15.png, users-roles-effective-members-v0.15.png] -->

@@ -127,4 +127,3 @@ Human-readable YAML export/import of policies is on the roadmap as part of the d
 
 - **[Upgrading](/operations/upgrading)** — the other time you really need a backup
 - **[Configuration](/reference/configuration)** — `BR_ENCRYPTION_KEY`, `BR_ADMIN_DATABASE_URL`
-- **[Admin REST API](/reference/admin-rest-api)** — admin plane reference

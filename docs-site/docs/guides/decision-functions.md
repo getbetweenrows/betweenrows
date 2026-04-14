@@ -7,10 +7,6 @@ description: Write JavaScript decision functions to conditionally gate policy en
 
 A decision function is a JavaScript function attached to a policy that gates whether the policy fires. When attached, the policy's effect (row filter, column mask, deny, etc.) only applies if the decision function returns `{ fire: true }`. This lets you build conditional policies — "deny access outside business hours", "mask salary only for non-HR users", "allow table access only for analysts querying fewer than 3 tables."
 
-::: info
-Decision functions are functional, but the JS harness, context shape, and configuration options are still being refined between releases. See [License & Beta Status](/about/license) for the release-stability picture, and the [changelog](/about/changelog) for specific changes.
-:::
-
 ## Purpose and when to use
 
 Use decision functions when the gating logic is too complex for a template expression — when you need access to roles, session time, query metadata, or multi-attribute business rules. For straightforward attribute-based filtering, [template expressions](/reference/template-expressions) are simpler and sufficient.
@@ -300,19 +296,9 @@ Decision functions run on [QuickJS](https://bellard.org/quickjs/) (a lightweight
 - Web APIs (`TextEncoder`, `crypto.subtle`, `URL`, etc.)
 - `Date()` constructor works but uses UTC; prefer `ctx.session.time.*` for consistency
 
-### Safety guarantee
+### Sandbox and isolation
 
-::: tip For security reviewers
-Decision functions are safe to enable for your team. The WASM sandbox is enforced at the runtime level — it cannot be bypassed by clever JavaScript, and a buggy or malicious function cannot affect the proxy, other users, or other functions. Specifically:
-
-- **No escape from the sandbox.** WASM capability-based isolation starts at zero permissions. The proxy grants only stdin/stdout — no filesystem, no network, no host memory access.
-- **No cross-user data leakage.** Each invocation receives only its own `ctx` object. There are no globals, no shared memory, no way to observe another invocation.
-- **No state persistence.** Nothing survives between invocations — no caching, no counters, no side-channels.
-- **No proxy disruption.** Fuel limits kill runaway code. Errors are caught and handled via `on_error`. The proxy never crashes from a decision function.
-- **Auditable.** The JS source is stored in the admin database and visible in the admin UI. Decision function results (fire/skip/error) are recorded in the query audit log's `policies_applied` field.
-
-This isolation is provided by [wasmtime](https://wasmtime.dev/), the same WASM runtime used by Fastly, Shopify, and Cloudflare Workers for running untrusted code at scale.
-:::
+Decision functions run inside a [wasmtime](https://wasmtime.dev/) WASM sandbox with capability-based isolation (no filesystem, no network, no host memory, no globals, no cross-invocation state). Fuel limits kill runaway code; errors are handled via `on_error`. See [Threat Model](/concepts/threat-model) for the specific attack vectors and their enforcement points.
 
 ### Compilation pipeline
 
@@ -398,6 +384,5 @@ If a user has 5 policies and 3 have query-context decision functions, each query
 - [Glossary → Template expressions vs. decision functions](/reference/glossary#template-expressions-vs-decision-functions) — when to use which
 - [Policies overview](/guides/policies/) — which policy type to attach a decision function to
 - [Template Expressions](/reference/template-expressions) — the simpler alternative for attribute-based logic
-- [Admin REST API](/reference/admin-rest-api) — decision function CRUD and test endpoints
 
 <!-- screenshots: [decision-functions-editor-v0.15.png, decision-functions-test-runner-v0.15.png] -->

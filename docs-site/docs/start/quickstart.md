@@ -32,7 +32,7 @@ Open [http://localhost:5435](http://localhost:5435) and log in as `admin` / `cha
 ![BetweenRows admin login screen](/screenshots/quickstart-login-v0.14.png)
 
 ::: tip
-Pin your Docker tag to a specific version (`:{{VERSION}}`, not `:latest`). Breaking changes between minor versions are called out in the [changelog](/about/changelog).
+Pin your Docker tag to a specific version (`:{{VERSION}}`, not `:latest`). Breaking changes between minor versions are called out in the [changelog](https://github.com/getbetweenrows/betweenrows/blob/main/CHANGELOG.md).
 :::
 
 ## 3. Add a data source
@@ -106,7 +106,7 @@ Then open **Query Audit** in the admin UI to see what happened: the original SQL
 
 ![Query audit entry showing rewritten SQL with injected WHERE clause](/screenshots/quickstart-audit-entry-v0.15.png)
 
-→ Full options: [Audit & Debugging guide](/guides/audit-debugging) · [Audit Log Fields reference](/reference/audit-log-fields)
+→ Full options: [Audit & Debugging guide](/guides/audit-debugging)
 
 ## Next steps
 

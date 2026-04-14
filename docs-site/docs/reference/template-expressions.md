@@ -27,17 +27,7 @@ Template expressions deliberately expose a minimal surface: the two built-ins ab
 | `is_active` on `proxy_user` | Deactivated users can't connect to the proxy at all — they never reach the filter evaluator, so there's no expression need. |
 | Decision-function context (`ctx.query.*`, `ctx.session.time.*`, `ctx.session.datasource.*`) | Expressions are evaluated once per row against user state and have no visibility into the query plan, wall-clock time, or the data source. If you need any of those, attach a [decision function](/guides/decision-functions) to the policy. |
 
-::: info Expressions vs. decision functions
-The template expression path and the decision function path expose slightly different shapes of `user` on purpose:
-
-| | Template expressions (`{user.KEY}`) | Decision functions (`ctx.session.user.KEY`) |
-|---|---|---|
-| Built-ins | `username`, `id` | `id`, `username`, `roles` |
-| Custom attributes | All of them, as typed SQL literals | All of them, as typed JSON values |
-| Roles | Use role-scoped assignments instead | `ctx.session.user.roles: string[]` |
-
-Decision functions get the roles array because they run JavaScript and often need role-conditional branching *inside* the function body (for example, `return { fire: !ctx.session.user.roles.includes("admin") }` as a privileged-user bypass). Template expressions don't need the array — the same effect is already expressible by assigning the policy at role scope.
-:::
+→ Full comparison: [Glossary → Template expressions vs. decision functions](/reference/glossary#template-expressions-vs-decision-functions)
 
 ## Custom attribute variables
 
@@ -234,4 +224,4 @@ CASE WHEN region = {user.region} THEN phone ELSE '[REDACTED]' END
 
 - **[Policy Model](/concepts/policy-model)** — how filter/mask expressions fit into the overall policy model
 - **[User Attributes](/guides/attributes)** — how attributes are defined and set
-- **[Policy Types](/reference/policy-types)** — structural constraints per type
+- **[Policies](/guides/policies/)** — structural shape and validation rules per type

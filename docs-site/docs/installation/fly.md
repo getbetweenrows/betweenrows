@@ -106,16 +106,6 @@ Always pin `fly.toml` to a specific version tag rather than `:latest`. That way 
 
 See [Upgrading](/operations/upgrading) for general upgrade guidance (backup the volume first, read the changelog between versions).
 
-## CI/CD
-
-The upstream project's GitHub Actions workflow (`.github/workflows/cicd.yml`) handles automated deploys for the BetweenRows project itself:
-
-- Push to `main` → tests only
-- Push `v*` tag → tests → build & publish Docker image to GHCR → deploy to Fly.io
-- `workflow_dispatch` → redeploy a specific existing version
-
-If you fork the project, the GHCR package must be public for CI/CD deploys to work: **GitHub → Packages → betweenrows → Package settings → Change visibility → Public**.
-
 ## Next steps
 
 - **[Troubleshooting](/operations/troubleshooting)** — connection and client compatibility issues

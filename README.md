@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/getbetweenrows/betweenrows/actions/workflows/cicd.yml/badge.svg)](https://github.com/getbetweenrows/betweenrows/actions)
 [![Version](https://img.shields.io/github/v/tag/getbetweenrows/betweenrows?label=Version)](https://github.com/getbetweenrows/betweenrows/tags)
-[![Status: Beta](https://img.shields.io/badge/Status-Beta-orange.svg)](https://docs.betweenrows.dev/about/license)
+![Status: Beta](https://img.shields.io/badge/Status-Beta-orange.svg)
 [![License: ELv2](https://img.shields.io/badge/License-ELv2-blue.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-GHCR-blue?logo=docker)](https://ghcr.io/getbetweenrows/betweenrows)
 [![Built with Rust](https://img.shields.io/badge/Built%20with-Rust-orange?logo=rust)](https://www.rust-lang.org)

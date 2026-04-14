@@ -13,6 +13,38 @@ Where new content goes:
 - New **public user docs** → `docs-site/docs/`
 - New **design or architecture notes for betweenrows development** → `../docs/`
 
+## Sidebar organization
+
+The sidebar has five top-level sections, each with a clear job. **There is no "Reference" or "Appendix" section** — lookup material lives next to what it belongs to.
+
+| Section | Answers | Contents |
+|---|---|---|
+| **Start** | Get hands on it | Introduction, Quickstart, Demo Schema |
+| **Concepts** | Understand the system | Architecture, Policy Model, Security Overview, Threat Model, Known Limitations, Glossary |
+| **Features** | What each feature IS | Data Sources, Users & Roles, User Attributes, Policies (w/ Policy Types sub-group, Template Expressions, Decision Functions), Audit & Debugging |
+| **Guides** | How to DO things | Deployment/{Docker, Fly.io, From Source, Configuration}, Upgrading, Backups, Troubleshooting, Rename Safety, Recipes/{...} |
+| **About** | Meta | Changelog (external), Roadmap, License (external), Report an Issue |
+
+**Rules that fall out of this shape:**
+
+- Per-feature reference material (field tables, validation rules, JSON shapes) lives **inside** the feature page, not in a separate reference section. The 7-section guide template has a "Field reference" step — that's the home.
+- Template Expressions and Decision Functions are nested under Policies in the sidebar because they're policy-adjacent (the language and conditional gating), even though their files still live at `reference/template-expressions.md` and `guides/decision-functions.md` for URL stability.
+- Configuration (env vars) lives under Guides > Deployment — it's operational config, not a feature.
+- Known Limitations and Glossary live under Concepts — they're "understand the system, its limits, its vocabulary."
+- Demo Schema lives under Start — it's the dataset tutorials and recipes use.
+- File paths under `reference/` are kept for URL stability even though there's no sidebar "Reference" section — users who bookmarked those URLs still land on the right content.
+- `operations/` files are grouped under Guides in the sidebar; the folder name is internal.
+
+## What belongs on the site
+
+The goal is a small set of pages that are each worth reading, not a large set that inflates the sidebar. Prefer deleting over bloat.
+
+- **Only add a page if there's content a user would go looking for AND no other reasonable home exists.** If the content is a plain-language restatement of something already authoritative (the `LICENSE` file, the `CHANGELOG`, an existing guide), skip the page and link to the canonical source directly — external links in the sidebar (`link: LICENSE_URL`) are fine. Retarget inbound references when you delete a page; don't leave them pointing at a tombstone.
+- **No stability claims while in early beta.** "What is stable / What is less stable" subsystem lists, "the X API is stable" statements, and similar reassurances are liabilities: users build compliance stories around guarantees you don't actually make, and every refactor breaks a promise in writing. Until 1.0, the only stability guidance we publish is the operational one — pin your tag, back up, read the changelog before upgrading. No subsystem-level promises.
+- **No pages that exist just to host a link.** If a page would be ten lines of prose framing around a single outbound link, the outbound link belongs directly in the sidebar / footer / parent page instead.
+
+The test for any new page: "if I delete this in six months, will users notice a gap, or will they just follow the links they were going to follow anyway?" If the second, don't write it.
+
 ## Finding things
 
 ```sh
@@ -50,12 +82,12 @@ One table, one home. Other pages link, don't duplicate.
 
 | Material | Canonical home |
 |---|---|
-| Policy types table, targets matrix, definition-by-type JSON | `reference/policy-types.md` |
+| Policy types table, targets matrix, definition-by-type JSON, validation rules, wildcard glob syntax | `guides/policies/index.md` |
 | Template variables, missing-attribute behavior, SQL subset, NULL semantics | `reference/template-expressions.md` |
 | Access modes (deployment perspective) | `guides/data-sources.md` |
 | Access modes (conceptual semantics) | `concepts/policy-model.md` |
 | Role assignment scopes | `guides/users-roles.md` |
-| Audit log field meanings | `reference/audit-log-fields.md` |
+| Audit log field meanings (query audit + admin audit) | `guides/audit-debugging.md` |
 | Environment variables | `reference/configuration.md` |
 | Terminology / glossary | `reference/glossary.md` |
 
@@ -248,13 +280,14 @@ Images are served from `docs/public/screenshots/`, referenced as `/screenshots/.
 
 ### Consumption paths
 
-- **Per-page Copy/Download as Markdown** buttons — rendered by the plugin on every page.
-- **"Docs for AI" nav link** in `config.ts` → `/llms-full.txt` for humans who want the whole docs set.
-- `/llms.txt` is discoverable by convention (not in the nav) for AI agents.
+- **Per-page Copy/Download as Markdown** buttons — rendered by the plugin on every page. This is the primary affordance for users who want to feed a page to their own chat model.
+- `/llms.txt` and `/llms-full.txt` are generated by the plugin and discoverable by convention — no nav entry. AI agents find them at the well-known URLs; humans who want the full dump can type the URL directly.
+
+**No "Docs for AI" nav entry.** It was removed because users found it confusing — the label suggested the link was for an AI chatbot rather than a plain-text dump, and the per-page Copy button already covers the "get this as markdown" use case. Do not re-add it.
 
 ### Do NOT add a custom "Ask ChatGPT/Claude" deep-link component
 
-Dropped from the plan: chat provider query-param APIs are unreliable, users already have a chat window open, and the per-page Copy button + nav link cover the real use cases.
+Dropped from the plan: chat provider query-param APIs are unreliable, users already have a chat window open, and the per-page Copy button covers the real use cases.
 
 ## Click-to-zoom on images (medium-zoom)
 
@@ -300,7 +333,6 @@ The `/release` command automatically invokes `/docs-sync v<prev-tag>..HEAD` as s
 When the proxy releases `v0.X.Y` (manual version):
 
 - [ ] Bump `VERSION` in `docs/.vitepress/constants.ts` — single source of truth for the `{{VERSION}}` token substituted across all guides at build time
-- [ ] Update `about/changelog.md` (use `git log --oneline v<prev>..v<new>` for content)
 - [ ] Re-capture screenshots if the admin UI changed visually
 - [ ] Run the code-scan pass on new source files; fold catches into relevant guides
 - [ ] Check `../docs/security-vectors.md` for new vectors; reconcile with guide limitations

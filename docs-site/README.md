@@ -1,6 +1,6 @@
 # BetweenRows Documentation Site
 
-The public documentation for BetweenRows, built with [VitePress](https://vitepress.dev/) and deployed to `docs.getbetweenrows.com`.
+The public documentation for BetweenRows, built with [VitePress](https://vitepress.dev/) and deployed to `docs.betweenrows.dev`.
 
 ## Commands
 
@@ -15,8 +15,7 @@ npm run preview    # preview the build locally
 
 - `docs/` — public documentation pages (Markdown)
 - `docs/.vitepress/` — VitePress config, theme, build cache (the `dist/` output is gitignored)
-- `docs/public/` — static assets served as-is (favicon, logo, OG image, robots.txt)
-- `internal/` — engineering-only notes, ADRs, reconciliation log (**not built**)
+- `docs/public/` — static assets served as-is (favicon, logo, robots.txt)
 
 The canonical demo stack (schema + seed + compose file + setup script) used
 by the docs screenshots lives in `../scripts/demo_ecommerce/` — see its

@@ -1,6 +1,13 @@
 import { defineConfig } from 'vitepress';
 import llmstxt from 'vitepress-plugin-llms';
 import { copyOrDownloadAsMarkdownButtons } from 'vitepress-plugin-llms';
+import {
+  SITE_URL,
+  GITHUB_URL,
+  EDIT_PAGE_URL,
+  LICENSE_URL,
+  OG_IMAGE_URL,
+} from './constants';
 
 // IMPORTANT: VitePress builds everything under `docs/` (this directory's
 // parent). `../internal/` and legacy `../../docs/` (inside the betweenrows
@@ -16,24 +23,15 @@ export default defineConfig({
   lastUpdated: true,
   ignoreDeadLinks: 'localhostLinks',
   sitemap: {
-    hostname: 'https://docs.getbetweenrows.com',
+    hostname: SITE_URL,
   },
   head: [
     ['link', { rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' }],
-    ['meta', { property: 'og:image', content: '/og-default.png' }],
+    ['meta', { property: 'og:image', content: OG_IMAGE_URL }],
+    ['meta', { property: 'og:image:width', content: '2400' }],
+    ['meta', { property: 'og:image:height', content: '1260' }],
     ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
-    ['meta', { name: 'twitter:image', content: '/og-default.png' }],
-    // Cloudflare Web Analytics — privacy-first, no cookies, one-line beacon.
-    // Replace the token when the Cloudflare Pages project is created.
-    [
-      'script',
-      {
-        defer: '',
-        src: 'https://static.cloudflareinsights.com/beacon.min.js',
-        'data-cf-beacon':
-          '{"token": "REPLACE_WITH_CLOUDFLARE_WEB_ANALYTICS_TOKEN"}',
-      },
-    ],
+    ['meta', { name: 'twitter:image', content: OG_IMAGE_URL }],
   ],
   vite: {
     plugins: [llmstxt()],
@@ -189,13 +187,12 @@ export default defineConfig({
     socialLinks: [
       {
         icon: 'github',
-        link: 'https://github.com/getbetweenrows/betweenrows',
+        link: GITHUB_URL,
       },
     ],
 
     editLink: {
-      pattern:
-        'https://github.com/getbetweenrows/betweenrows/edit/main/docs-site/docs/:path',
+      pattern: EDIT_PAGE_URL,
       text: 'Edit this page on GitHub',
     },
 

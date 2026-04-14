@@ -40,9 +40,9 @@ Out of scope:
 
 BetweenRows is pre-1.0 alpha software. The threat model, defenses, and known limitations are documented in the public docs:
 
-- [Threat Model](https://docs.getbetweenrows.com/concepts/threat-model)
-- [Security Overview](https://docs.getbetweenrows.com/concepts/security-overview)
-- [Known Limitations](https://docs.getbetweenrows.com/operations/known-limitations)
+- [Threat Model](docs-site/docs/concepts/threat-model.md)
+- [Security Overview](docs-site/docs/concepts/security-overview.md)
+- [Known Limitations](docs-site/docs/operations/known-limitations.md)
 
 Issues already listed in those pages are known trade-offs, not vulnerabilities — though reports that sharpen or contradict them are welcome.
 

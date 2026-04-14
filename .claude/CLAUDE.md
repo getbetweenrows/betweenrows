@@ -26,7 +26,7 @@ docs-site/      Public documentation site (VitePress) — downstream consumer of
 Two documentation trees exist and they have a **one-way dependency**:
 
 - **`docs/`** is design-time material owned by betweenrows development: policy system philosophy, roadmap rationale and tech-debt notes, user story catalog, security vector taxonomy. Code comments, `README.md`, `CONTRIBUTING.md`, `proxy/CLAUDE.md`, and this file may reference `docs/*.md` freely — these are the canonical source of design rationale.
-- **`docs-site/`** is the public VitePress site published at `docs.getbetweenrows.com`. It is a **downstream consumer** of betweenrows: it reads from `../docs/` via `@include:` transclusion (e.g., `concepts/threat-model.md` transcludes `docs/security-vectors.md`) and reads source code directly for guide field tables.
+- **`docs-site/`** is the public VitePress site published at `docs.betweenrows.dev`. It is a **downstream consumer** of betweenrows: it reads from `../docs/` via `@include:` transclusion (e.g., `concepts/threat-model.md` transcludes `docs/security-vectors.md`) and reads source code directly for guide field tables.
 
 **The dependency flows one way.** Nothing in `proxy/`, `admin-ui/`, `migration/`, `scripts/`, `.githooks/`, `.github/`, `README.md`, `CONTRIBUTING.md`, or `docs/` may reference `docs-site/`. betweenrows developers never need to think about `docs-site/` when building features — that separation is the whole point.
 

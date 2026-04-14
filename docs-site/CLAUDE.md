@@ -2,8 +2,7 @@
 
 ## Layout
 
-- **Public docs**: `docs/` — plain `.md`, rendered to `docs.getbetweenrows.com` by VitePress. Sidebar/theme in `docs/.vitepress/config.ts`. Static assets in `docs/public/`.
-- **Internal notes**: `internal/` — engineering notes about docs-site itself. NOT part of the VitePress build.
+- **Public docs**: `docs/` — plain `.md`, rendered to `docs.betweenrows.dev` by VitePress. Sidebar/theme in `docs/.vitepress/config.ts`. URLs and the CF Web Analytics token are centralized in `docs/.vitepress/constants.ts`. Static assets in `docs/public/`.
 - **Upstream design docs**: `../docs/` — the betweenrows repo's design-time documentation (policy system philosophy, roadmap rationale, security vector taxonomy, user story catalog). This is the source of truth for development rationale, and the site **reads from** it:
   - `concepts/threat-model.md` transcludes `../../../docs/security-vectors.md` via `<!--@include:-->`. Edit the source, not the wrapper.
   - Guide content drawn from `../docs/permission-system.md` is editorially translated for a user audience — see the `/docs-sync` command for the reconciliation flow.
@@ -12,14 +11,12 @@
 Where new content goes:
 
 - New **public user docs** → `docs-site/docs/`
-- New **engineering notes about docs-site itself** (screenshot capture procedures, reconciliation logs, etc.) → `docs-site/internal/`
 - New **design or architecture notes for betweenrows development** → `../docs/`
 
 ## Finding things
 
 ```sh
 grep -r '^description:' docs --include='*.md'      # topic overview of public pages
-cat internal/README.md                              # internal notes index
 ```
 
 ## Writing conventions
@@ -329,4 +326,8 @@ npm run preview   # preview the build locally
 
 ## Deployment
 
-Auto-deploy on push to `main` via Cloudflare Pages. Preview deploys on PR branches. Custom domain: `docs.getbetweenrows.com`.
+Deployed to Cloudflare Pages as the `betweenrows-docs` project, served at `docs.betweenrows.dev`. Auto-deploys on push to `main` via `.github/workflows/docs-site-deploy.yml`, which is gated by a `paths: ['docs-site/**', '.github/workflows/docs-site-deploy.yml']` filter so non-docs commits don't trigger a rebuild. Uses `cloudflare/wrangler-action@v3` with the `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` repo secrets (the public-repo token is separate from the private www repo's token).
+
+URLs (`SITE_URL`, `WWW_URL`, `GITHUB_URL`, `EDIT_PAGE_URL`, `LICENSE_URL`, `OG_IMAGE_URL`) are centralized in `docs/.vitepress/constants.ts`. The OG image is the same brand card hosted on the www site at `https://betweenrows.dev/og-image.png` — one image for both surfaces.
+
+Cloudflare Web Analytics is enabled in **automatic mode** — the beacon is injected at the edge by Cloudflare for all proxied traffic, no snippet in the VitePress config. Configured per-site in the Cloudflare dashboard under Web Analytics. The docs site has its own separate site/dashboard from the www landing page.

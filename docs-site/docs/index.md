@@ -18,8 +18,8 @@ hero:
       text: Introduction
       link: /start/introduction
     - theme: alt
-      text: betweenrows.com
-      link: https://getbetweenrows.com
+      text: betweenrows.dev
+      link: https://betweenrows.dev
 
 features:
   - title: Start

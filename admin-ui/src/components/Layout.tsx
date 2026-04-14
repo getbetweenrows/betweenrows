@@ -159,7 +159,7 @@ export function Layout() {
             </button>
             <span className="text-gray-600">·</span>
             <a
-              href="https://docs.getbetweenrows.com/about/report-an-issue"
+              href="https://docs.betweenrows.dev/about/report-an-issue"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"

@@ -66,15 +66,29 @@ Once the user confirms the version and changelog entries:
 - Commit with message: `Release vX.Y.Z`
 - Create an annotated tag: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
 
-### 6. Finish
+### 6. Finish and publish the GitHub release
 
-Tell the user the release is ready and show the exact command to push:
+1. Tell the user the local release is ready and show the exact command to push:
 
-```
-git push && git push origin vX.Y.Z
-```
+    ```
+    git push && git push origin vX.Y.Z
+    ```
 
-Remind them that:
-- Pushing the commit (`git push`) triggers CI: tests only.
-- Pushing the tag (`git push origin vX.Y.Z`) triggers CI: tests → build → publish Docker image tagged `X.Y.Z` and `X.Y` → deploy to Fly.io.
-- To redeploy an existing version without a new release, use the `workflow_dispatch` trigger in GitHub Actions with the version number (e.g. `1.2.3`).
+   Remind them that:
+   - Pushing the commit (`git push`) triggers CI: tests only.
+   - Pushing the tag (`git push origin vX.Y.Z`) triggers CI: tests → build → publish Docker image tagged `X.Y.Z` and `X.Y` → deploy to Fly.io.
+   - To redeploy an existing version without a new release, use the `workflow_dispatch` trigger in GitHub Actions with the version number (e.g. `1.2.3`).
+
+2. **Wait for the user to confirm they've pushed the tag.** Do not run `gh release create` before the tag exists on the remote — the command fails with "tag not found."
+
+3. Once confirmed, extract the `## [X.Y.Z]` section from `CHANGELOG.md` (everything from the `## [X.Y.Z] - YYYY-MM-DD` heading up to — but not including — the next `## [` heading). This is the curated release body.
+
+4. Create the GitHub release, passing the extracted section via `--notes`:
+
+    ```
+    gh release create vX.Y.Z --title "vX.Y.Z" --notes "<extracted section>"
+    ```
+
+   Do not use `--generate-notes`. The auto-generated notes are a list of raw commit titles, which is noisier and less useful than the curated changelog entries we just wrote in step 3.
+
+5. Report the release URL that `gh release create` prints, and remind the user that the Docker image and Fly deploy are still in progress in CI.

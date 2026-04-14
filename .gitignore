@@ -1,6 +1,7 @@
 **/.env
 **/.DS_Store
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 ## admin-ui (Node.js / Vite)
 admin-ui/node_modules/
 admin-ui/dist/

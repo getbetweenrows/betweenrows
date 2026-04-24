@@ -14,4 +14,4 @@ export const OG_IMAGE_URL = `${WWW_URL}/og-image.png`
 // Current released proxy version. Bumped by /release alongside Cargo.toml
 // and admin-ui/package.json. Substituted into markdown via the {{VERSION}}
 // token — see the markdown.config hook in .vitepress/config.ts.
-export const VERSION = '0.17.0'
+export const VERSION = '0.17.1'

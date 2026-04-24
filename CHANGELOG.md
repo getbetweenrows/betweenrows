@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-04-24
+
 ### Changed
 
 - **[Admin UI] Anchor-coverage warning is harder to miss and easier to act on** — `PolicyEditPage` now hoists the `useQuery(['policy-anchor-coverage'])` to the page level so the side-nav and the panel share one cache entry. The `Anchor coverage` section in the secondary nav now carries a red count pill (`SectionDef.indicator`) when the policy will silently deny on any table; a top-of-page red banner ("This row filter will silently deny on N tables") with a `Review` button appears on every section except the coverage section itself, and inherits the active section's max-width so it lines up with the form/content below. The coverage panel itself was redesigned: each broken table is its own card with bold header (data source + `schema.table`), per-column rows with a clearer reason line, and a tertiary `Add anchor →` button instead of a plain underline. The outer wrapper switched from red wash to a neutral white card so the per-table red still reads as the alarm without desensitizing.

@@ -7,13 +7,11 @@ import { makeDataSource } from '../test/factories'
 
 vi.mock('../api/datasources', () => ({
   listDataSources: vi.fn(),
-  deleteDataSource: vi.fn(),
   testDataSource: vi.fn(),
 }))
 
-import { listDataSources, deleteDataSource, testDataSource } from '../api/datasources'
+import { listDataSources, testDataSource } from '../api/datasources'
 const mockListDataSources = listDataSources as ReturnType<typeof vi.fn>
-const mockDeleteDataSource = deleteDataSource as ReturnType<typeof vi.fn>
 const mockTestDataSource = testDataSource as ReturnType<typeof vi.fn>
 
 function makePaginatedDs(items: ReturnType<typeof makeDataSource>[]) {
@@ -47,22 +45,14 @@ describe('DataSourcesListPage', () => {
     expect(screen.getByText('Active')).toBeInTheDocument()
   })
 
-  it('delete confirms and calls deleteDataSource', async () => {
-    const user = userEvent.setup()
+  it('does not expose a Delete row action (deletion lives in the edit page Danger Zone)', async () => {
     const ds = makeDataSource({ id: 'ds-1', name: 'prod-db' })
     mockListDataSources.mockResolvedValue(makePaginatedDs([ds]))
-    mockDeleteDataSource.mockResolvedValue(undefined)
 
     renderWithProviders(<DataSourcesListPage />, { authenticated: true })
     await waitFor(() => screen.getByText('prod-db'))
 
-    await user.click(screen.getByRole('button', { name: /^delete$/i }))
-
-    // TanStack Query v5 mutationFn receives (variables, context) — check first arg
-    await waitFor(() => {
-      expect(mockDeleteDataSource).toHaveBeenCalled()
-      expect(mockDeleteDataSource.mock.calls[0][0]).toBe('ds-1')
-    })
+    expect(screen.queryByRole('button', { name: /^delete$/i })).toBeNull()
   })
 
   it('test connection calls testDataSource and shows result', async () => {

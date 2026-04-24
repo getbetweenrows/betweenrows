@@ -1,14 +1,12 @@
 import { useState } from 'react'
 import { useDebounce } from '../hooks/useDebounce'
 import { Link, useNavigate } from 'react-router-dom'
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { deleteRole, listRoles } from '../api/roles'
-import type { Role } from '../types/role'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { listRoles } from '../api/roles'
 import { CopyableId } from '../components/CopyableId'
 
 export function RolesListPage() {
   const navigate = useNavigate()
-  const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
   const debouncedSearch = useDebounce(search, 300)
@@ -18,19 +16,6 @@ export function RolesListPage() {
     queryFn: () => listRoles({ page, page_size: 20, search: debouncedSearch || undefined }),
     placeholderData: keepPreviousData,
   })
-
-  const deleteMutation = useMutation({
-    mutationFn: deleteRole,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['roles'] })
-      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
-    },
-  })
-
-  function handleDelete(role: Role) {
-    if (!confirm(`Delete role "${role.name}"? This cannot be undone.`)) return
-    deleteMutation.mutate(role.id)
-  }
 
   const totalPages = data ? Math.ceil(data.total / data.page_size) : 1
 
@@ -134,12 +119,6 @@ export function RolesListPage() {
                         className="text-blue-600 hover:text-blue-800 text-xs font-medium"
                       >
                         Edit
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleDelete(role) }}
-                        className="text-red-500 hover:text-red-700 text-xs font-medium"
-                      >
-                        Delete
                       </button>
                     </div>
                   </td>

@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useDebounce } from '../hooks/useDebounce'
 import { Link, useNavigate } from 'react-router-dom'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { deletePolicy, listPolicies, updatePolicy } from '../api/policies'
+import { listPolicies, updatePolicy } from '../api/policies'
 import type { PolicyResponse } from '../types/policy'
 import { CopyableId } from '../components/CopyableId'
 
@@ -19,14 +19,6 @@ export function PoliciesListPage() {
     placeholderData: keepPreviousData,
   })
 
-  const deleteMutation = useMutation({
-    mutationFn: deletePolicy,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['policies'] })
-      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
-    },
-  })
-
   const toggleMutation = useMutation({
     mutationFn: ({ id, is_enabled, version }: { id: string; is_enabled: boolean; version: number }) =>
       updatePolicy(id, { is_enabled, version }),
@@ -35,11 +27,6 @@ export function PoliciesListPage() {
       queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
     },
   })
-
-  function handleDelete(policy: PolicyResponse) {
-    if (!confirm(`Delete policy "${policy.name}"? This cannot be undone.`)) return
-    deleteMutation.mutate(policy.id)
-  }
 
   function handleToggle(policy: PolicyResponse) {
     toggleMutation.mutate({ id: policy.id, is_enabled: !policy.is_enabled, version: policy.version })
@@ -157,12 +144,6 @@ export function PoliciesListPage() {
                         className="text-blue-600 hover:text-blue-800 text-xs font-medium"
                       >
                         Edit
-                      </button>
-                      <button
-                        onClick={() => handleDelete(policy)}
-                        className="text-red-500 hover:text-red-700 text-xs font-medium"
-                      >
-                        Delete
                       </button>
                     </div>
                   </td>

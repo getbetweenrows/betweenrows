@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { createRole } from '../api/roles'
 import { RoleForm } from '../components/RoleForm'
 import type { RoleFormValues } from '../components/RoleForm'
+import { PageHeader } from '../components/layout/PageHeader'
 
 export function RoleCreatePage() {
   const navigate = useNavigate()
@@ -33,15 +34,13 @@ export function RoleCreatePage() {
 
   return (
     <div className="p-6 max-w-2xl">
-      <div className="mb-6">
-        <button
-          onClick={() => navigate('/roles')}
-          className="text-sm text-gray-500 hover:text-gray-700 mb-2"
-        >
-          &larr; Back to Roles
-        </button>
-        <h1 className="text-xl font-bold text-gray-900">Create Role</h1>
-      </div>
+      <PageHeader
+        breadcrumb={[
+          { label: 'Roles', href: '/roles' },
+          { label: 'New role' },
+        ]}
+        title="New role"
+      />
 
       <div className="bg-white rounded-xl border border-gray-200 p-6">
         <RoleForm

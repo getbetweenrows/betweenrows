@@ -1,14 +1,12 @@
 import { useState } from 'react'
 import { useDebounce } from '../hooks/useDebounce'
 import { Link, useNavigate } from 'react-router-dom'
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { deleteUser, listUsers } from '../api/users'
-import type { User } from '../types/user'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { listUsers } from '../api/users'
 import { CopyableId } from '../components/CopyableId'
 
 export function UsersListPage() {
   const navigate = useNavigate()
-  const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
   const debouncedSearch = useDebounce(search, 300)
@@ -18,19 +16,6 @@ export function UsersListPage() {
     queryFn: () => listUsers({ page, page_size: 20, search: debouncedSearch || undefined }),
     placeholderData: keepPreviousData,
   })
-
-  const deleteMutation = useMutation({
-    mutationFn: deleteUser,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['users'] })
-      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
-    },
-  })
-
-  function handleDelete(user: User) {
-    if (!confirm(`Delete user "${user.username}"? This cannot be undone.`)) return
-    deleteMutation.mutate(user.id)
-  }
 
   const totalPages = data ? Math.ceil(data.total / data.page_size) : 1
 
@@ -122,12 +107,6 @@ export function UsersListPage() {
                         className="text-blue-600 hover:text-blue-800 text-xs font-medium"
                       >
                         Edit
-                      </button>
-                      <button
-                        onClick={() => handleDelete(user)}
-                        className="text-red-500 hover:text-red-700 text-xs font-medium"
-                      >
-                        Delete
                       </button>
                     </div>
                   </td>

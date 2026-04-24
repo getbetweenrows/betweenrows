@@ -72,3 +72,40 @@ export interface AssignPolicyPayload {
   scope?: AssignmentScope
   priority: number
 }
+
+// ---------- Anchor coverage (edit-time silent-deny warning) ----------
+
+/// Per-(table, column) verdict for whether a row-filter policy's column
+/// reference will resolve at query time. Tagged-union JSON keyed by `kind`.
+export type AnchorCoverageVerdict =
+  | { kind: 'on_table'; column: string }
+  | {
+      kind: 'anchor_walk'
+      column: string
+      via_relationship_id: string
+      via_child_column: string
+      via_parent_column: string
+      parent_schema: string
+      parent_table: string
+    }
+  | { kind: 'anchor_alias'; column: string; actual_column_name: string }
+  | { kind: 'missing_anchor'; column: string }
+  | {
+      kind: 'missing_column_on_alias_target'
+      column: string
+      actual_column_name: string
+    }
+
+export interface AnchorCoverageTableEntry {
+  data_source_id: string
+  data_source_name: string
+  schema: string
+  table: string
+  verdicts: AnchorCoverageVerdict[]
+}
+
+export interface PolicyAnchorCoverageResponse {
+  policy_id: string
+  policy_type: string
+  coverage: AnchorCoverageTableEntry[]
+}

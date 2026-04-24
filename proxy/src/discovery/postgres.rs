@@ -13,7 +13,8 @@ use tokio_postgres::NoTls;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    DiscoveredColumn, DiscoveredSchema, DiscoveredTable, DiscoveryError, DiscoveryProvider,
+    DiscoveredColumn, DiscoveredForeignKey, DiscoveredSchema, DiscoveredTable, DiscoveryError,
+    DiscoveryProvider,
 };
 use crate::engine::{DataSourceConfig, arrow_type_to_string, build_postgres_params};
 
@@ -360,6 +361,97 @@ impl DiscoveryProvider for PostgresDiscoveryProvider {
         }
 
         Ok(all_columns)
+    }
+
+    async fn discover_foreign_keys(
+        &self,
+        tables: &[(String, String)],
+        cancel: &CancellationToken,
+    ) -> Result<Vec<DiscoveredForeignKey>, DiscoveryError> {
+        if tables.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let client = self.connect_with_cancel(cancel).await?;
+
+        // Parallel arrays for (schema, table) pairs — filters FKs to only those whose
+        // both endpoints are in the provided catalog. Avoids tokio_postgres's flaky
+        // record[] binding by using two text[] arrays + unnest.
+        let schemas: Vec<String> = tables.iter().map(|(s, _)| s.clone()).collect();
+        let table_names: Vec<String> = tables.iter().map(|(_, t)| t.clone()).collect();
+
+        let schemas_p: &(dyn tokio_postgres::types::ToSql + Sync) = &schemas;
+        let tables_p: &(dyn tokio_postgres::types::ToSql + Sync) = &table_names;
+        let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[schemas_p, tables_p];
+
+        // Single-column FKs (array_length(conkey, 1) = 1) whose parent column is
+        // either a primary key OR a single-column unique. This is the rewriter's
+        // "at-most-one-parent-per-child" precondition.
+        let sql = "
+            WITH catalog AS (
+                SELECT schema_name, table_name
+                FROM unnest($1::text[], $2::text[]) AS t(schema_name, table_name)
+            ),
+            parent_unique_cols AS (
+                SELECT
+                    idx.indrelid AS relid,
+                    att.attname  AS col_name
+                FROM pg_index idx
+                JOIN pg_attribute att
+                    ON att.attrelid = idx.indrelid
+                   AND att.attnum = idx.indkey[0]
+                WHERE (idx.indisprimary OR idx.indisunique)
+                  AND array_length(idx.indkey::int[], 1) = 1
+            )
+            SELECT
+              cn.nspname  AS child_schema,
+              c.relname   AS child_table,
+              ca.attname  AS child_column,
+              pn.nspname  AS parent_schema,
+              p.relname   AS parent_table,
+              pa.attname  AS parent_column,
+              con.conname AS fk_constraint_name
+            FROM pg_constraint con
+            JOIN pg_class     c  ON c.oid = con.conrelid
+            JOIN pg_namespace cn ON cn.oid = c.relnamespace
+            JOIN pg_class     p  ON p.oid = con.confrelid
+            JOIN pg_namespace pn ON pn.oid = p.relnamespace
+            JOIN pg_attribute ca ON ca.attrelid = c.oid  AND ca.attnum = con.conkey[1]
+            JOIN pg_attribute pa ON pa.attrelid = p.oid  AND pa.attnum = con.confkey[1]
+            WHERE con.contype = 'f'
+              AND array_length(con.conkey::int[], 1) = 1
+              AND EXISTS (
+                  SELECT 1 FROM catalog WHERE schema_name = cn.nspname AND table_name = c.relname
+              )
+              AND EXISTS (
+                  SELECT 1 FROM catalog WHERE schema_name = pn.nspname AND table_name = p.relname
+              )
+              AND EXISTS (
+                  SELECT 1 FROM parent_unique_cols pu
+                  WHERE pu.relid = p.oid AND pu.col_name = pa.attname
+              )
+            ORDER BY cn.nspname, c.relname, ca.attname, pn.nspname, p.relname
+        ";
+
+        let rows = tokio::select! {
+            res = client.query(sql, params) => {
+                res.map_err(|e| DiscoveryError::Query(e.to_string()))?
+            }
+            _ = cancel.cancelled() => return Err(DiscoveryError::Cancelled),
+        };
+
+        Ok(rows
+            .into_iter()
+            .map(|row| DiscoveredForeignKey {
+                child_schema: row.get(0),
+                child_table: row.get(1),
+                child_column: row.get(2),
+                parent_schema: row.get(3),
+                parent_table: row.get(4),
+                parent_column: row.get(5),
+                fk_constraint_name: row.get(6),
+            })
+            .collect())
     }
 }
 

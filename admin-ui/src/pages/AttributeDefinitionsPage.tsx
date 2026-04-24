@@ -1,11 +1,8 @@
 import { useState } from 'react'
 import { useDebounce } from '../hooks/useDebounce'
 import { Link, useNavigate } from 'react-router-dom'
-import { keepPreviousData, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import {
-  listAttributeDefinitions,
-  deleteAttributeDefinition,
-} from '../api/attributeDefinitions'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { listAttributeDefinitions } from '../api/attributeDefinitions'
 import { CopyableId } from '../components/CopyableId'
 import {
   SUPPORTED_ENTITY_TYPES,
@@ -27,7 +24,6 @@ function formatValueType(def: AttributeDefinition): string {
 
 export function AttributeDefinitionsPage() {
   const navigate = useNavigate()
-  const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
   const debouncedSearch = useDebounce(search, 300)
@@ -44,48 +40,6 @@ export function AttributeDefinitionsPage() {
       }),
     placeholderData: keepPreviousData,
   })
-
-  const [deleteError, setDeleteError] = useState<string | null>(null)
-  const deleteMutation = useMutation({
-    mutationFn: (id: string) => deleteAttributeDefinition(id, false),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['attribute-definitions'] })
-      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
-      setDeleteError(null)
-    },
-    onError: (err: unknown) => {
-      const msg =
-        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ??
-        'Failed to delete'
-      // If conflict (in use), offer force delete
-      setDeleteError(msg)
-    },
-  })
-
-  const forceDeleteMutation = useMutation({
-    mutationFn: (id: string) => deleteAttributeDefinition(id, true),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['attribute-definitions'] })
-      queryClient.invalidateQueries({ queryKey: ['users'] })
-      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
-      setDeleteError(null)
-    },
-  })
-
-  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null)
-
-  function handleDelete(id: string) {
-    setPendingDeleteId(id)
-    setDeleteError(null)
-    deleteMutation.mutate(id)
-  }
-
-  function handleForceDelete() {
-    if (pendingDeleteId) {
-      forceDeleteMutation.mutate(pendingDeleteId)
-      setPendingDeleteId(null)
-    }
-  }
 
   const items = data?.data ?? []
   const total = data?.total ?? 0
@@ -132,20 +86,6 @@ export function AttributeDefinitionsPage() {
           className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-64"
         />
       </div>
-
-      {deleteError && (
-        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 flex items-center justify-between">
-          <span>{deleteError}</span>
-          {deleteError.includes('force=true') && (
-            <button
-              onClick={handleForceDelete}
-              className="ml-4 bg-red-600 hover:bg-red-700 text-white text-xs font-medium rounded px-3 py-1 transition-colors"
-            >
-              Force delete
-            </button>
-          )}
-        </div>
-      )}
 
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
         {isLoading ? (
@@ -207,12 +147,6 @@ export function AttributeDefinitionsPage() {
                       className="text-blue-600 hover:text-blue-800 text-sm"
                     >
                       Edit
-                    </button>
-                    <button
-                      onClick={() => handleDelete(def.id)}
-                      className="text-red-600 hover:text-red-800 text-sm"
-                    >
-                      Delete
                     </button>
                   </td>
                 </tr>

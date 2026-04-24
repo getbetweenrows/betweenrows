@@ -1,5 +1,6 @@
 pub mod admin_audit_log;
 pub mod attribute_definition;
+pub mod column_anchor;
 pub mod data_source;
 pub mod data_source_access;
 pub mod decision_function;
@@ -14,3 +15,4 @@ pub mod query_audit_log;
 pub mod role;
 pub mod role_inheritance;
 pub mod role_member;
+pub mod table_relationship;

@@ -147,28 +147,30 @@ export function DataSourceForm({
         </div>
       )}
 
-      {/* Name */}
-      <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">
-          Name <span className="text-red-500">*</span>
-        </label>
-        <input
-          type="text"
-          value={name}
-          onChange={(e) => { setName(e.target.value); setNameError(null) }}
-          onBlur={() => setNameError(validateDatasourceName(name.trim()))}
-          placeholder="e.g. production-db"
-          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          required
-        />
-        {nameError ? (
-          <p className="text-xs text-red-600 mt-1">{nameError}</p>
-        ) : (
-          <p className="text-xs text-gray-500 mt-1">
-            Starts with a letter · letters, digits, <code>_</code> and <code>-</code> only · no spaces · max 64 chars. Used as the database name in connection strings.
-          </p>
-        )}
-      </div>
+      {/* Name (create only — rename on the edit page lives in the Danger Zone) */}
+      {!isEdit && (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Name <span className="text-red-500">*</span>
+          </label>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => { setName(e.target.value); setNameError(null) }}
+            onBlur={() => setNameError(validateDatasourceName(name.trim()))}
+            placeholder="e.g. production-db"
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            required
+          />
+          {nameError ? (
+            <p className="text-xs text-red-600 mt-1">{nameError}</p>
+          ) : (
+            <p className="text-xs text-gray-500 mt-1">
+              Starts with a letter · letters, digits, <code>_</code> and <code>-</code> only · no spaces · max 64 chars. Used as the database name in connection strings.
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Type selector */}
       <div>

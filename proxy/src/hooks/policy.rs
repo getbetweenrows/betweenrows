@@ -17,7 +17,7 @@ use pgwire::api::portal::Format;
 use pgwire::api::results::Response;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::{ControlFlow, Not};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -26,8 +26,13 @@ use uuid::Uuid;
 use super::QueryHook;
 use super::read_only::is_allowed_statement;
 use crate::engine::BetweenRowsPostgresDialect;
-use crate::entity::{data_source, decision_function, discovered_schema, policy, query_audit_log};
+use crate::entity::{
+    column_anchor as column_anchor_entity, data_source, decision_function, discovered_column,
+    discovered_schema, discovered_table, policy, query_audit_log,
+    table_relationship as table_relationship_entity,
+};
 use crate::policy_match::{PolicyType, TargetEntry, expand_column_patterns};
+use crate::resolution::graph::{self as resolution_graph, RelationshipEdge, RelationshipSnapshot};
 
 // ---------- system schema detection ----------
 
@@ -668,6 +673,21 @@ pub fn validate_expression(expression: &str, is_mask: bool) -> Result<(), String
     }
 }
 
+/// Parse a row-filter expression with dummy user vars and return the resulting
+/// Expr. Used by admin-side dry-runs (e.g. anchor-coverage) that need to walk
+/// the AST for column references without evaluating against a real user.
+pub(crate) fn parse_filter_expr_for_admin(
+    expression: &str,
+) -> datafusion::error::Result<datafusion::logical_expr::Expr> {
+    let dummy_vars = UserVars {
+        username: "__admin__".to_string(),
+        user_id: "__admin__".to_string(),
+        attributes: HashMap::new(),
+        attribute_defs: HashMap::new(),
+    };
+    parse_filter_expr(expression, &dummy_vars)
+}
+
 // ---------- resolved policy data structures ----------
 
 #[derive(Clone)]
@@ -710,6 +730,18 @@ struct SessionData {
     user_attributes: HashMap<String, TypedAttribute>,
     /// All user-entity attribute definitions for default resolution.
     attribute_defs: HashMap<String, AttrDefInfo>,
+    /// Relationships + column anchors for this datasource, used by the
+    /// row-filter rewriter to resolve columns that live on a parent table.
+    /// Empty snapshot when no admin has configured anchors.
+    relationship_snapshot: Arc<RelationshipSnapshot>,
+    /// Cache of parent-table `LogicalPlan`s materialized for anchor
+    /// resolution. Populated lazily on first query by
+    /// `precompute_parent_scans` and reused across queries for this
+    /// `SessionData`'s lifetime (60s, or until `invalidate_datasource`
+    /// drops the entry). Keyed by `(df_schema, table)`. Shared with
+    /// `SessionDataClone` via `Arc::clone` so query-side population
+    /// benefits subsequent queries hitting the same cache entry.
+    parent_scans_cache: Arc<tokio::sync::RwLock<HashMap<(String, String), LogicalPlan>>>,
     loaded_at: std::time::Instant,
 }
 
@@ -894,6 +926,8 @@ impl PolicyHook {
             }
         }
 
+        let relationship_snapshot = Arc::new(load_relationship_snapshot(&self.db, ds.id).await?);
+
         if policy_ids.is_empty() {
             return Ok(SessionData {
                 permit_policies: vec![],
@@ -905,6 +939,8 @@ impl PolicyHook {
                 roles: role_names,
                 user_attributes,
                 attribute_defs,
+                relationship_snapshot,
+                parent_scans_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
                 loaded_at: std::time::Instant::now(),
             });
         }
@@ -1003,6 +1039,8 @@ impl PolicyHook {
             roles: role_names,
             user_attributes,
             attribute_defs,
+            relationship_snapshot,
+            parent_scans_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             loaded_at: std::time::Instant::now(),
         })
     }
@@ -1080,6 +1118,147 @@ impl PolicyHook {
     }
 }
 
+/// Load all relationships, anchors, and per-table column lists for a datasource
+/// into an in-memory snapshot. Called once per `load_session`; read-only on
+/// the hot path afterward.
+///
+/// The snapshot keys schemas by their DataFusion alias (`schema_alias` when
+/// set, else raw `schema_name`) because that's what `scan_policy_key`
+/// produces during query rewriting. The alias is derived directly from
+/// `discovered_schema` rows — no external mapping needed.
+pub(crate) async fn load_relationship_snapshot(
+    db: &DatabaseConnection,
+    datasource_id: Uuid,
+) -> Result<RelationshipSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    // Pull schemas + tables + columns scoped to this datasource so the
+    // snapshot can expose `(df_schema, table)` keys directly.
+    let schemas = discovered_schema::Entity::find()
+        .filter(discovered_schema::Column::DataSourceId.eq(datasource_id))
+        .all(db)
+        .await?;
+    let schema_id_to_df_alias: HashMap<Uuid, String> = schemas
+        .iter()
+        .map(|s| {
+            let alias = s
+                .schema_alias
+                .as_deref()
+                .unwrap_or(&s.schema_name)
+                .to_string();
+            (s.id, alias)
+        })
+        .collect();
+
+    if schema_id_to_df_alias.is_empty() {
+        return Ok(RelationshipSnapshot::default());
+    }
+
+    let schema_ids: Vec<Uuid> = schema_id_to_df_alias.keys().copied().collect();
+    let tables = discovered_table::Entity::find()
+        .filter(discovered_table::Column::DiscoveredSchemaId.is_in(schema_ids.clone()))
+        .all(db)
+        .await?;
+
+    // Map table id → (df_schema, table_name) for easy lookup below.
+    let mut table_id_to_key: HashMap<Uuid, (String, String)> = HashMap::new();
+    for t in &tables {
+        if let Some(df_schema) = schema_id_to_df_alias.get(&t.discovered_schema_id) {
+            table_id_to_key.insert(t.id, (df_schema.clone(), t.table_name.clone()));
+        }
+    }
+
+    let table_ids: Vec<Uuid> = table_id_to_key.keys().copied().collect();
+
+    // Column lists per table for the rewriter's "is column on this table?"
+    // test.
+    let mut columns_by_table: HashMap<(String, String), HashSet<String>> = HashMap::new();
+    if !table_ids.is_empty() {
+        let cols = discovered_column::Entity::find()
+            .filter(discovered_column::Column::DiscoveredTableId.is_in(table_ids.clone()))
+            .all(db)
+            .await?;
+        for c in cols {
+            if let Some(key) = table_id_to_key.get(&c.discovered_table_id) {
+                columns_by_table
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(c.column_name);
+            }
+        }
+    }
+
+    // Relationships — both endpoints must be in this datasource (always true
+    // since the schema cascade-scoped us here, but guard against orphans).
+    let relationships_rows = table_relationship_entity::Entity::find()
+        .filter(table_relationship_entity::Column::DataSourceId.eq(datasource_id))
+        .all(db)
+        .await?;
+    let mut relationships: HashMap<Uuid, RelationshipEdge> = HashMap::new();
+    for r in relationships_rows {
+        let (child_schema, child_table) = match table_id_to_key.get(&r.child_table_id) {
+            Some(v) => v.clone(),
+            None => continue,
+        };
+        let (parent_schema, parent_table) = match table_id_to_key.get(&r.parent_table_id) {
+            Some(v) => v.clone(),
+            None => continue,
+        };
+        relationships.insert(
+            r.id,
+            RelationshipEdge {
+                id: r.id,
+                child_schema,
+                child_table,
+                child_column: r.child_column_name,
+                parent_schema,
+                parent_table,
+                parent_column: r.parent_column_name,
+            },
+        );
+    }
+
+    // Column anchors: each row is exactly one of an FK-walk (relationship_id
+    // set) or a same-table alias (actual_column_name set). XOR is enforced at
+    // the API layer on create — here we defensively skip rows that violate it
+    // so a corrupt DB can't destabilize the session build.
+    let anchor_rows = column_anchor_entity::Entity::find()
+        .filter(column_anchor_entity::Column::DataSourceId.eq(datasource_id))
+        .all(db)
+        .await?;
+    let mut anchors: HashMap<(String, String, String), resolution_graph::AnchorShape> =
+        HashMap::new();
+    for a in anchor_rows {
+        let (df_schema, table_name) = match table_id_to_key.get(&a.child_table_id) {
+            Some(v) => v.clone(),
+            None => continue,
+        };
+        let shape = match (a.relationship_id, a.actual_column_name.clone()) {
+            (Some(rel_id), None) => {
+                if !relationships.contains_key(&rel_id) {
+                    continue;
+                }
+                resolution_graph::AnchorShape::Relationship(rel_id)
+            }
+            (None, Some(actual)) => resolution_graph::AnchorShape::Alias(actual),
+            _ => {
+                tracing::warn!(
+                    anchor_id = %a.id,
+                    has_relationship = a.relationship_id.is_some(),
+                    has_actual_column = a.actual_column_name.is_some(),
+                    "column_anchor row violates XOR invariant; skipping"
+                );
+                continue;
+            }
+        };
+        anchors.insert((df_schema, table_name, a.resolved_column_name), shape);
+    }
+
+    Ok(RelationshipSnapshot {
+        relationships,
+        anchors,
+        columns_by_table,
+    })
+}
+
 // SessionData doesn't derive Clone, so we clone it manually.
 type SessionDataRef = Box<SessionDataClone>;
 
@@ -1093,6 +1272,8 @@ struct SessionDataClone {
     roles: Vec<String>,
     user_attributes: HashMap<String, TypedAttribute>,
     attribute_defs: HashMap<String, AttrDefInfo>,
+    relationship_snapshot: Arc<RelationshipSnapshot>,
+    parent_scans_cache: Arc<tokio::sync::RwLock<HashMap<(String, String), LogicalPlan>>>,
 }
 
 fn clone_session_data(s: &SessionData) -> SessionDataRef {
@@ -1106,6 +1287,8 @@ fn clone_session_data(s: &SessionData) -> SessionDataRef {
         roles: s.roles.clone(),
         user_attributes: s.user_attributes.clone(),
         attribute_defs: s.attribute_defs.clone(),
+        relationship_snapshot: Arc::clone(&s.relationship_snapshot),
+        parent_scans_cache: Arc::clone(&s.parent_scans_cache),
     })
 }
 
@@ -1688,10 +1871,27 @@ impl PolicyEffects {
     /// Row filters are scoped to their source table, so they can safely reference columns
     /// that are later stripped by the top-level projection (e.g. `tenant_id` filters).
     ///
-    /// DataFusion 52+ may optimize `SELECT COUNT(*)` to `TableScan(projection=Some([]))`,
-    /// projecting zero columns. We expand the projection to include any columns referenced
-    /// by the filter expression so the injected `Filter` node can resolve them.
-    fn apply_row_filters(&self, plan: LogicalPlan) -> Result<LogicalPlan, PolicyError> {
+    /// When a filter references a column that isn't on the target table, the rewriter
+    /// consults the admin-designated `column_anchor` registered for
+    /// `(child_table, resolved_column)`. Two anchor shapes are handled:
+    ///   - **FK walk** (`AnchorShape::Relationship`): walks the `table_relationship`
+    ///     chain up to a parent that carries the column, replacing the `TableScan`
+    ///     subtree with `Project([target.*], Filter(rewritten, InnerJoin(target,
+    ///     parent_chain)))`. Parent scans are pre-planned in `apply_policies`
+    ///     (since `transform_up` is synchronous).
+    ///   - **Same-table alias** (`AnchorShape::Alias`): rewrites the filter
+    ///     expression's column reference (`tenant_id` → `org_id`) in place — no
+    ///     join, no parent scan.
+    ///
+    /// On resolution failure the filter becomes `lit(false)` (deny-wins) and a
+    /// structured `column_resolution_unresolved` warn log is emitted.
+    fn apply_row_filters(
+        &self,
+        plan: LogicalPlan,
+        snapshot: &RelationshipSnapshot,
+        parent_scans: &HashMap<(String, String), LogicalPlan>,
+        deny_wins: &HashSet<(String, String)>,
+    ) -> Result<LogicalPlan, PolicyError> {
         if self.row_filters.is_empty() {
             return Ok(plan);
         }
@@ -1708,13 +1908,85 @@ impl PolicyEffects {
                 return Ok(Transformed::no(node));
             };
 
+            // Resolution failed earlier for this key — substitute deny-wins.
+            if deny_wins.contains(&key) {
+                let plan_denied = LogicalPlanBuilder::from(node)
+                    .filter(lit(false))
+                    .and_then(|b| b.build())
+                    .map_err(|e| datafusion::error::DataFusionError::Plan(e.to_string()))?;
+                return Ok(Transformed::yes(plan_denied));
+            }
+
             tracing::debug!(table = %scan.table_name, "PolicyHook: applying row filter");
 
-            let plan_with_filter = LogicalPlanBuilder::from(node)
-                .filter(filter_expr.clone())
-                .and_then(|b| b.build())
-                .map_err(|e| datafusion::error::DataFusionError::Plan(e.to_string()))?;
-            Ok(Transformed::yes(plan_with_filter))
+            // Attempt the fast path (no missing columns). If column resolution
+            // rewrites the plan, use the rewritten plan instead of wrapping
+            // the raw scan.
+            let resolution = resolution_graph::build_column_resolution_plan(
+                &key.0,
+                &key.1,
+                node.clone(),
+                filter_expr,
+                snapshot,
+                parent_scans,
+            );
+            match resolution {
+                Ok(Some(r)) => Ok(Transformed::yes(r.plan)),
+                Ok(None) => {
+                    // Fast path: the resolver determined no anchor traversal
+                    // is needed. Before wrapping the scan with the raw filter,
+                    // verify every unqualified column in the filter expression
+                    // actually exists on the scan's output schema. Without
+                    // this check, a filter referencing a column missing from
+                    // the scan would hit a DataFusion "field not found" error
+                    // at plan-validation time instead of surfacing deny-wins —
+                    // the 5th failure mode listed under vector 73 Defense.
+                    let scan_column_names: HashSet<String> = scan
+                        .projected_schema
+                        .fields()
+                        .iter()
+                        .map(|f| f.name().to_string())
+                        .collect();
+                    let referenced = resolution_graph::expr_column_names(filter_expr)
+                        .map_err(|e| datafusion::error::DataFusionError::Plan(e.to_string()))?;
+                    if let Some(missing) = referenced
+                        .into_iter()
+                        .find(|name| !scan_column_names.contains(name))
+                    {
+                        tracing::warn!(
+                            reason = "column_resolution_unresolved",
+                            table = %scan.table_name,
+                            column = %missing,
+                            "Row filter references a column not present on the scan and not \
+                             resolvable via any anchor; substituting deny-wins"
+                        );
+                        let plan_denied = LogicalPlanBuilder::from(node)
+                            .filter(lit(false))
+                            .and_then(|b| b.build())
+                            .map_err(|e| datafusion::error::DataFusionError::Plan(e.to_string()))?;
+                        return Ok(Transformed::yes(plan_denied));
+                    }
+
+                    let plan_with_filter = LogicalPlanBuilder::from(node)
+                        .filter(filter_expr.clone())
+                        .and_then(|b| b.build())
+                        .map_err(|e| datafusion::error::DataFusionError::Plan(e.to_string()))?;
+                    Ok(Transformed::yes(plan_with_filter))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        reason = "column_resolution_unresolved",
+                        table = %scan.table_name,
+                        error = %e,
+                        "Row filter column resolution failed; substituting deny-wins"
+                    );
+                    let plan_denied = LogicalPlanBuilder::from(node)
+                        .filter(lit(false))
+                        .and_then(|b| b.build())
+                        .map_err(|e| datafusion::error::DataFusionError::Plan(e.to_string()))?;
+                    Ok(Transformed::yes(plan_denied))
+                }
+            }
         });
 
         result
@@ -1948,6 +2220,122 @@ impl PolicyEffects {
 ///
 /// Scan-level enforcement is required because `SubqueryAlias` and CTE nodes can change
 /// the DFSchema qualifier, causing top-level-only matching to miss.
+/// Precompute a `LogicalPlan` for every parent table that the row-filter
+/// rewriter will need during resolution. Returns
+/// `(parent_scans, deny_wins_keys)`: the scans map is consumed by the
+/// synchronous `apply_row_filters`; `deny_wins_keys` collects row-filter
+/// keys for which resolution errored early (missing anchor, cycle, depth)
+/// so the rewriter can substitute `lit(false)` without re-running
+/// resolution on the hot path.
+async fn precompute_parent_scans(
+    session_context: &SessionContext,
+    row_filters: &HashMap<(String, String), datafusion::logical_expr::Expr>,
+    snapshot: &RelationshipSnapshot,
+    cache: &tokio::sync::RwLock<HashMap<(String, String), LogicalPlan>>,
+) -> (
+    HashMap<(String, String), LogicalPlan>,
+    HashSet<(String, String)>,
+) {
+    let mut scans: HashMap<(String, String), LogicalPlan> = HashMap::new();
+    let mut deny_wins: HashSet<(String, String)> = HashSet::new();
+
+    if snapshot.is_empty() || row_filters.is_empty() {
+        return (scans, deny_wins);
+    }
+
+    // Collect every parent (schema, table) pair touched by any filter.
+    // `BTreeSet` pins iteration order so `missing` below, and the subsequent
+    // planning calls, are deterministic across runs — important for stable
+    // EXPLAIN output and reproducible behavior behind a load balancer.
+    let mut parents_needed: BTreeSet<(String, String)> = BTreeSet::new();
+    for (key, filter_expr) in row_filters {
+        match snapshot.parents_needed_for(&key.0, &key.1, filter_expr) {
+            Ok(set) => {
+                for p in set {
+                    parents_needed.insert(p);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    reason = "column_resolution_unresolved",
+                    schema = %key.0,
+                    table = %key.1,
+                    error = %e,
+                    "Row filter references a column that cannot be resolved; deny-wins"
+                );
+                deny_wins.insert(key.clone());
+            }
+        }
+    }
+
+    // Serve from cache where possible; only go out to the session catalog for
+    // parents we haven't planned yet in this `SessionData`'s lifetime. The
+    // cache lives as long as the `SessionData` entry (60s or until
+    // `invalidate_datasource` drops it), so a steady-state session with a
+    // stable set of row filters pays the planning cost exactly once.
+    let missing: Vec<(String, String)> = {
+        let cache_guard = cache.read().await;
+        for p in &parents_needed {
+            if let Some(plan) = cache_guard.get(p) {
+                scans.insert(p.clone(), plan.clone());
+            }
+        }
+        parents_needed
+            .iter()
+            .filter(|p| !scans.contains_key(*p))
+            .cloned()
+            .collect()
+    };
+
+    if missing.is_empty() {
+        return (scans, deny_wins);
+    }
+
+    // Build LogicalPlans for cache misses via the session's virtual catalog.
+    // Errors here produce a log line but not deny-wins: the downstream
+    // `MissingParentScan` error from the resolver is what ultimately surfaces
+    // deny-wins, keeping the "what triggered deny-wins" semantics in one place.
+    let mut new_plans: HashMap<(String, String), LogicalPlan> = HashMap::new();
+    for (schema, table) in missing {
+        match session_context
+            .table(datafusion::sql::TableReference::partial(
+                schema.clone(),
+                table.clone(),
+            ))
+            .await
+        {
+            Ok(df) => {
+                let plan = df.into_unoptimized_plan();
+                new_plans.insert((schema, table), plan);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    reason = "column_resolution_unresolved",
+                    failure = "parent_scan_planning",
+                    schema = %schema,
+                    table = %table,
+                    error = %e,
+                    "Failed to plan parent table for anchor resolution"
+                );
+            }
+        }
+    }
+
+    // Publish newly built plans to the shared cache. `or_insert_with` is a
+    // no-op for entries another concurrent query already populated, so
+    // duplicate work (two queries racing on the same missing parent) wastes
+    // planning time but not memory or correctness.
+    if !new_plans.is_empty() {
+        let mut cache_guard = cache.write().await;
+        for (k, plan) in &new_plans {
+            cache_guard.entry(k.clone()).or_insert_with(|| plan.clone());
+        }
+    }
+
+    scans.extend(new_plans);
+    (scans, deny_wins)
+}
+
 async fn apply_policies(
     session: &SessionDataClone,
     session_context: &SessionContext,
@@ -1987,13 +2375,26 @@ async fn apply_policies(
     effects.apply_access_mode(&session.access_mode, &user_tables);
 
     let had_effects = effects.has_effects();
+
+    // Pre-plan parent scans needed for column resolution. We do this here
+    // (not inside `apply_row_filters`, which must stay synchronous to run
+    // within `transform_up`) so the rewriter has ready-to-use `LogicalPlan`s.
+    let snapshot = Arc::clone(&session.relationship_snapshot);
+    let (parent_scans, deny_wins) = precompute_parent_scans(
+        session_context,
+        &effects.row_filters,
+        &snapshot,
+        &session.parent_scans_cache,
+    )
+    .await;
+
     // Masks must be applied before row filters so that row filters evaluate
     // against raw (unmasked) data. With transform_up, mask runs first and
     // inserts Projection above TableScan; then row filter inserts Filter
     // directly above the same TableScan (below the mask Projection).
     // Result: TableScan → Filter(raw) → Projection(mask) — correct.
     let plan = effects.apply_column_mask_at_scan(logical_plan)?;
-    let plan = effects.apply_row_filters(plan)?;
+    let plan = effects.apply_row_filters(plan, &snapshot, &parent_scans, &deny_wins)?;
     // Clear masks after scan-level application to prevent double-masking in
     // apply_projection_qualified (the scan-level mask is the primary enforcement;
     // the top-level projection is defense-in-depth for allow/deny only).
@@ -2330,6 +2731,8 @@ mod tests {
             roles: vec![],
             user_attributes: HashMap::new(),
             attribute_defs: HashMap::new(),
+            relationship_snapshot: Arc::new(RelationshipSnapshot::default()),
+            parent_scans_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -5281,6 +5684,127 @@ Javy.IO.writeSync(1, new TextEncoder().encode(JSON.stringify(result)));
         assert!(
             debug.contains("acme"),
             "Should use tenant from attributes: {debug}"
+        );
+    }
+
+    #[tokio::test]
+    async fn row_filter_deny_wins_when_column_not_on_scan_and_no_anchor() {
+        // Vector 73 Defense, 5th failure mode: a filter referencing a column
+        // that isn't on the scan and can't be resolved via any anchor must
+        // surface deny-wins (Filter(lit(false))), not a DataFusion plan
+        // error. Without this guard, the raw `Filter(expr)` would hit
+        // "field 'org' not found" at plan validation.
+        let session = make_session(
+            vec![make_row_filter_policy(
+                "p1",
+                1,
+                "public",
+                "orders",
+                "org = 'acme'",
+            )],
+            vec![],
+            "open",
+            HashMap::new(),
+        );
+        let ctx = SessionContext::new();
+        // Scan has only "id" — the filter references "org" which isn't here
+        // and has no anchor defined (empty relationship_snapshot).
+        let plan = build_scan_plan("public.orders", vec![("id", DataType::Int32)]);
+
+        let (result_plan, had_effects, _) =
+            apply_policies(&session, &ctx, plan, &default_vars(), None)
+                .await
+                .unwrap();
+
+        assert!(had_effects);
+        let display = plan_display(&result_plan);
+        assert!(
+            display.contains("Boolean(false)"),
+            "Expected deny-wins Filter(Boolean(false)), got: {display}"
+        );
+    }
+
+    #[tokio::test]
+    async fn precompute_parent_scans_serves_from_session_cache() {
+        // Verify the H4 cache path: when a prior call populated
+        // `parent_scans_cache` for a given (schema, table), a subsequent
+        // precompute call with an empty SessionContext — which can't plan
+        // any table — still returns the cached plan instead of failing.
+        // This proves the cache is read before hitting the catalog.
+        use crate::resolution::graph::{AnchorShape, RelationshipEdge, RelationshipSnapshot};
+        use datafusion::prelude::{col, lit};
+
+        let edge_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, b"payments-orders-h4");
+        let mut relationships = HashMap::new();
+        relationships.insert(
+            edge_id,
+            RelationshipEdge {
+                id: edge_id,
+                child_schema: "public".into(),
+                child_table: "payments".into(),
+                child_column: "order_id".into(),
+                parent_schema: "public".into(),
+                parent_table: "orders".into(),
+                parent_column: "id".into(),
+            },
+        );
+        let mut anchors = HashMap::new();
+        anchors.insert(
+            ("public".into(), "payments".into(), "org".into()),
+            AnchorShape::Relationship(edge_id),
+        );
+        let mut columns_by_table: HashMap<(String, String), HashSet<String>> = HashMap::new();
+        columns_by_table.insert(
+            ("public".into(), "payments".into()),
+            ["id", "order_id"].iter().map(|s| s.to_string()).collect(),
+        );
+        columns_by_table.insert(
+            ("public".into(), "orders".into()),
+            ["id", "org"].iter().map(|s| s.to_string()).collect(),
+        );
+        let snapshot = RelationshipSnapshot {
+            relationships,
+            anchors,
+            columns_by_table,
+        };
+
+        // Build a placeholder "orders" plan and seed the cache with it.
+        let orders_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, true),
+            Field::new("org", DataType::Utf8, true),
+        ]));
+        let orders_table = Arc::new(EmptyTable::new(orders_schema));
+        let orders_source = Arc::new(DefaultTableSource::new(orders_table));
+        let orders_plan = LogicalPlanBuilder::scan("public.orders", orders_source, None)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let cache = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        cache
+            .write()
+            .await
+            .insert(("public".into(), "orders".into()), orders_plan.clone());
+
+        let mut row_filters = HashMap::new();
+        row_filters.insert(
+            ("public".into(), "payments".into()),
+            col("org").eq(lit("acme")),
+        );
+
+        // Empty session — it has no catalogs/tables. If the cache is
+        // bypassed, the `session_context.table()` call below would fail
+        // and `scans` would be empty.
+        let session_context = SessionContext::new();
+
+        let (scans, deny_wins) =
+            precompute_parent_scans(&session_context, &row_filters, &snapshot, &cache).await;
+
+        assert!(deny_wins.is_empty(), "unexpected deny_wins: {deny_wins:?}");
+        assert_eq!(scans.len(), 1, "cached parent plan should be returned");
+        assert!(
+            scans.contains_key(&("public".to_string(), "orders".to_string())),
+            "orders plan should be served from cache"
         );
     }
 }

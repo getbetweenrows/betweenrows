@@ -168,3 +168,67 @@ export interface DriftReport {
   schemas: SchemaDrift[]
   has_breaking_changes: boolean
 }
+
+// ---------- Relationships + column anchors ----------
+
+export interface TableRelationship {
+  id: string
+  data_source_id: string
+  child_table_id: string
+  child_table_name: string
+  child_schema_name: string
+  child_column_name: string
+  parent_table_id: string
+  parent_table_name: string
+  parent_schema_name: string
+  parent_column_name: string
+  created_at: string
+  created_by: string | null
+}
+
+export interface CreateTableRelationshipRequest {
+  child_table_id: string
+  child_column_name: string
+  parent_table_id: string
+  parent_column_name: string
+}
+
+/// Column anchors come in two shapes (XOR):
+///   - FK walk: `relationship_id` is set, `actual_column_name` is null
+///   - Same-table alias: `actual_column_name` is set, `relationship_id` is null
+export interface ColumnAnchor {
+  id: string
+  data_source_id: string
+  child_table_id: string
+  child_table_name: string
+  resolved_column_name: string
+  relationship_id: string | null
+  actual_column_name: string | null
+  designated_at: string
+  designated_by: string
+}
+
+/// Exactly one of `relationship_id` or `actual_column_name` must be set.
+/// The server validates this with a 422.
+export interface CreateColumnAnchorRequest {
+  child_table_id: string
+  resolved_column_name: string
+  relationship_id?: string
+  actual_column_name?: string
+}
+
+/// Suggestions returned by live `pg_constraint` introspection. The
+/// `child_table_id` / `parent_table_id` have already been resolved to the
+/// admin's discovered catalog so the UI can promote them in one POST.
+export interface FkSuggestion {
+  child_table_id: string
+  child_schema_name: string
+  child_table_name: string
+  child_column_name: string
+  parent_table_id: string
+  parent_schema_name: string
+  parent_table_name: string
+  parent_column_name: string
+  fk_constraint_name: string
+  already_added: boolean
+}

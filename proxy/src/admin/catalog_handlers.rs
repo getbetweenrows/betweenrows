@@ -812,6 +812,28 @@ fn catalog_column_uuid(table_id: Uuid, column_name: &str) -> Uuid {
     Uuid::new_v5(&CATALOG_NS, key.as_bytes())
 }
 
+pub(super) fn table_relationship_uuid(
+    datasource_id: Uuid,
+    child_table_id: Uuid,
+    child_column_name: &str,
+    parent_table_id: Uuid,
+    parent_column_name: &str,
+) -> Uuid {
+    let key = format!(
+        "rel:{datasource_id}:{child_table_id}:{child_column_name}:{parent_table_id}:{parent_column_name}"
+    );
+    Uuid::new_v5(&CATALOG_NS, key.as_bytes())
+}
+
+pub(super) fn column_anchor_uuid(
+    datasource_id: Uuid,
+    child_table_id: Uuid,
+    resolved_column_name: &str,
+) -> Uuid {
+    let key = format!("anchor:{datasource_id}:{child_table_id}:{resolved_column_name}");
+    Uuid::new_v5(&CATALOG_NS, key.as_bytes())
+}
+
 // ---------- GET /datasources/{id}/discover/{job_id}/events — SSE stream ----------
 
 pub async fn discovery_events(

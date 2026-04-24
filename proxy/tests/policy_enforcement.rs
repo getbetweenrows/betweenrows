@@ -9369,3 +9369,1051 @@ async fn window_row_number_order_by_denied_column() {
         "ROW_NUMBER OVER (ORDER BY denied_col) must error — vector #65"
     );
 }
+
+// ===========================================================================
+// Vector 73 — Transitive tenancy bypass (row filter resolves column via
+// parent table anchor + FK relationship)
+// ===========================================================================
+
+/// Look up a discovered-table id by (schema, table) via the admin catalog
+/// endpoint. Used by the vector-73 tests to feed table_relationship and
+/// column_anchor POST bodies.
+async fn catalog_table_id(
+    server: &support::ProxyTestServer,
+    ds_id: Uuid,
+    schema_name: &str,
+    table_name: &str,
+) -> Uuid {
+    let resp = server
+        .admin
+        .get(&format!("/api/v1/datasources/{ds_id}/catalog"))
+        .authorization_bearer(&server.admin_token)
+        .await;
+    resp.assert_status_ok();
+    let body = resp.json::<Value>();
+    for schema in body["schemas"].as_array().unwrap() {
+        if schema["schema_name"].as_str().unwrap() == schema_name {
+            for table in schema["tables"].as_array().unwrap() {
+                if table["table_name"].as_str().unwrap() == table_name {
+                    return table["id"].as_str().unwrap().parse().unwrap();
+                }
+            }
+        }
+    }
+    panic!("table {schema_name}.{table_name} not found in catalog for ds {ds_id}");
+}
+
+/// POST /datasources/{id}/relationships — returns the created relationship id.
+async fn create_relationship(
+    server: &support::ProxyTestServer,
+    ds_id: Uuid,
+    child_table_id: Uuid,
+    child_column: &str,
+    parent_table_id: Uuid,
+    parent_column: &str,
+) -> Uuid {
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/datasources/{ds_id}/relationships"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "child_table_id": child_table_id,
+            "child_column_name": child_column,
+            "parent_table_id": parent_table_id,
+            "parent_column_name": parent_column,
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    resp.json::<Value>()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// POST /datasources/{id}/column-anchors — returns the created anchor id.
+async fn create_column_anchor(
+    server: &support::ProxyTestServer,
+    ds_id: Uuid,
+    child_table_id: Uuid,
+    resolved_column: &str,
+    relationship_id: Uuid,
+) -> Uuid {
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/datasources/{ds_id}/column-anchors"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "child_table_id": child_table_id,
+            "resolved_column_name": resolved_column,
+            "relationship_id": relationship_id,
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    resp.json::<Value>()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// POST /datasources/{id}/column-anchors for the same-table alias shape —
+/// returns the created anchor id.
+async fn create_column_anchor_alias(
+    server: &support::ProxyTestServer,
+    ds_id: Uuid,
+    child_table_id: Uuid,
+    resolved_column: &str,
+    actual_column: &str,
+) -> Uuid {
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/datasources/{ds_id}/column-anchors"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "child_table_id": child_table_id,
+            "resolved_column_name": resolved_column,
+            "actual_column_name": actual_column,
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    resp.json::<Value>()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn vector_73_happy_path_row_filter_via_parent_anchor() {
+    // Vector 73 attack 1: query a child table directly when the tenant-
+    // scoping column lives on the parent. With a configured anchor +
+    // relationship, the filter resolves through the FK and returns only
+    // rows whose parent matches the user's tenant.
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "v73_happy";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.payments;
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT PRIMARY KEY, tenant TEXT);
+             CREATE TABLE {schema}.payments (
+                id INT PRIMARY KEY,
+                order_id INT REFERENCES {schema}.orders(id),
+                amount INT
+             );
+             INSERT INTO {schema}.orders VALUES
+               (1, 'acme'),
+               (2, 'globex'),
+               (3, 'acme');
+             INSERT INTO {schema}.payments VALUES
+               (10, 1, 100),
+               (20, 2, 200),
+               (30, 3, 300),
+               (40, 2, 400);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_v73_happy", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    // Look up catalog ids so we can POST relationships/anchors.
+    let orders_id = catalog_table_id(&server, ds_id, schema, "orders").await;
+    let payments_id = catalog_table_id(&server, ds_id, schema, "payments").await;
+
+    let rel_id =
+        create_relationship(&server, ds_id, payments_id, "order_id", orders_id, "id").await;
+    create_column_anchor(&server, ds_id, payments_id, "tenant", rel_id).await;
+
+    let user_id = server.create_user("alice_v73", "AlicePass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
+        .await;
+
+    server
+        .create_row_filter(
+            "v73-tenant-filter",
+            schema,
+            "payments",
+            "tenant = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("v73-allow-all", schema, "payments", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("alice_v73", "AlicePass1!", "ds_v73_happy")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.payments ORDER BY id"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    // Only payments whose parent order's tenant = 'acme' → payment ids 10, 30.
+    let ids: Vec<String> = rows.iter().map(|r| r[0].clone()).collect();
+    assert_eq!(
+        ids,
+        vec!["10".to_string(), "30".to_string()],
+        "Expected only acme-tenant payments, got: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn vector_73_deny_wins_when_no_anchor_configured() {
+    // Vector 73 defense, failure mode 1: filter references a column not on
+    // the target table and no anchor is configured. The row filter must
+    // substitute `lit(false)` (zero rows) rather than error out.
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "v73_deny";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.payments;
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT PRIMARY KEY, tenant TEXT);
+             CREATE TABLE {schema}.payments (id INT PRIMARY KEY, order_id INT);
+             INSERT INTO {schema}.orders VALUES (1, 'acme');
+             INSERT INTO {schema}.payments VALUES (10, 1), (20, 1);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_v73_deny", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let user_id = server.create_user("deny_v73", "DenyPass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
+        .await;
+
+    // Row filter references "tenant" which doesn't exist on payments and
+    // has no anchor → deny-wins.
+    server
+        .create_row_filter(
+            "v73-no-anchor-filter",
+            schema,
+            "payments",
+            "tenant = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("v73-deny-allow", schema, "payments", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("deny_v73", "DenyPass1!", "ds_v73_deny")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.payments"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+
+    assert!(
+        rows.is_empty(),
+        "Missing anchor should produce deny-wins (zero rows), got: {rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn vector_73_cache_invalidation_on_new_anchor() {
+    // Cache invalidation end-to-end: after POSTing a new column_anchor,
+    // an already-established connection must see the new behavior on the
+    // next SELECT without reconnecting. This proves
+    // `invalidate_caches` → `policy_hook.invalidate_datasource` correctly
+    // drops the cached `SessionData` (including `relationship_snapshot`
+    // and `parent_scans_cache`) for this datasource.
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "v73_inv";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.payments;
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT PRIMARY KEY, tenant TEXT);
+             CREATE TABLE {schema}.payments (
+                id INT PRIMARY KEY,
+                order_id INT REFERENCES {schema}.orders(id)
+             );
+             INSERT INTO {schema}.orders VALUES (1, 'acme'), (2, 'globex');
+             INSERT INTO {schema}.payments VALUES (10, 1), (20, 2);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_v73_inv", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let orders_id = catalog_table_id(&server, ds_id, schema, "orders").await;
+    let payments_id = catalog_table_id(&server, ds_id, schema, "payments").await;
+
+    // Create the relationship but NOT the anchor yet.
+    let rel_id =
+        create_relationship(&server, ds_id, payments_id, "order_id", orders_id, "id").await;
+
+    let user_id = server.create_user("inv_v73", "InvPass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
+        .await;
+    server
+        .create_row_filter(
+            "v73-inv-filter",
+            schema,
+            "payments",
+            "tenant = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow("v73-inv-allow", schema, "payments", &["*"], ds_id, None)
+        .await;
+
+    let client = server
+        .connect_as("inv_v73", "InvPass1!", "ds_v73_inv")
+        .await;
+
+    // First query: no anchor → deny-wins (zero rows).
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.payments"))
+        .await
+        .unwrap();
+    assert!(
+        extract_rows(&msgs).is_empty(),
+        "Pre-anchor query must return zero rows via deny-wins"
+    );
+
+    // Add the anchor — this invalidates the session cache.
+    create_column_anchor(&server, ds_id, payments_id, "tenant", rel_id).await;
+
+    // Second query on the same connection must see the new anchor in effect.
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.payments ORDER BY id"))
+        .await
+        .unwrap();
+    let rows = extract_rows(&msgs);
+    let ids: Vec<String> = rows.iter().map(|r| r[0].clone()).collect();
+    assert_eq!(
+        ids,
+        vec!["10".to_string()],
+        "Post-anchor query on same session must reflect the new anchor; got: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn vector_73_cross_datasource_column_anchor_rejected() {
+    // Handler-level defense: POSTing a column_anchor under datasource A
+    // whose `relationship_id` belongs to datasource B must be rejected
+    // with 404, not silently accepted.
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema_a = "v73_xds_a";
+    let schema_b = "v73_xds_b";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema_a};
+             CREATE SCHEMA IF NOT EXISTS {schema_b};
+             DROP TABLE IF EXISTS {schema_a}.payments;
+             DROP TABLE IF EXISTS {schema_a}.orders;
+             DROP TABLE IF EXISTS {schema_b}.payments;
+             DROP TABLE IF EXISTS {schema_b}.orders;
+             CREATE TABLE {schema_a}.orders (id INT PRIMARY KEY);
+             CREATE TABLE {schema_a}.payments (id INT PRIMARY KEY, order_id INT);
+             CREATE TABLE {schema_b}.orders (id INT PRIMARY KEY);
+             CREATE TABLE {schema_b}.payments (id INT PRIMARY KEY, order_id INT);"
+        ))
+        .await;
+
+    let ds_a = server.create_datasource("ds_v73_xds_a", "open").await;
+    let ds_b = server.create_datasource("ds_v73_xds_b", "open").await;
+    server.discover(ds_a, &[schema_a]).await;
+    server.discover(ds_b, &[schema_b]).await;
+
+    let orders_b = catalog_table_id(&server, ds_b, schema_b, "orders").await;
+    let payments_b = catalog_table_id(&server, ds_b, schema_b, "payments").await;
+    let payments_a = catalog_table_id(&server, ds_a, schema_a, "payments").await;
+
+    // Relationship exists in ds_b.
+    let rel_b = create_relationship(&server, ds_b, payments_b, "order_id", orders_b, "id").await;
+
+    // Attempt: POST anchor under ds_a but with ds_b's relationship_id.
+    // Use a child_table_id from ds_a to satisfy the first-check, which
+    // forces the server to reach the cross-check between
+    // `rel.data_source_id` and the anchor's datasource.
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/datasources/{ds_a}/column-anchors"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "child_table_id": payments_a,
+            "resolved_column_name": "tenant",
+            "relationship_id": rel_b,
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::NOT_FOUND);
+}
+
+// ===========================================================================
+// Same-table alias column anchors (extension of vector 73)
+// One broad row-filter policy covers two tables whose tenant-isolation column
+// is spelled differently. A same-table alias anchor rewrites the filter
+// expression from `tenant_id` to the table's actual column name, no join.
+// ===========================================================================
+
+#[tokio::test]
+async fn tc_alias_anchor_basic() {
+    // Two tables under one tenant-isolation policy. `customers` has the
+    // column literally; `accounts` has it under a different name and is
+    // covered by an alias anchor. Both tables must filter correctly.
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_alias_basic";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.customers;
+             DROP TABLE IF EXISTS {schema}.accounts;
+             CREATE TABLE {schema}.customers (id INT PRIMARY KEY, tenant_id TEXT);
+             CREATE TABLE {schema}.accounts  (id INT PRIMARY KEY, org_id TEXT);
+             INSERT INTO {schema}.customers VALUES (1, 'acme'), (2, 'globex');
+             INSERT INTO {schema}.accounts  VALUES (10, 'acme'), (20, 'globex');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_tc_alias_basic", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let accounts_id = catalog_table_id(&server, ds_id, schema, "accounts").await;
+    // Alias anchor: tenant_id on accounts means org_id.
+    create_column_anchor_alias(&server, ds_id, accounts_id, "tenant_id", "org_id").await;
+
+    let user_id = server
+        .create_user("alice_alias", "AliasPass1!", ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
+        .await;
+
+    // Broad policy covers both tables with the same filter expression.
+    server
+        .create_row_filter(
+            "tc-alias-filter-customers",
+            schema,
+            "customers",
+            "tenant_id = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_row_filter(
+            "tc-alias-filter-accounts",
+            schema,
+            "accounts",
+            "tenant_id = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow(
+            "tc-alias-allow-customers",
+            schema,
+            "customers",
+            &["*"],
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow(
+            "tc-alias-allow-accounts",
+            schema,
+            "accounts",
+            &["*"],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("alice_alias", "AliasPass1!", "ds_tc_alias_basic")
+        .await;
+
+    // Table with the literal column: should return just the acme customer.
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.customers ORDER BY id"))
+        .await
+        .unwrap();
+    let ids: Vec<String> = extract_rows(&msgs).iter().map(|r| r[0].clone()).collect();
+    assert_eq!(ids, vec!["1".to_string()], "customers: {ids:?}");
+
+    // Table reached via alias anchor: should return just the acme account.
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.accounts ORDER BY id"))
+        .await
+        .unwrap();
+    let ids: Vec<String> = extract_rows(&msgs).iter().map(|r| r[0].clone()).collect();
+    assert_eq!(ids, vec!["10".to_string()], "accounts: {ids:?}");
+}
+
+#[tokio::test]
+async fn tc_alias_anchor_column_typo_hits_deny_wins() {
+    // Admin typos the actual_column_name — query-time deny-wins is the safety
+    // net because save-time does not validate the column exists (per design).
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_alias_typo";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.accounts;
+             CREATE TABLE {schema}.accounts (id INT PRIMARY KEY, org_id TEXT);
+             INSERT INTO {schema}.accounts VALUES (10, 'acme'), (20, 'globex');"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_tc_alias_typo", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let accounts_id = catalog_table_id(&server, ds_id, schema, "accounts").await;
+    // Typo: "ogr_id" doesn't exist on the table.
+    create_column_anchor_alias(&server, ds_id, accounts_id, "tenant_id", "ogr_id").await;
+
+    let user_id = server.create_user("typo_alias", "TypoPass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
+        .await;
+    server
+        .create_row_filter(
+            "tc-alias-typo-filter",
+            schema,
+            "accounts",
+            "tenant_id = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow(
+            "tc-alias-typo-allow",
+            schema,
+            "accounts",
+            &["*"],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("typo_alias", "TypoPass1!", "ds_tc_alias_typo")
+        .await;
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.accounts"))
+        .await
+        .unwrap();
+    assert!(
+        extract_rows(&msgs).is_empty(),
+        "alias to non-existent column must produce deny-wins (zero rows)"
+    );
+}
+
+#[tokio::test]
+async fn tc_alias_anchor_save_xor_validation() {
+    // API rejects POSTs that omit both shape fields or supply both.
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_alias_xor";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.accounts;
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT PRIMARY KEY);
+             CREATE TABLE {schema}.accounts (id INT PRIMARY KEY, order_id INT);"
+        ))
+        .await;
+    let ds_id = server.create_datasource("ds_tc_alias_xor", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let orders_id = catalog_table_id(&server, ds_id, schema, "orders").await;
+    let accounts_id = catalog_table_id(&server, ds_id, schema, "accounts").await;
+    let rel_id =
+        create_relationship(&server, ds_id, accounts_id, "order_id", orders_id, "id").await;
+
+    // Neither set → 422.
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/datasources/{ds_id}/column-anchors"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "child_table_id": accounts_id,
+            "resolved_column_name": "tenant_id",
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Both set → 422.
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/datasources/{ds_id}/column-anchors"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "child_table_id": accounts_id,
+            "resolved_column_name": "tenant_id",
+            "relationship_id": rel_id,
+            "actual_column_name": "org_id",
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Empty-string actual_column_name is treated as "not set" → 422.
+    let resp = server
+        .admin
+        .post(&format!("/api/v1/datasources/{ds_id}/column-anchors"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "child_table_id": accounts_id,
+            "resolved_column_name": "tenant_id",
+            "actual_column_name": "   ",
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn tc_alias_plus_fk_walk_coexist() {
+    // Mixed datasource: one anchor of each shape, driving the same policy on
+    // different tables. Both must resolve.
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_alias_mixed";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.payments;
+             DROP TABLE IF EXISTS {schema}.orders;
+             DROP TABLE IF EXISTS {schema}.accounts;
+             CREATE TABLE {schema}.orders (id INT PRIMARY KEY, tenant_id TEXT);
+             CREATE TABLE {schema}.payments (id INT PRIMARY KEY, order_id INT REFERENCES {schema}.orders(id));
+             CREATE TABLE {schema}.accounts  (id INT PRIMARY KEY, org_id TEXT);
+             INSERT INTO {schema}.orders VALUES (1, 'acme'), (2, 'globex');
+             INSERT INTO {schema}.payments VALUES (10, 1), (20, 2);
+             INSERT INTO {schema}.accounts VALUES (100, 'acme'), (200, 'globex');"
+        ))
+        .await;
+    let ds_id = server.create_datasource("ds_tc_alias_mixed", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let orders_id = catalog_table_id(&server, ds_id, schema, "orders").await;
+    let payments_id = catalog_table_id(&server, ds_id, schema, "payments").await;
+    let accounts_id = catalog_table_id(&server, ds_id, schema, "accounts").await;
+
+    // FK-walk anchor on payments → orders.tenant_id
+    let rel_id =
+        create_relationship(&server, ds_id, payments_id, "order_id", orders_id, "id").await;
+    create_column_anchor(&server, ds_id, payments_id, "tenant_id", rel_id).await;
+
+    // Alias anchor on accounts: tenant_id → org_id
+    create_column_anchor_alias(&server, ds_id, accounts_id, "tenant_id", "org_id").await;
+
+    let user_id = server.create_user("mixed_alias", "MixPass1!", ds_id).await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
+        .await;
+
+    server
+        .create_row_filter(
+            "tc-mixed-filter-payments",
+            schema,
+            "payments",
+            "tenant_id = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_row_filter(
+            "tc-mixed-filter-accounts",
+            schema,
+            "accounts",
+            "tenant_id = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow(
+            "tc-mixed-allow-payments",
+            schema,
+            "payments",
+            &["*"],
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow(
+            "tc-mixed-allow-accounts",
+            schema,
+            "accounts",
+            &["*"],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("mixed_alias", "MixPass1!", "ds_tc_alias_mixed")
+        .await;
+
+    // FK walk side.
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.payments ORDER BY id"))
+        .await
+        .unwrap();
+    let ids: Vec<String> = extract_rows(&msgs).iter().map(|r| r[0].clone()).collect();
+    assert_eq!(ids, vec!["10".to_string()], "payments (FK walk): {ids:?}");
+
+    // Alias side.
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.accounts ORDER BY id"))
+        .await
+        .unwrap();
+    let ids: Vec<String> = extract_rows(&msgs).iter().map(|r| r[0].clone()).collect();
+    assert_eq!(ids, vec!["100".to_string()], "accounts (alias): {ids:?}");
+}
+
+#[tokio::test]
+async fn tc_alias_anchor_cache_invalidation() {
+    // After POSTing a new alias anchor, an already-open connection must
+    // reflect the rewrite on the next query — same invalidation path as
+    // FK-walk anchors.
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "tc_alias_inv";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.accounts;
+             CREATE TABLE {schema}.accounts (id INT PRIMARY KEY, org_id TEXT);
+             INSERT INTO {schema}.accounts VALUES (10, 'acme'), (20, 'globex');"
+        ))
+        .await;
+    let ds_id = server.create_datasource("ds_tc_alias_inv", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let accounts_id = catalog_table_id(&server, ds_id, schema, "accounts").await;
+
+    let user_id = server
+        .create_user("inv_alias", "InvAliasPass1!", ds_id)
+        .await;
+    server
+        .create_attribute_definition("tenant", "user", "string", None)
+        .await;
+    server
+        .set_user_attributes(user_id, json!({"tenant": "acme"}))
+        .await;
+    server
+        .create_row_filter(
+            "tc-alias-inv-filter",
+            schema,
+            "accounts",
+            "tenant_id = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+    server
+        .create_column_allow(
+            "tc-alias-inv-allow",
+            schema,
+            "accounts",
+            &["*"],
+            ds_id,
+            None,
+        )
+        .await;
+
+    let client = server
+        .connect_as("inv_alias", "InvAliasPass1!", "ds_tc_alias_inv")
+        .await;
+
+    // Pre-anchor: tenant_id doesn't exist on accounts → deny-wins.
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.accounts"))
+        .await
+        .unwrap();
+    assert!(
+        extract_rows(&msgs).is_empty(),
+        "pre-anchor query must return zero rows"
+    );
+
+    // Add alias anchor.
+    create_column_anchor_alias(&server, ds_id, accounts_id, "tenant_id", "org_id").await;
+
+    // Same connection should now see the new anchor in effect.
+    let msgs = client
+        .simple_query(&format!("SELECT id FROM {schema}.accounts ORDER BY id"))
+        .await
+        .unwrap();
+    let ids: Vec<String> = extract_rows(&msgs).iter().map(|r| r[0].clone()).collect();
+    assert_eq!(
+        ids,
+        vec!["10".to_string()],
+        "post-anchor query on same session must reflect alias; got: {ids:?}"
+    );
+}
+
+// ===========================================================================
+// Anchor-coverage endpoint — edit-time warning for silent-deny row filters
+// ===========================================================================
+//
+// `GET /policies/{id}/anchor-coverage` dry-runs the same column-resolution
+// logic the runtime uses against every (assigned table × column referenced in
+// the filter expression) and reports per-pair verdicts. Surfaces the silent-
+// deny case (filter references a column that isn't on the table and has no
+// anchor → runtime substitutes Filter(false)) at policy-edit time so admins
+// can fix it before users notice empty result sets.
+
+/// GET /policies/{id}/anchor-coverage — returns the parsed JSON body.
+async fn get_policy_anchor_coverage(server: &support::ProxyTestServer, policy_id: Uuid) -> Value {
+    let resp = server
+        .admin
+        .get(&format!("/api/v1/policies/{policy_id}/anchor-coverage"))
+        .authorization_bearer(&server.admin_token)
+        .await;
+    resp.assert_status_ok();
+    resp.json::<Value>()
+}
+
+#[tokio::test]
+async fn anchor_coverage_endpoint_walk_anchor() {
+    // Filter references `tenant`, which lives on the parent (orders) and is
+    // reached via an FK-walk anchor on the child (payments). Endpoint should
+    // report the anchor_walk verdict with the relationship metadata.
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "ac_walk";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.payments;
+             DROP TABLE IF EXISTS {schema}.orders;
+             CREATE TABLE {schema}.orders (id INT PRIMARY KEY, tenant TEXT);
+             CREATE TABLE {schema}.payments (
+                id INT PRIMARY KEY,
+                order_id INT REFERENCES {schema}.orders(id),
+                amount INT
+             );"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_ac_walk", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let orders_id = catalog_table_id(&server, ds_id, schema, "orders").await;
+    let payments_id = catalog_table_id(&server, ds_id, schema, "payments").await;
+
+    let rel_id =
+        create_relationship(&server, ds_id, payments_id, "order_id", orders_id, "id").await;
+    create_column_anchor(&server, ds_id, payments_id, "tenant", rel_id).await;
+
+    let policy_id = server
+        .create_row_filter(
+            "ac-walk-policy",
+            schema,
+            "payments",
+            "tenant = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+
+    let body = get_policy_anchor_coverage(&server, policy_id).await;
+    assert_eq!(body["policy_type"], "row_filter");
+    let coverage = body["coverage"].as_array().unwrap();
+    assert_eq!(coverage.len(), 1, "one assigned table");
+    let entry = &coverage[0];
+    assert_eq!(entry["data_source_id"].as_str().unwrap(), ds_id.to_string());
+    assert_eq!(entry["schema"], schema);
+    assert_eq!(entry["table"], "payments");
+    let verdicts = entry["verdicts"].as_array().unwrap();
+    assert_eq!(verdicts.len(), 1, "one referenced column");
+    let v = &verdicts[0];
+    assert_eq!(v["column"], "tenant");
+    assert_eq!(v["kind"], "anchor_walk");
+    assert_eq!(
+        v["via_relationship_id"].as_str().unwrap(),
+        rel_id.to_string()
+    );
+    assert_eq!(v["via_child_column"], "order_id");
+    assert_eq!(v["via_parent_column"], "id");
+    assert_eq!(v["parent_schema"], schema);
+    assert_eq!(v["parent_table"], "orders");
+}
+
+#[tokio::test]
+async fn anchor_coverage_endpoint_silent_deny() {
+    // Filter references `tenant`, which is missing from the target table and
+    // has no anchor configured. Endpoint must flag missing_anchor — this is
+    // the case that silently denies at runtime today.
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "ac_deny";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.payments;
+             CREATE TABLE {schema}.payments (id INT PRIMARY KEY, order_id INT);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_ac_deny", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let policy_id = server
+        .create_row_filter(
+            "ac-deny-policy",
+            schema,
+            "payments",
+            "tenant = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+
+    let body = get_policy_anchor_coverage(&server, policy_id).await;
+    let coverage = body["coverage"].as_array().unwrap();
+    assert_eq!(coverage.len(), 1);
+    let verdicts = coverage[0]["verdicts"].as_array().unwrap();
+    assert_eq!(verdicts.len(), 1);
+    assert_eq!(verdicts[0]["column"], "tenant");
+    assert_eq!(verdicts[0]["kind"], "missing_anchor");
+}
+
+#[tokio::test]
+async fn anchor_coverage_endpoint_wildcard_targets() {
+    // Target tables: ["*"]. The schema has two tables — one resolves on-table
+    // (column lives there); the other is a silent-deny case. Both must appear
+    // in the coverage with their respective verdicts.
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "ac_wild";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.has_tenant;
+             DROP TABLE IF EXISTS {schema}.no_tenant;
+             CREATE TABLE {schema}.has_tenant (id INT PRIMARY KEY, tenant TEXT);
+             CREATE TABLE {schema}.no_tenant (id INT PRIMARY KEY);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_ac_wild", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let policy_id = server
+        .create_and_assign_policy(
+            "ac-wild-policy",
+            "row_filter",
+            vec![json!({"schemas": [schema], "tables": ["*"]})],
+            Some(json!({"filter_expression": "tenant = {user.tenant}"})),
+            ds_id,
+            None,
+        )
+        .await;
+
+    let body = get_policy_anchor_coverage(&server, policy_id).await;
+    let coverage = body["coverage"].as_array().unwrap();
+    let by_table: std::collections::HashMap<String, &Value> = coverage
+        .iter()
+        .map(|e| (e["table"].as_str().unwrap().to_string(), e))
+        .collect();
+    assert!(
+        by_table.contains_key("has_tenant"),
+        "wildcard expansion includes has_tenant"
+    );
+    assert!(
+        by_table.contains_key("no_tenant"),
+        "wildcard expansion includes no_tenant"
+    );
+
+    let on_table = by_table["has_tenant"]["verdicts"].as_array().unwrap();
+    assert_eq!(on_table[0]["kind"], "on_table");
+    assert_eq!(on_table[0]["column"], "tenant");
+
+    let missing = by_table["no_tenant"]["verdicts"].as_array().unwrap();
+    assert_eq!(missing[0]["kind"], "missing_anchor");
+    assert_eq!(missing[0]["column"], "tenant");
+}
+
+#[tokio::test]
+async fn anchor_coverage_endpoint_non_row_filter() {
+    // Anchors are only meaningful for row_filter policies. Other policy types
+    // (column_mask here) get an empty coverage array so the frontend hides
+    // the panel.
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "ac_mask";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.t;
+             CREATE TABLE {schema}.t (id INT PRIMARY KEY, email TEXT);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_ac_mask", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    let policy_id = server
+        .create_column_mask("ac-mask-policy", schema, "t", "email", "'***'", ds_id, None)
+        .await;
+
+    let body = get_policy_anchor_coverage(&server, policy_id).await;
+    assert_eq!(body["policy_type"], "column_mask");
+    assert!(
+        body["coverage"].as_array().unwrap().is_empty(),
+        "non-row-filter policies return empty coverage"
+    );
+}

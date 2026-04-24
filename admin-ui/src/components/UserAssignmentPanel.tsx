@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import toast from 'react-hot-toast'
 import { getDataSourceUsers, setDataSourceUsers } from '../api/datasources'
 import { listUsers } from '../api/users'
 
@@ -9,8 +10,6 @@ interface UserAssignmentPanelProps {
 
 export function UserAssignmentPanel({ datasourceId }: UserAssignmentPanelProps) {
   const queryClient = useQueryClient()
-  const [saveError, setSaveError] = useState<string | null>(null)
-  const [saveSuccess, setSaveSuccess] = useState(false)
 
   const { data: allUsers = [], isLoading: usersLoading } = useQuery({
     queryKey: ['users', 'all'],
@@ -31,16 +30,14 @@ export function UserAssignmentPanel({ datasourceId }: UserAssignmentPanelProps) 
   const saveMutation = useMutation({
     mutationFn: (ids: string[]) => setDataSourceUsers(datasourceId, ids),
     onSuccess: () => {
-      setSaveSuccess(true)
-      setSaveError(null)
+      toast.success('User assignments saved')
       queryClient.invalidateQueries({ queryKey: ['datasource-users', datasourceId] })
-      setTimeout(() => setSaveSuccess(false), 3000)
     },
     onError: (err: unknown) => {
       const msg =
         (err as { response?: { data?: { error?: string } } })?.response?.data?.error ??
-        'Failed to save'
-      setSaveError(msg)
+        'Failed to save user assignments'
+      toast.error(msg)
     },
   })
 
@@ -55,11 +52,9 @@ export function UserAssignmentPanel({ datasourceId }: UserAssignmentPanelProps) 
       }
       return next
     })
-    setSaveSuccess(false)
   }
 
   function handleSave() {
-    setSaveError(null)
     saveMutation.mutate([...effectiveSelected])
   }
 
@@ -110,12 +105,6 @@ export function UserAssignmentPanel({ datasourceId }: UserAssignmentPanelProps) 
         </div>
       )}
 
-      {saveError && (
-        <div className="mt-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg px-4 py-2">
-          {saveError}
-        </div>
-      )}
-
       <div className="flex items-center gap-3 mt-4">
         <button
           type="button"
@@ -125,9 +114,6 @@ export function UserAssignmentPanel({ datasourceId }: UserAssignmentPanelProps) 
         >
           {saveMutation.isPending ? 'Saving…' : 'Save assignments'}
         </button>
-        {saveSuccess && (
-          <span className="text-sm text-green-600 font-medium">✓ Saved</span>
-        )}
       </div>
     </div>
   )

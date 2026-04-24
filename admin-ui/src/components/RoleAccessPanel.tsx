@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import toast from 'react-hot-toast'
 import { listRoles, getDatasourceRoles, setDatasourceRoleAccess } from '../api/roles'
 
 interface RoleAccessPanelProps {
@@ -31,7 +32,14 @@ export function RoleAccessPanel({ datasourceId }: RoleAccessPanelProps) {
   const saveMutation = useMutation({
     mutationFn: () => setDatasourceRoleAccess(datasourceId, Array.from(selectedRoleIds)),
     onSuccess: () => {
+      toast.success('Role access saved')
       queryClient.invalidateQueries({ queryKey: ['datasource-roles', datasourceId] })
+    },
+    onError: (err: unknown) => {
+      const msg =
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ??
+        'Failed to save role access'
+      toast.error(msg)
     },
   })
 
@@ -105,10 +113,6 @@ export function RoleAccessPanel({ datasourceId }: RoleAccessPanelProps) {
             ))}
           </div>
         </div>
-      )}
-
-      {saveMutation.isError && (
-        <div className="mt-2 text-xs text-red-600">Failed to save role access.</div>
       )}
 
       <button

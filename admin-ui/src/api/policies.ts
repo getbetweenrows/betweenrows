@@ -5,6 +5,7 @@ import type {
   CreatePolicyPayload,
   UpdatePolicyPayload,
   AssignPolicyPayload,
+  PolicyAnchorCoverageResponse,
 } from '../types/policy'
 import type { PaginatedResponse } from '../types/user'
 
@@ -73,6 +74,15 @@ export async function validateExpression(
   const { data } = await client.post<{ valid: boolean; error?: string }>(
     '/policies/validate-expression',
     { expression, is_mask: isMask },
+  )
+  return data
+}
+
+export async function getPolicyAnchorCoverage(
+  id: string,
+): Promise<PolicyAnchorCoverageResponse> {
+  const { data } = await client.get<PolicyAnchorCoverageResponse>(
+    `/policies/${id}/anchor-coverage`,
   )
   return data
 }

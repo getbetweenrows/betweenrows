@@ -23,15 +23,16 @@ beforeEach(() => {
 describe('DataSourceCreatePage', () => {
   it('renders heading and form', async () => {
     renderWithProviders(<DataSourceCreatePage />, { authenticated: true })
-    expect(screen.getByText(/new data source/i)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /new data source/i })).toBeInTheDocument()
     await waitFor(() => expect(screen.getByRole('combobox')).toBeInTheDocument())
   })
 
-  it('back button navigates to /datasources', async () => {
+  it('breadcrumb links back to /datasources', async () => {
     const user = userEvent.setup()
     renderWithProviders(<DataSourceCreatePage />, { authenticated: true })
-    await waitFor(() => screen.getByText(/back to data sources/i))
-    await user.click(screen.getByText(/back to data sources/i))
+    const link = await screen.findByRole('link', { name: 'Data Sources' })
+    expect(link).toHaveAttribute('href', '/datasources')
+    await user.click(link)
     expect(mockCreateDataSource).not.toHaveBeenCalled()
   })
 

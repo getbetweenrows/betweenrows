@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { screen, waitFor } from '@testing-library/react'
-import { Route, Routes } from 'react-router-dom'
+import { Route, Routes, useLocation } from 'react-router-dom'
 import { renderWithProviders } from '../test/test-utils'
-import { DataSourceCatalogPage } from './DataSourceCatalogPage'
+import { CatalogSection, DataSourceCatalogPage } from './DataSourceCatalogPage'
 import { makeDataSource } from '../test/factories'
 import type { DriftReport } from '../types/catalog'
 
@@ -26,17 +26,6 @@ beforeEach(() => {
   vi.clearAllMocks()
   mockGetCatalog.mockResolvedValue({ schemas: [] })
 })
-
-// Wrap DataSourceCatalogPage in a Route so useParams works correctly
-function renderCatalogPage(ds: ReturnType<typeof makeDataSource> | null = null) {
-  if (ds) mockGetDataSource.mockResolvedValue(ds)
-  return renderWithProviders(
-    <Routes>
-      <Route path="/datasources/:id/catalog" element={<DataSourceCatalogPage />} />
-    </Routes>,
-    { authenticated: true, routerEntries: ['/datasources/ds-1/catalog'] },
-  )
-}
 
 function makeBreakingDrift(): DriftReport {
   return {
@@ -68,33 +57,27 @@ function makeUptodateDrift(): DriftReport {
   return { schemas: [], has_breaking_changes: false }
 }
 
-describe('DataSourceCatalogPage', () => {
-  it('shows loading state', () => {
-    mockGetDataSource.mockReturnValue(new Promise(() => {}))
-    renderCatalogPage()
-    expect(screen.getByText(/loading/i)).toBeInTheDocument()
-  })
+/// Renders CatalogSection directly — the new in-page section used by
+/// DataSourceEditPage's Catalog tab. These tests exercise the shared content
+/// (drift panel, wizard, last-synced indicator) independently of which page
+/// hosts it.
+function renderSection(ds: ReturnType<typeof makeDataSource>) {
+  return renderWithProviders(<CatalogSection ds={ds} />, { authenticated: true })
+}
 
-  it('shows not found when data source is null', async () => {
-    mockGetDataSource.mockResolvedValue(null)
-    renderCatalogPage()
-    await waitFor(() =>
-      expect(screen.getByText(/data source not found/i)).toBeInTheDocument(),
-    )
-  })
-
-  it('renders datasource name and wizard', async () => {
-    renderCatalogPage(makeDataSource({ id: 'ds-1', name: 'prod-db', ds_type: 'postgres' }))
-    await waitFor(() => expect(screen.getByText('prod-db')).toBeInTheDocument())
+describe('CatalogSection', () => {
+  it('renders the discovery wizard', async () => {
+    renderSection(makeDataSource({ id: 'ds-1', name: 'prod-db', ds_type: 'postgres' }))
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /discover schemas/i })).toBeInTheDocument(),
     )
   })
 
   it('shows "up to date" drift panel when no drift', async () => {
-    renderCatalogPage(
+    renderSection(
       makeDataSource({
-        id: 'ds-1', name: 'prod-db',
+        id: 'ds-1',
+        name: 'prod-db',
         last_sync_result: JSON.stringify(makeUptodateDrift()),
       }),
     )
@@ -104,9 +87,10 @@ describe('DataSourceCatalogPage', () => {
   })
 
   it('shows breaking changes drift panel', async () => {
-    renderCatalogPage(
+    renderSection(
       makeDataSource({
-        id: 'ds-1', name: 'prod-db',
+        id: 'ds-1',
+        name: 'prod-db',
         last_sync_result: JSON.stringify(makeBreakingDrift()),
       }),
     )
@@ -117,9 +101,10 @@ describe('DataSourceCatalogPage', () => {
   })
 
   it('shows additive changes drift panel', async () => {
-    renderCatalogPage(
+    renderSection(
       makeDataSource({
-        id: 'ds-1', name: 'prod-db',
+        id: 'ds-1',
+        name: 'prod-db',
         last_sync_result: JSON.stringify(makeAdditiveDrift()),
       }),
     )
@@ -130,10 +115,53 @@ describe('DataSourceCatalogPage', () => {
 
   it('shows last synced time when last_sync_at is set', async () => {
     const fiveMinsAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString()
-    renderCatalogPage(
+    renderSection(
       makeDataSource({ id: 'ds-1', name: 'prod-db', last_sync_at: fiveMinsAgo }),
     )
     await waitFor(() => expect(screen.getByText(/last synced/i)).toBeInTheDocument())
     expect(screen.getByText(/5m ago/i)).toBeInTheDocument()
+  })
+})
+
+/// Helper that surfaces the current location so we can assert redirects.
+function LocationEcho() {
+  const loc = useLocation()
+  return <div data-testid="loc">{loc.pathname + loc.search}</div>
+}
+
+describe('DataSourceCatalogPage (legacy route redirect)', () => {
+  it('redirects existing datasources to the edit page Catalog tab', async () => {
+    mockGetDataSource.mockResolvedValue(makeDataSource({ id: 'ds-1', name: 'prod-db' }))
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/datasources/:id/catalog" element={<DataSourceCatalogPage />} />
+        <Route path="/datasources/:id/edit" element={<LocationEcho />} />
+        <Route path="/datasources" element={<LocationEcho />} />
+      </Routes>,
+      { authenticated: true, routerEntries: ['/datasources/ds-1/catalog'] },
+    )
+
+    await waitFor(() =>
+      expect(screen.getByTestId('loc').textContent).toBe(
+        '/datasources/ds-1/edit?section=catalog',
+      ),
+    )
+  })
+
+  it('redirects to the list when the datasource is missing', async () => {
+    mockGetDataSource.mockResolvedValue(null)
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/datasources/:id/catalog" element={<DataSourceCatalogPage />} />
+        <Route path="/datasources" element={<LocationEcho />} />
+      </Routes>,
+      { authenticated: true, routerEntries: ['/datasources/ds-1/catalog'] },
+    )
+
+    await waitFor(() =>
+      expect(screen.getByTestId('loc').textContent).toBe('/datasources'),
+    )
   })
 })

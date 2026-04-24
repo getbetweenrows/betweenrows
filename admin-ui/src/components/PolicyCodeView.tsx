@@ -66,7 +66,6 @@ function toYaml(val: unknown, indent = 0): string {
 }
 
 export function PolicyCodeView({ policy, assignments }: PolicyCodeViewProps) {
-  const [isOpen, setIsOpen] = useState(false)
   const [format, setFormat] = useState<'yaml' | 'json'>('yaml')
   const [copied, setCopied] = useState(false)
 
@@ -83,48 +82,38 @@ export function PolicyCodeView({ policy, assignments }: PolicyCodeViewProps) {
   }
 
   return (
-    <div className="border border-gray-200 rounded-xl mt-4 overflow-hidden">
-      <button
-        type="button"
-        onClick={() => setIsOpen((o) => !o)}
-        className="w-full flex items-center justify-between px-5 py-3 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
-      >
-        <span>View as code</span>
-        <span className="text-gray-400 text-xs">{isOpen ? '▲' : '▼'}</span>
-      </button>
-
-      {isOpen && (
-        <div className="border-t border-gray-200 p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <div className="flex rounded border border-gray-300 overflow-hidden text-xs font-medium">
-              <button
-                type="button"
-                onClick={() => setFormat('yaml')}
-                className={`px-3 py-1 transition-colors ${format === 'yaml' ? 'bg-gray-900 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
-              >
-                YAML
-              </button>
-              <button
-                type="button"
-                onClick={() => setFormat('json')}
-                className={`px-3 py-1 border-l border-gray-300 transition-colors ${format === 'json' ? 'bg-gray-900 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
-              >
-                JSON
-              </button>
-            </div>
+    <div>
+      <div className="flex items-center gap-2 mb-3">
+        <h2 className="text-base font-semibold text-gray-900">View as code</h2>
+        <div className="ml-auto flex items-center gap-2">
+          <div className="flex rounded border border-gray-300 overflow-hidden text-xs font-medium">
             <button
               type="button"
-              onClick={handleCopy}
-              className="ml-auto text-xs text-gray-500 hover:text-gray-800 border border-gray-300 rounded px-2 py-1 transition-colors"
+              onClick={() => setFormat('yaml')}
+              className={`px-3 py-1 transition-colors ${format === 'yaml' ? 'bg-gray-900 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
             >
-              {copied ? 'Copied!' : 'Copy'}
+              YAML
+            </button>
+            <button
+              type="button"
+              onClick={() => setFormat('json')}
+              className={`px-3 py-1 border-l border-gray-300 transition-colors ${format === 'json' ? 'bg-gray-900 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+            >
+              JSON
             </button>
           </div>
-          <pre className="text-xs bg-gray-50 border border-gray-200 rounded-lg p-4 overflow-auto max-h-96 font-mono leading-relaxed text-gray-800 whitespace-pre">
-            {text}
-          </pre>
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="text-xs text-gray-500 hover:text-gray-800 border border-gray-300 rounded px-2 py-1 transition-colors"
+          >
+            {copied ? 'Copied!' : 'Copy'}
+          </button>
         </div>
-      )}
+      </div>
+      <pre className="text-xs bg-gray-50 border border-gray-200 rounded-lg p-4 overflow-auto max-h-[32rem] font-mono leading-relaxed text-gray-800 whitespace-pre">
+        {text}
+      </pre>
     </div>
   )
 }

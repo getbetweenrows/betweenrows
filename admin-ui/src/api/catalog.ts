@@ -2,10 +2,15 @@ import { fetchEventSource } from '@microsoft/fetch-event-source'
 import { client } from './client'
 import type {
   CatalogResponse,
+  ColumnAnchor,
+  CreateColumnAnchorRequest,
+  CreateTableRelationshipRequest,
   DiscoveryEventType,
   DiscoveryRequest,
+  FkSuggestion,
   JobStatusResponse,
   SubmitDiscoveryResponse,
+  TableRelationship,
 } from '../types/catalog'
 
 function getToken(): string {
@@ -82,4 +87,58 @@ export async function getDiscoveryStatus(
 export async function getCatalog(datasourceId: string): Promise<CatalogResponse> {
   const { data } = await client.get<CatalogResponse>(`/datasources/${datasourceId}/catalog`)
   return data
+}
+
+// ---------- Relationships + column anchors ----------
+
+export async function listRelationships(
+  datasourceId: string,
+  childTableId?: string,
+): Promise<TableRelationship[]> {
+  const params = childTableId ? { child_table: childTableId } : undefined
+  const { data } = await client.get<TableRelationship[]>(
+    `/datasources/${datasourceId}/relationships`,
+    { params },
+  )
+  return data
+}
+
+export async function createRelationship(
+  datasourceId: string,
+  body: CreateTableRelationshipRequest,
+): Promise<TableRelationship> {
+  const { data } = await client.post<TableRelationship>(
+    `/datasources/${datasourceId}/relationships`,
+    body,
+  )
+  return data
+}
+
+export async function deleteRelationship(datasourceId: string, relId: string): Promise<void> {
+  await client.delete(`/datasources/${datasourceId}/relationships/${relId}`)
+}
+
+export async function listFkSuggestions(datasourceId: string): Promise<FkSuggestion[]> {
+  const { data } = await client.get<FkSuggestion[]>(`/datasources/${datasourceId}/fk-suggestions`)
+  return data
+}
+
+export async function listColumnAnchors(datasourceId: string): Promise<ColumnAnchor[]> {
+  const { data } = await client.get<ColumnAnchor[]>(`/datasources/${datasourceId}/column-anchors`)
+  return data
+}
+
+export async function createColumnAnchor(
+  datasourceId: string,
+  body: CreateColumnAnchorRequest,
+): Promise<ColumnAnchor> {
+  const { data } = await client.post<ColumnAnchor>(
+    `/datasources/${datasourceId}/column-anchors`,
+    body,
+  )
+  return data
+}
+
+export async function deleteColumnAnchor(datasourceId: string, anchorId: string): Promise<void> {
+  await client.delete(`/datasources/${datasourceId}/column-anchors/${anchorId}`)
 }

@@ -20,20 +20,13 @@ function renderCodeView(
 }
 
 describe('PolicyCodeView', () => {
-  it('starts collapsed — no <pre> visible', () => {
+  it('renders the code immediately (always expanded)', () => {
     renderCodeView()
-    expect(document.querySelector('pre')).toBeNull()
-  })
-
-  it('expands when "View as code" is clicked', () => {
-    renderCodeView()
-    fireEvent.click(screen.getByText('View as code'))
     expect(document.querySelector('pre')).toBeInTheDocument()
   })
 
   it('defaults to YAML format', () => {
     renderCodeView()
-    fireEvent.click(screen.getByText('View as code'))
     const pre = document.querySelector('pre')!
     expect(pre.textContent).toContain('name:')
     expect(pre.textContent).toContain('policy_type:')
@@ -41,7 +34,6 @@ describe('PolicyCodeView', () => {
 
   it('shows valid JSON when JSON toggle is clicked', () => {
     renderCodeView({ name: 'test-policy', policy_type: 'row_filter' })
-    fireEvent.click(screen.getByText('View as code'))
     fireEvent.click(screen.getByText('JSON'))
     const pre = document.querySelector('pre')!
     expect(() => JSON.parse(pre.textContent!)).not.toThrow()
@@ -52,14 +44,12 @@ describe('PolicyCodeView', () => {
 
   it('copy button calls navigator.clipboard.writeText', () => {
     renderCodeView()
-    fireEvent.click(screen.getByText('View as code'))
     fireEvent.click(screen.getByText('Copy'))
     expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1)
   })
 
   it('code includes policy name, policy_type, and version', () => {
     renderCodeView({ name: 'my-policy', policy_type: 'column_deny', version: 3 })
-    fireEvent.click(screen.getByText('View as code'))
     fireEvent.click(screen.getByText('JSON'))
     const parsed = JSON.parse(document.querySelector('pre')!.textContent!)
     expect(parsed.name).toBe('my-policy')
@@ -74,7 +64,6 @@ describe('PolicyCodeView', () => {
       definition: { filter_expression: 'tenant = 1' },
     })
     renderWithProviders(<PolicyCodeView policy={policy} assignments={[]} />)
-    fireEvent.click(screen.getByText('View as code'))
     fireEvent.click(screen.getByText('JSON'))
     const parsed = JSON.parse(document.querySelector('pre')!.textContent!)
     expect(parsed.targets).toHaveLength(1)
@@ -89,7 +78,6 @@ describe('PolicyCodeView', () => {
     })
     const policy = makePolicy()
     renderWithProviders(<PolicyCodeView policy={policy} assignments={[a]} />)
-    fireEvent.click(screen.getByText('View as code'))
     fireEvent.click(screen.getByText('JSON'))
     const parsed = JSON.parse(document.querySelector('pre')!.textContent!)
     expect(parsed.assignments).toHaveLength(1)

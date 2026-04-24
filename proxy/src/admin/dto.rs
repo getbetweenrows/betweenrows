@@ -952,6 +952,142 @@ pub struct ValidateExpressionResponse {
     pub error: Option<String>,
 }
 
+// ---------- table_relationship + column_anchor ----------
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTableRelationshipRequest {
+    pub child_table_id: Uuid,
+    pub child_column_name: String,
+    pub parent_table_id: Uuid,
+    pub parent_column_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListRelationshipsQuery {
+    /// Optional filter: only return relationships whose child is this table id.
+    pub child_table: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TableRelationshipResponse {
+    pub id: Uuid,
+    pub data_source_id: Uuid,
+    pub child_table_id: Uuid,
+    pub child_table_name: String,
+    pub child_schema_name: String,
+    pub child_column_name: String,
+    pub parent_table_id: Uuid,
+    pub parent_table_name: String,
+    pub parent_schema_name: String,
+    pub parent_column_name: String,
+    pub created_at: NaiveDateTime,
+    pub created_by: Option<Uuid>,
+}
+
+/// Request to create a `column_anchor`. Exactly one of `relationship_id` or
+/// `actual_column_name` must be set (XOR). Validated server-side; the UI
+/// enforces it via a radio control but clients should not rely on that.
+#[derive(Debug, Deserialize)]
+pub struct CreateColumnAnchorRequest {
+    pub child_table_id: Uuid,
+    pub resolved_column_name: String,
+    /// FK walk shape: the relationship the rewriter should walk.
+    #[serde(default)]
+    pub relationship_id: Option<Uuid>,
+    /// Same-table alias shape: the actual column name on the target table.
+    #[serde(default)]
+    pub actual_column_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ColumnAnchorResponse {
+    pub id: Uuid,
+    pub data_source_id: Uuid,
+    pub child_table_id: Uuid,
+    pub child_table_name: String,
+    pub resolved_column_name: String,
+    pub relationship_id: Option<Uuid>,
+    pub actual_column_name: Option<String>,
+    pub designated_at: NaiveDateTime,
+    pub designated_by: Uuid,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FkSuggestionResponse {
+    pub child_table_id: Uuid,
+    pub child_schema_name: String,
+    pub child_table_name: String,
+    pub child_column_name: String,
+    pub parent_table_id: Uuid,
+    pub parent_schema_name: String,
+    pub parent_table_name: String,
+    pub parent_column_name: String,
+    /// `pg_constraint.conname` — shown in the picker, not persisted.
+    pub fk_constraint_name: String,
+    /// True if a `table_relationship` row already exists for this FK tuple —
+    /// helps the UI grey out / hide already-added suggestions.
+    pub already_added: bool,
+}
+
+// ---------- Anchor coverage (edit-time warning) ----------
+
+/// Per-(table, column) verdict for whether a row-filter policy's column
+/// reference will resolve at query time.
+///
+/// Tagged-union JSON: `{"kind": "...", ...fields}`. Frontend hides the panel
+/// for everything but `MissingAnchor` / `MissingColumnOnAliasTarget` (the
+/// silent-deny cases). The other variants are returned so the UI can show a
+/// summary like "5 columns resolve cleanly".
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AnchorCoverageVerdict {
+    /// Column lives on the target table — no anchor needed.
+    OnTable { column: String },
+    /// Anchor in walk mode resolves the column via an FK to a parent table.
+    /// The `column` lives on `parent_schema.parent_table` under the same
+    /// name; `via_child_column` and `via_parent_column` are the FK join keys
+    /// (shown to admins for context, e.g. "via payments.order_id = orders.id").
+    AnchorWalk {
+        column: String,
+        via_relationship_id: Uuid,
+        via_child_column: String,
+        via_parent_column: String,
+        parent_schema: String,
+        parent_table: String,
+    },
+    /// Anchor in alias mode rewrites the column reference to a sibling
+    /// column on the same table.
+    AnchorAlias {
+        column: String,
+        actual_column_name: String,
+    },
+    /// Column not on the table and no anchor configured — runtime substitutes
+    /// `Filter(false)` (silent deny).
+    MissingAnchor { column: String },
+    /// Anchor in alias mode points at a column that doesn't exist on the
+    /// table — runtime substitutes `Filter(false)`.
+    MissingColumnOnAliasTarget {
+        column: String,
+        actual_column_name: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnchorCoverageTableEntry {
+    pub data_source_id: Uuid,
+    pub data_source_name: String,
+    pub schema: String,
+    pub table: String,
+    pub verdicts: Vec<AnchorCoverageVerdict>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PolicyAnchorCoverageResponse {
+    pub policy_id: Uuid,
+    pub policy_type: String,
+    pub coverage: Vec<AnchorCoverageTableEntry>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1148,5 +1284,60 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    // ---------- CreateColumnAnchorRequest deserialization ----------
+
+    #[test]
+    fn column_anchor_request_relationship_shape() {
+        let json = r#"{
+            "child_table_id": "00000000-0000-0000-0000-000000000001",
+            "resolved_column_name": "tenant_id",
+            "relationship_id": "00000000-0000-0000-0000-000000000002"
+        }"#;
+        let req: CreateColumnAnchorRequest = serde_json::from_str(json).unwrap();
+        assert!(req.relationship_id.is_some());
+        assert!(req.actual_column_name.is_none());
+    }
+
+    #[test]
+    fn column_anchor_request_alias_shape() {
+        let json = r#"{
+            "child_table_id": "00000000-0000-0000-0000-000000000001",
+            "resolved_column_name": "tenant_id",
+            "actual_column_name": "org_id"
+        }"#;
+        let req: CreateColumnAnchorRequest = serde_json::from_str(json).unwrap();
+        assert!(req.relationship_id.is_none());
+        assert_eq!(req.actual_column_name.as_deref(), Some("org_id"));
+    }
+
+    #[test]
+    fn column_anchor_request_neither_shape_parses_but_handler_rejects() {
+        // DTO layer only parses shape; XOR enforcement happens in the handler.
+        // The request deserializes successfully, and at runtime the handler
+        // returns 422. This asserts the DTO's permissive parsing so the
+        // handler's clear error message is the single source of truth.
+        let json = r#"{
+            "child_table_id": "00000000-0000-0000-0000-000000000001",
+            "resolved_column_name": "tenant_id"
+        }"#;
+        let req: CreateColumnAnchorRequest = serde_json::from_str(json).unwrap();
+        assert!(req.relationship_id.is_none());
+        assert!(req.actual_column_name.is_none());
+    }
+
+    #[test]
+    fn column_anchor_request_both_shapes_parse_but_handler_rejects() {
+        // Same rationale as above: handler enforces XOR with a clear 422.
+        let json = r#"{
+            "child_table_id": "00000000-0000-0000-0000-000000000001",
+            "resolved_column_name": "tenant_id",
+            "relationship_id": "00000000-0000-0000-0000-000000000002",
+            "actual_column_name": "org_id"
+        }"#;
+        let req: CreateColumnAnchorRequest = serde_json::from_str(json).unwrap();
+        assert!(req.relationship_id.is_some());
+        assert!(req.actual_column_name.is_some());
     }
 }

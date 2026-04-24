@@ -29,6 +29,7 @@ pub mod discovery_job;
 pub mod dto;
 pub mod jwt;
 pub mod policy_handlers;
+pub mod relationship_handlers;
 pub mod role_handlers;
 pub mod user_handlers;
 
@@ -202,6 +203,29 @@ fn api_v1() -> Router<AdminState> {
             "/datasources/{id}/catalog",
             get(catalog_handlers::get_catalog),
         )
+        // relationships (admin-curated) and fk suggestions (live)
+        .route(
+            "/datasources/{id}/relationships",
+            get(relationship_handlers::list_relationships)
+                .post(relationship_handlers::create_relationship),
+        )
+        .route(
+            "/datasources/{id}/relationships/{rel_id}",
+            delete(relationship_handlers::delete_relationship),
+        )
+        .route(
+            "/datasources/{id}/fk-suggestions",
+            get(relationship_handlers::fk_suggestions),
+        )
+        .route(
+            "/datasources/{id}/column-anchors",
+            get(relationship_handlers::list_column_anchors)
+                .post(relationship_handlers::create_column_anchor),
+        )
+        .route(
+            "/datasources/{id}/column-anchors/{anchor_id}",
+            delete(relationship_handlers::delete_column_anchor),
+        )
         // policies
         .route(
             "/policies/validate-expression",
@@ -216,6 +240,10 @@ fn api_v1() -> Router<AdminState> {
             get(policy_handlers::get_policy)
                 .put(policy_handlers::update_policy)
                 .delete(policy_handlers::delete_policy),
+        )
+        .route(
+            "/policies/{id}/anchor-coverage",
+            get(policy_handlers::get_policy_anchor_coverage),
         )
         // attribute definitions
         .route(

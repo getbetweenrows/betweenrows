@@ -1,14 +1,13 @@
 import { useState } from 'react'
 import { useDebounce } from '../hooks/useDebounce'
 import { Link, useNavigate } from 'react-router-dom'
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { deleteDataSource, listDataSources, testDataSource } from '../api/datasources'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { listDataSources, testDataSource } from '../api/datasources'
 import type { DataSource } from '../types/datasource'
 import { CopyableId } from '../components/CopyableId'
 
 export function DataSourcesListPage() {
   const navigate = useNavigate()
-  const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
   const debouncedSearch = useDebounce(search, 300)
@@ -20,19 +19,6 @@ export function DataSourcesListPage() {
     queryFn: () => listDataSources({ page, page_size: 20, search: debouncedSearch || undefined }),
     placeholderData: keepPreviousData,
   })
-
-  const deleteMutation = useMutation({
-    mutationFn: deleteDataSource,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['datasources'] })
-      queryClient.invalidateQueries({ queryKey: ['admin-audit'] })
-    },
-  })
-
-  function handleDelete(ds: DataSource) {
-    if (!confirm(`Delete data source "${ds.name}"? This cannot be undone.`)) return
-    deleteMutation.mutate(ds.id)
-  }
 
   async function handleTest(ds: DataSource) {
     setTestingId(ds.id)
@@ -145,22 +131,10 @@ export function DataSourcesListPage() {
                         {testingId === ds.id ? 'Testing…' : 'Test'}
                       </button>
                       <button
-                        onClick={() => navigate(`/datasources/${ds.id}/catalog`)}
-                        className="text-indigo-600 hover:text-indigo-800 text-xs font-medium"
-                      >
-                        Catalog
-                      </button>
-                      <button
                         onClick={() => navigate(`/datasources/${ds.id}/edit`)}
                         className="text-blue-600 hover:text-blue-800 text-xs font-medium"
                       >
                         Edit
-                      </button>
-                      <button
-                        onClick={() => handleDelete(ds)}
-                        className="text-red-500 hover:text-red-700 text-xs font-medium"
-                      >
-                        Delete
                       </button>
                     </div>
                   </td>

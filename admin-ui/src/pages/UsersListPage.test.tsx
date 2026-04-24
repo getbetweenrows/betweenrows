@@ -7,12 +7,10 @@ import { makeUser, makePaginatedUsers } from '../test/factories'
 
 vi.mock('../api/users', () => ({
   listUsers: vi.fn(),
-  deleteUser: vi.fn(),
 }))
 
-import { listUsers, deleteUser } from '../api/users'
+import { listUsers } from '../api/users'
 const mockListUsers = listUsers as ReturnType<typeof vi.fn>
-const mockDeleteUser = deleteUser as ReturnType<typeof vi.fn>
 
 beforeEach(() => vi.clearAllMocks())
 
@@ -49,22 +47,14 @@ describe('UsersListPage', () => {
     expect(screen.getByText('Admin')).toBeInTheDocument()
   })
 
-  it('delete confirms and calls deleteUser', async () => {
-    const user = userEvent.setup()
+  it('has no delete row action (delete lives on the user edit page)', async () => {
     const alice = makeUser({ id: 'u-alice', username: 'alice' })
     mockListUsers.mockResolvedValue(makePaginatedUsers([alice]))
-    mockDeleteUser.mockResolvedValue(undefined)
 
     renderWithProviders(<UsersListPage />, { authenticated: true })
     await waitFor(() => screen.getByText('alice'))
 
-    await user.click(screen.getByRole('button', { name: /^delete$/i }))
-
-    // TanStack Query v5 mutationFn is called as (variables, context) — match first arg
-    await waitFor(() => {
-      expect(mockDeleteUser).toHaveBeenCalled()
-      expect(mockDeleteUser.mock.calls[0][0]).toBe('u-alice')
-    })
+    expect(screen.queryByRole('button', { name: /^delete$/i })).toBeNull()
   })
 
   it('edit navigates to edit page', async () => {

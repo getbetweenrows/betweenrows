@@ -42,13 +42,15 @@ describe('UserEditPage', () => {
     await waitFor(() => expect(screen.getByText(/user not found/i)).toBeInTheDocument())
   })
 
-  it('renders form with user data', async () => {
+  it('renders header with the username as title', async () => {
     const userObj = makeUser({ id: 'u-1', username: 'alice' })
     mockGetUser.mockResolvedValue(userObj)
 
     renderEditPage()
 
-    await waitFor(() => expect(screen.getByText(/@alice/i)).toBeInTheDocument())
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: 'alice' })).toBeInTheDocument(),
+    )
   })
 
   it('submits update on save', async () => {
@@ -59,21 +61,26 @@ describe('UserEditPage', () => {
 
     renderEditPage()
 
-    await waitFor(() => screen.getByText(/@alice/i))
+    await waitFor(() => screen.getByRole('heading', { name: 'alice' }))
     await user.click(screen.getByRole('button', { name: /save changes/i }))
 
     await waitFor(() => expect(mockUpdateUser).toHaveBeenCalled())
     expect(mockUpdateUser.mock.calls[0][0]).toBe('u-1')
   })
 
-  it('shows password change section', async () => {
+  it('navigates to the Password section and shows the change form', async () => {
+    const user = userEvent.setup()
     const userObj = makeUser({ id: 'u-1', username: 'alice' })
     mockGetUser.mockResolvedValue(userObj)
 
     renderEditPage()
+    await waitFor(() => screen.getByRole('heading', { name: 'alice' }))
 
-    await waitFor(() => screen.getByText(/change password/i))
-    expect(screen.getByRole('button', { name: /^change$/i })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /^Password$/ }))
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /^change$/i })).toBeInTheDocument(),
+    )
   })
 
   it('calls changePassword and shows success message', async () => {
@@ -83,7 +90,9 @@ describe('UserEditPage', () => {
     mockChangePassword.mockResolvedValue(userObj)
 
     const { container } = renderEditPage()
+    await waitFor(() => screen.getByRole('heading', { name: 'alice' }))
 
+    await user.click(screen.getByRole('button', { name: /^Password$/ }))
     await waitFor(() => screen.getByRole('button', { name: /^change$/i }))
 
     // The password change input is the last password field in the page

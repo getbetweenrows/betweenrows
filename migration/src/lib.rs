@@ -49,6 +49,13 @@ mod m20260328_000052_create_attribute_definition;
 mod m20260328_000053_idx_attribute_definition_key_entity;
 mod m20260328_000054_add_user_attributes;
 mod m20260406_000055_drop_tenant_from_proxy_user;
+mod m20260421_000056_create_table_relationship;
+mod m20260421_000057_idx_table_relationship_ds;
+mod m20260421_000058_idx_table_relationship_child_table;
+mod m20260421_000059_create_column_anchor;
+mod m20260421_000060_idx_column_anchor_unique;
+mod m20260421_000061_column_anchor_add_actual_column;
+mod m20260421_000062_column_anchor_nullable_relationship_id;
 
 pub struct Migrator;
 
@@ -105,6 +112,13 @@ impl MigratorTrait for Migrator {
             Box::new(m20260328_000053_idx_attribute_definition_key_entity::Migration),
             Box::new(m20260328_000054_add_user_attributes::Migration),
             Box::new(m20260406_000055_drop_tenant_from_proxy_user::Migration),
+            Box::new(m20260421_000056_create_table_relationship::Migration),
+            Box::new(m20260421_000057_idx_table_relationship_ds::Migration),
+            Box::new(m20260421_000058_idx_table_relationship_child_table::Migration),
+            Box::new(m20260421_000059_create_column_anchor::Migration),
+            Box::new(m20260421_000060_idx_column_anchor_unique::Migration),
+            Box::new(m20260421_000061_column_anchor_add_actual_column::Migration),
+            Box::new(m20260421_000062_column_anchor_nullable_relationship_id::Migration),
         ]
     }
 }

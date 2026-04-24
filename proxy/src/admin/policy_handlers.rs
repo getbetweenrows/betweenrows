@@ -11,9 +11,11 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::entity::{
-    data_source, decision_function, policy, policy_assignment, policy_version, proxy_user, role,
+    data_source, decision_function, discovered_schema, policy, policy_assignment, policy_version,
+    proxy_user, role,
 };
-use crate::policy_match::PolicyType;
+use crate::policy_match::{PolicyType, TargetEntry};
+use crate::resolution::graph::{AnchorShape, expr_column_names};
 use crate::role_resolver;
 
 use super::{
@@ -21,9 +23,10 @@ use super::{
     admin_audit::{AuditAction, AuditedTxn},
     decision_function_handlers::df_summary,
     dto::{
-        AssignPolicyRequest, CreatePolicyRequest, DecisionFunctionSummary, ListPoliciesQuery,
-        PaginatedResponse, PolicyAssignmentResponse, PolicyResponse, UpdatePolicyRequest,
-        validate_definition, validate_policy_name, validate_targets,
+        AnchorCoverageTableEntry, AnchorCoverageVerdict, AssignPolicyRequest, CreatePolicyRequest,
+        DecisionFunctionSummary, ListPoliciesQuery, PaginatedResponse,
+        PolicyAnchorCoverageResponse, PolicyAssignmentResponse, PolicyResponse,
+        UpdatePolicyRequest, validate_definition, validate_policy_name, validate_targets,
     },
     jwt::AdminClaims,
 };
@@ -462,6 +465,230 @@ pub async fn get_policy(
     );
 
     Ok(Json(resp))
+}
+
+// ---------- GET /policies/{id}/anchor-coverage ----------
+//
+// Edit-time dry-run of the column-resolution pass that runs at query time.
+// For each (assigned table × column referenced in the row-filter expression),
+// returns a verdict: on_table / anchor_walk / anchor_alias / missing_anchor /
+// missing_column_on_alias_target. Only meaningful for `row_filter` policies;
+// other types return an empty `coverage` array so the frontend can hide the
+// panel.
+
+pub async fn get_policy_anchor_coverage(
+    AdminClaims(_): AdminClaims,
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<PolicyAnchorCoverageResponse>, ApiErr> {
+    let p = policy::Entity::find_by_id(id)
+        .one(&state.db)
+        .await
+        .map_err(ApiErr::internal)?
+        .ok_or_else(|| ApiErr::not_found("Policy not found"))?;
+
+    // Only row_filter policies use anchors. Return an empty coverage array
+    // for other types so the frontend hides the panel without needing to
+    // know about every policy type.
+    let is_row_filter = matches!(
+        p.policy_type.parse::<PolicyType>(),
+        Ok(PolicyType::RowFilter)
+    );
+    if !is_row_filter {
+        return Ok(Json(PolicyAnchorCoverageResponse {
+            policy_id: p.id,
+            policy_type: p.policy_type,
+            coverage: vec![],
+        }));
+    }
+
+    let targets: Vec<TargetEntry> = serde_json::from_str(&p.targets).unwrap_or_default();
+    let definition: Option<serde_json::Value> = p
+        .definition
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
+    let filter_expression = definition
+        .as_ref()
+        .and_then(|d| d.get("filter_expression"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // Empty-filter and parse-failure reflect saved-policy state the admin
+    // can correct (editor/validator skew, or a row that slipped past
+    // `validate_definition`). Surface 422 so the UI renders a readable
+    // message instead of a 500 alert.
+    if filter_expression.trim().is_empty() {
+        return Err(ApiErr::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "row_filter policy is missing filter_expression",
+        ));
+    }
+    let parsed =
+        crate::hooks::policy::parse_filter_expr_for_admin(filter_expression).map_err(|e| {
+            ApiErr::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("filter parse failed: {e}"),
+            )
+        })?;
+    let referenced: std::collections::HashSet<String> =
+        expr_column_names(&parsed).map_err(|e| {
+            ApiErr::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("ast walk failed: {e}"),
+            )
+        })?;
+
+    // No columns referenced (e.g. literal `1=1`) → nothing to check; report
+    // an empty coverage array. The frontend treats this as "all clean".
+    if referenced.is_empty() {
+        return Ok(Json(PolicyAnchorCoverageResponse {
+            policy_id: p.id,
+            policy_type: p.policy_type,
+            coverage: vec![],
+        }));
+    }
+
+    let assignments = policy_assignment::Entity::find()
+        .filter(policy_assignment::Column::PolicyId.eq(id))
+        .all(&state.db)
+        .await
+        .map_err(ApiErr::internal)?;
+
+    let mut unique_ds_ids: Vec<Uuid> = assignments.iter().map(|a| a.data_source_id).collect();
+    unique_ds_ids.sort();
+    unique_ds_ids.dedup();
+    let ds_names = fetch_ds_names(&state.db, unique_ds_ids.clone()).await?;
+
+    let mut coverage: Vec<AnchorCoverageTableEntry> = Vec::new();
+
+    for ds_id in unique_ds_ids {
+        let snapshot = crate::hooks::policy::load_relationship_snapshot(&state.db, ds_id)
+            .await
+            .map_err(|e| ApiErr::internal(format!("load_relationship_snapshot: {e}")))?;
+
+        // Build df_alias → upstream_schema map for target matching. The
+        // snapshot keys columns by df_alias; targets match against upstream.
+        let schemas = discovered_schema::Entity::find()
+            .filter(discovered_schema::Column::DataSourceId.eq(ds_id))
+            .all(&state.db)
+            .await
+            .map_err(ApiErr::internal)?;
+        let df_to_upstream: HashMap<String, String> = schemas
+            .iter()
+            .map(|s| {
+                let alias = s
+                    .schema_alias
+                    .as_deref()
+                    .unwrap_or(&s.schema_name)
+                    .to_string();
+                (alias, s.schema_name.clone())
+            })
+            .collect();
+
+        let ds_name = ds_names
+            .get(&ds_id)
+            .cloned()
+            .unwrap_or_else(|| ds_id.to_string());
+
+        // Iterate every (df_schema, table) discovered for this datasource and
+        // check whether any target entry matches it. This is the same matcher
+        // the runtime uses (`TargetEntry::matches_table`).
+        for ((df_schema, table), columns) in snapshot.columns_by_table.iter() {
+            let matched = targets
+                .iter()
+                .any(|t| t.matches_table(df_schema, table, &df_to_upstream));
+            if !matched {
+                continue;
+            }
+
+            let mut sorted_cols: Vec<&String> = referenced.iter().collect();
+            sorted_cols.sort();
+
+            let mut verdicts: Vec<AnchorCoverageVerdict> = Vec::with_capacity(sorted_cols.len());
+            for column in sorted_cols {
+                let v = classify_column(&snapshot, df_schema, table, columns, column);
+                verdicts.push(v);
+            }
+
+            coverage.push(AnchorCoverageTableEntry {
+                data_source_id: ds_id,
+                data_source_name: ds_name.clone(),
+                schema: df_schema.clone(),
+                table: table.clone(),
+                verdicts,
+            });
+        }
+    }
+
+    coverage.sort_by(|a, b| {
+        (
+            a.data_source_name.as_str(),
+            a.schema.as_str(),
+            a.table.as_str(),
+        )
+            .cmp(&(
+                b.data_source_name.as_str(),
+                b.schema.as_str(),
+                b.table.as_str(),
+            ))
+    });
+
+    Ok(Json(PolicyAnchorCoverageResponse {
+        policy_id: p.id,
+        policy_type: p.policy_type,
+        coverage,
+    }))
+}
+
+fn classify_column(
+    snapshot: &crate::resolution::graph::RelationshipSnapshot,
+    df_schema: &str,
+    table: &str,
+    columns: &std::collections::HashSet<String>,
+    column: &str,
+) -> AnchorCoverageVerdict {
+    if columns.contains(column) {
+        return AnchorCoverageVerdict::OnTable {
+            column: column.to_string(),
+        };
+    }
+
+    let key = (df_schema.to_string(), table.to_string(), column.to_string());
+    match snapshot.anchors.get(&key) {
+        Some(AnchorShape::Relationship(rel_id)) => {
+            // Relationship metadata is required to render the verdict; an
+            // anchor whose relationship was deleted is treated as missing.
+            match snapshot.relationships.get(rel_id) {
+                Some(edge) => AnchorCoverageVerdict::AnchorWalk {
+                    column: column.to_string(),
+                    via_relationship_id: edge.id,
+                    via_child_column: edge.child_column.clone(),
+                    via_parent_column: edge.parent_column.clone(),
+                    parent_schema: edge.parent_schema.clone(),
+                    parent_table: edge.parent_table.clone(),
+                },
+                None => AnchorCoverageVerdict::MissingAnchor {
+                    column: column.to_string(),
+                },
+            }
+        }
+        Some(AnchorShape::Alias(actual)) => {
+            if columns.contains(actual) {
+                AnchorCoverageVerdict::AnchorAlias {
+                    column: column.to_string(),
+                    actual_column_name: actual.clone(),
+                }
+            } else {
+                AnchorCoverageVerdict::MissingColumnOnAliasTarget {
+                    column: column.to_string(),
+                    actual_column_name: actual.clone(),
+                }
+            }
+        }
+        None => AnchorCoverageVerdict::MissingAnchor {
+            column: column.to_string(),
+        },
+    }
 }
 
 // ---------- PUT /policies/{id} ----------

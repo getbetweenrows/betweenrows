@@ -32,6 +32,23 @@ pub struct DiscoveredColumn {
     pub arrow_type: Option<String>,
 }
 
+/// A foreign key introspected from the upstream database.
+///
+/// Only single-column FKs referencing a PK or single-column unique on the parent
+/// are returned — this matches the rewriter's at-most-one-parent-per-child safety
+/// invariant used by `column_anchor` resolution.
+#[derive(Debug, Clone)]
+pub struct DiscoveredForeignKey {
+    pub child_schema: String,
+    pub child_table: String,
+    pub child_column: String,
+    pub parent_schema: String,
+    pub parent_table: String,
+    pub parent_column: String,
+    /// `pg_constraint.conname` — displayed to admins in the UI picker; not persisted.
+    pub fk_constraint_name: String,
+}
+
 // ---------- errors ----------
 
 #[derive(Debug)]
@@ -75,6 +92,18 @@ pub trait DiscoveryProvider: Send + Sync {
         tables: &[(String, String)], // (schema_name, table_name)
         cancel: &CancellationToken,
     ) -> Result<Vec<DiscoveredColumn>, DiscoveryError>;
+
+    /// Live-introspect single-column foreign keys whose parent column is a PK or
+    /// single-column unique. Results are filtered to FKs whose both endpoints
+    /// are in the given `tables` list.
+    ///
+    /// Called on-demand by the `fk-suggestions` admin endpoint. Nothing is
+    /// persisted by this call — it purely fuels the admin UI's designation picker.
+    async fn discover_foreign_keys(
+        &self,
+        tables: &[(String, String)], // (schema_name, table_name)
+        cancel: &CancellationToken,
+    ) -> Result<Vec<DiscoveredForeignKey>, DiscoveryError>;
 }
 
 // ---------- factory ----------

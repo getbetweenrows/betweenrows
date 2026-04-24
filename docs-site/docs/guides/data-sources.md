@@ -48,7 +48,7 @@ These steps use the [demo schema](/reference/demo-schema) as an example. Substit
    | Password | `postgres` |
    | SSL mode | `disable` (local dev only) |
 
-   ![Data source connection form with demo PostgreSQL details](/screenshots/data-sources-connection-form-v0.15.png)
+   ![Data source connection form with demo PostgreSQL details](/screenshots/data-sources-connection-form-v0.17.png)
 
 3. **Click Test Connection.** A green indicator confirms the proxy can reach the upstream. If it fails, check:
    - Host/port reachable from the BetweenRows container (not just your laptop)
@@ -56,7 +56,7 @@ These steps use the [demo schema](/reference/demo-schema) as an example. Substit
    - SSL mode matches the upstream's `pg_hba.conf` settings
    - Firewall/security group allows the connection
 
-   ![Successful connection test indicator on the data source form](/screenshots/data-sources-test-success-v0.15.png)
+   ![Successful connection test indicator on the data source form](/screenshots/data-sources-test-success-v0.17.png)
 
 4. **Save** the data source.
 
@@ -67,8 +67,8 @@ These steps use the [demo schema](/reference/demo-schema) as an example. Substit
    - **Columns** — for each selected table, select which columns to expose. Deselect columns here as a first-pass data-minimization step.
    - **Save** — persist the selections as the baseline catalog.
 
-   ![Catalog discovery wizard showing schema selection step](/screenshots/data-sources-discover-schemas-v0.15.png)
-   ![Catalog discovery wizard showing column selection step](/screenshots/data-sources-discover-columns-v0.15.png)
+   ![Catalog discovery wizard showing schema selection step](/screenshots/data-sources-discover-schemas-v0.17.png)
+   ![Catalog discovery wizard showing column selection step](/screenshots/data-sources-discover-columns-v0.17.png)
 
 6. **Grant user access.** On the data source page, add users or roles in the **User Access** section. Admin status does **not** grant data access — every user starts with zero data plane access.
 
@@ -160,4 +160,4 @@ Think of the catalog as "what can potentially exist" and policies as "what each 
 - [Policies overview](/guides/policies/) — which policy types to layer on top of the data source
 - [Rename Safety](/operations/rename-safety) — what breaks when you rename
 
-<!-- screenshots: [data-sources-connection-form-v0.15.png, data-sources-test-success-v0.15.png, data-sources-discover-schemas-v0.15.png, data-sources-discover-columns-v0.15.png] -->
+<!-- screenshots: [data-sources-connection-form-v0.17.png, data-sources-test-success-v0.17.png, data-sources-discover-schemas-v0.17.png, data-sources-discover-columns-v0.17.png] -->

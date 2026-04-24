@@ -36,7 +36,7 @@ Go to **Policies → Create**:
 - **Targets:** schema `public`, table `customers`, column `ssn`
 - **Mask expression:** `'***-**-' || RIGHT(ssn, 4)`
 
-![Column mask policy editor showing SSN masking expression](/screenshots/column-masks-editor-v0.15.png)
+![Column mask policy editor showing SSN masking expression](/screenshots/column-masks-editor-v0.17.png)
 
 ### 2. Assign and verify
 
@@ -146,4 +146,4 @@ If a `column_deny` removes a column, a mask on the same column is irrelevant —
 - [Column Allow & Deny](./column-allow-deny) — for removing columns entirely
 - [Template Expressions](/reference/template-expressions) — expression syntax and `{user.KEY}` variables
 
-<!-- screenshots: [column-masks-editor-v0.15.png, column-masks-result-v0.15.png] -->
+<!-- screenshots: [column-masks-editor-v0.17.png, column-masks-result-v0.15.png] -->

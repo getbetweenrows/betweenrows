@@ -7,7 +7,7 @@ description: BetweenRows is a fully customizable data access governance layer �
 
 **BetweenRows** is a fully customizable data access governance layer. It sits between your users and your data sources as a SQL-aware proxy, enforcing fine-grained access policies — masking, filtering, and blocking — in real-time on every query. Define who can see what through an admin UI, and every connection through the proxy is automatically governed. Currently supports PostgreSQL data sources; warehouses and lakehouses are on the roadmap.
 
-![BetweenRows admin console, showing the Users page with seeded demo accounts alice, bob, and charlie](/screenshots/introduction-dashboard-v0.14.png)
+![BetweenRows admin console, showing the Users page with seeded demo accounts alice, bob, and charlie](/screenshots/introduction-dashboard-v0.17.png)
 
 ## Why BetweenRows
 

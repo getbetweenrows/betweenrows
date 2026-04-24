@@ -153,11 +153,11 @@ Goal: a `table_deny` policy on `salary_data` that only fires outside business ho
    }
    ```
 
-   ![Decision function editor with business hours JavaScript source](/screenshots/decision-functions-editor-v0.15.png)
+   ![Decision function editor with business hours JavaScript source](/screenshots/decision-functions-editor-v0.17.png)
 
 2. **Test the function** using the built-in test runner (`POST /decision-functions/test`). Provide a mock context with different hours/days and verify the `fire` result matches expectations.
 
-   ![Decision function test runner with mock session context](/screenshots/decision-functions-test-runner-v0.15.png)
+   ![Decision function test runner with mock session context](/screenshots/decision-functions-test-runner-v0.17.png)
 
 3. **Create the policy** — a `table_deny` on `salary_data` — and attach the decision function via `decision_function_id`.
 
@@ -235,7 +235,7 @@ The response tells you:
 
 Test with different mock contexts to cover your edge cases: different users, different times, different roles, missing attributes. The test runner compiles and executes the JS in the same WASM sandbox used in production — it's not a simulation.
 
-![Decision function test runner result showing fire value and logs](/screenshots/decision-functions-test-runner-v0.15.png)
+![Decision function test runner result showing fire value and logs](/screenshots/decision-functions-test-runner-v0.17.png)
 
 ### Logging with `log_level`
 
@@ -385,4 +385,4 @@ If a user has 5 policies and 3 have query-context decision functions, each query
 - [Policies overview](/guides/policies/) — which policy type to attach a decision function to
 - [Template Expressions](/reference/template-expressions) — the simpler alternative for attribute-based logic
 
-<!-- screenshots: [decision-functions-editor-v0.15.png, decision-functions-test-runner-v0.15.png] -->
+<!-- screenshots: [decision-functions-editor-v0.17.png, decision-functions-test-runner-v0.17.png] -->

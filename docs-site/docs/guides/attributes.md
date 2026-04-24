@@ -55,7 +55,7 @@ Go to **Attribute Definitions → Create** in the admin UI:
 - **Default value:** (leave empty — users without a tenant should match nothing)
 - **Description:** "Which customer tenant this user belongs to"
 
-![Attribute definition form for the tenant attribute](/screenshots/attributes-def-form-v0.15.png)
+![Attribute definition form for the tenant attribute](/screenshots/attributes-def-form-v0.17.png)
 
 ### 2. Assign the attribute to a user
 
@@ -69,7 +69,7 @@ Edit a user (e.g., `alice`) and set her attributes:
 
 Attribute assignment uses **full-replace semantics** — the entire attributes object is overwritten on each update. To add a new attribute, include all existing ones in the payload.
 
-![Assigning attribute values to a user in the admin UI](/screenshots/attributes-assignment-v0.15.png)
+![Assigning attribute values to a user in the admin UI](/screenshots/attributes-assignment-v0.17.png)
 
 ### 3. Use the attribute in a policy expression
 
@@ -188,4 +188,4 @@ If a policy references `{user.foo}` but no attribute definition named `foo` exis
 - [Users & Roles](/guides/users-roles) — how users and roles are managed
 - [Row Filters](/guides/policies/row-filters) — the most common consumer of user attributes
 
-<!-- screenshots: [attributes-def-form-v0.15.png, attributes-assignment-v0.15.png] -->
+<!-- screenshots: [attributes-def-form-v0.17.png, attributes-assignment-v0.17.png] -->

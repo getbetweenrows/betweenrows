@@ -100,7 +100,7 @@ A row is written for every mutation to the admin-plane state: users, roles, poli
    - **No WHERE clause:** the template variable may have resolved to NULL. Check Alice's `tenant` attribute value.
    - **Wrong value:** check which user attribute value Alice has set.
 
-![Query audit detail view showing rewritten SQL and applied policies](/screenshots/audit-debugging-query-detail-v0.15.png)
+![Query audit detail view showing rewritten SQL and applied policies](/screenshots/audit-debugging-query-detail-v0.17.png)
 
 ### Scenario 2: zero rows returned
 
@@ -147,7 +147,7 @@ A row is written for every mutation to the admin-plane state: users, roles, poli
    - **Action** — `create`, `update`, `delete`, `assign`, `unassign`, etc.
    - **Changes** — JSON diff of what changed (before/after for updates, full snapshot for create/delete)
 
-![Admin audit entry showing actor, action, and change diff](/screenshots/audit-debugging-admin-detail-v0.15.png)
+![Admin audit entry showing actor, action, and change diff](/screenshots/audit-debugging-admin-detail-v0.17.png)
 
 ## Patterns and recipes
 
@@ -204,4 +204,4 @@ BetweenRows is read-only. If a client sends `DELETE FROM orders`, the proxy reje
 - [Policies overview](/guides/policies/) — understanding what fires and why
 - [Troubleshooting](/operations/troubleshooting) — connection and policy diagnostic trees
 
-<!-- screenshots: [audit-debugging-query-detail-v0.15.png, audit-debugging-admin-detail-v0.15.png, audit-debugging-filter-panel-v0.15.png] -->
+<!-- screenshots: [audit-debugging-query-detail-v0.17.png, audit-debugging-admin-detail-v0.17.png] -->

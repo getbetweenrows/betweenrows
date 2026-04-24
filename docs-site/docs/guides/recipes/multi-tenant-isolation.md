@@ -106,7 +106,7 @@ As Charlie:
  stark |       34
 ```
 
-![Query Audit Log showing alice, bob, and charlie each running the same SELECT org, COUNT(*) FROM orders query against the shared demo_ecommerce datasource — each audit row carries the same tenant-isolation policy and returns a different per-tenant result](/screenshots/multi-tenant-audit-v0.14.png)
+![Query Audit Log showing alice, bob, and charlie each running the same SELECT org, COUNT(*) FROM orders query against the shared demo_ecommerce datasource — each audit row carries the same tenant-isolation policy and returns a different per-tenant result](/screenshots/multi-tenant-audit-v0.17.png)
 
 ## 6. Verify that bypass attempts fail
 
@@ -151,6 +151,42 @@ Now the payoff. You sign a new customer, `initech`. Add them:
 David can now connect and query. He sees only `initech` rows. **No new policy was created.** The single `tenant-isolation` policy covers him automatically because `{user.tenant}` expands to his attribute value at query time.
 
 Scaling to 50 tenants? Same policy. 500? Same policy. The only thing that grows is the `users` table and their `tenant` attribute values.
+
+## When the scope column isn't on every table
+
+The pattern above assumes every tenant-scoped table has an `org` column. Real schemas usually don't. Normalize enough and `org` lives on a handful of top-level tables while children reach it through foreign keys: `support_tickets.customer_id → customers.org`, `order_items.order_id → orders.org`. Two tables in the same policy might even spell the scope column differently (`customers.tenant_id` vs `accounts.org_id` for the same concept).
+
+The single `tenant-isolation` policy still covers every case — you just register anchors that tell the proxy how to reach `org` from each child table.
+
+### Reaching `org` through a foreign key
+
+Suppose `org` lives on `customers` but the filter also targets `support_tickets`, which only has `customer_id`. On **Data Sources → `demo_ecommerce` → edit → Relationships**:
+
+1. Click **Show FK suggestions**.
+2. Find `support_tickets.customer_id → customers.id` in the list and click **Add**.
+
+Then, on the same page, go to **Column anchors** and click **Add anchor**:
+
+- **Child table:** `support_tickets`
+- **Resolved column:** `org`
+- **Resolve via:** Relationship (FK walk) → pick the `customer_id → customers.id` relationship.
+
+Alice's `SELECT * FROM support_tickets` now becomes `SELECT * FROM support_tickets WHERE org = 'acme'` — the proxy injects an `INNER JOIN customers` under the filter, projects back to the `support_tickets` scan schema, and the user never sees the join.
+
+### Scope column spelled differently on one table
+
+Suppose `accounts` carries the tenant concept but calls it `org_id` instead of `org`. Same policy, no fragmentation:
+
+1. Go to **Data Sources → `demo_ecommerce` → edit → Column anchors → Add anchor**.
+2. **Child table:** `accounts` · **Resolved column:** `org` · **Resolve via:** Same-table alias → enter `org_id`.
+
+The filter expression `org = {user.tenant}` is rewritten to `org_id = 'acme'` on `accounts` only. No join, no plan rewrite.
+
+### Check coverage before you trust it
+
+Every `row_filter` policy's edit page has an **Anchor coverage** section that dry-runs the same resolution the proxy uses at query time. A green banner means every `(assigned table × filter column)` pair resolves; a red panel lists the broken pairs. Resolution failures fail safe (zero rows), so an unconfigured table stays invisible until you check — run the coverage preview before assigning, especially after adding new tables to the policy.
+
+For the full model (FK walk vs alias, multi-hop behavior, trust assumptions, the five resolution-failure modes), see [Row Filters → Filtering by a column on a parent table](/guides/policies/row-filters#filtering-by-a-column-on-a-parent-table).
 
 ## Extending the pattern
 

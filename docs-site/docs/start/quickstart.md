@@ -29,7 +29,7 @@ Port 5434 is the SQL proxy (where your users connect). Port 5435 is the admin UI
 
 Open [http://localhost:5435](http://localhost:5435) and log in as `admin` / `changeme`.
 
-![BetweenRows admin login screen](/screenshots/quickstart-login-v0.14.png)
+![BetweenRows admin login screen](/screenshots/quickstart-login-v0.17.png)
 
 ::: tip
 Pin your Docker tag to a specific version (`:{{VERSION}}`, not `:latest`). Breaking changes between minor versions are called out in the [changelog](https://github.com/getbetweenrows/betweenrows/blob/main/CHANGELOG.md).
@@ -39,7 +39,7 @@ Pin your Docker tag to a specific version (`:{{VERSION}}`, not `:latest`). Break
 
 Go to **Data Sources → Create**. Enter your PostgreSQL connection details (host, port, database, username, password), select an SSL mode, and click **Test Connection**. Once the test passes, save.
 
-![Configured data source in the admin UI](/screenshots/quickstart-add-datasource-v0.14.png)
+![Configured data source in the admin UI](/screenshots/quickstart-add-datasource-v0.17.png)
 
 → Full options: [Data Sources guide](/guides/data-sources) — covers every field, access modes, credentials handling, and multi-datasource patterns.
 
@@ -47,7 +47,7 @@ Go to **Data Sources → Create**. Enter your PostgreSQL connection details (hos
 
 On your new data source, click **Discover Catalog**. Select which schemas, tables, and columns to expose through the proxy. Anything you don't select is invisible to users — BetweenRows defaults to an allowlist model.
 
-![Catalog discovery wizard with schema and table selection](/screenshots/quickstart-catalog-discovery-v0.15.png)
+![Catalog discovery wizard with schema and table selection](/screenshots/quickstart-catalog-discovery-v0.17.png)
 
 → Full options: [Data Sources guide → Catalog discovery](/guides/data-sources#catalog-discovery)
 
@@ -78,7 +78,7 @@ Save the policy. Then assign it to your data source with scope **All users**.
 
 This single policy ensures every user sees only the rows where `org` matches their `tenant` attribute.
 
-![Row filter policy editor with tenant isolation expression](/screenshots/quickstart-policy-editor-v0.15.png)
+![Row filter policy editor with tenant isolation expression](/screenshots/quickstart-policy-editor-v0.17.png)
 
 → Full options: [Row Filters guide](/guides/policies/row-filters) · [Template Expressions reference](/reference/template-expressions)
 
@@ -104,7 +104,7 @@ Alice should see only `acme` rows. Create a second user with a different `tenant
 
 Then open **Query Audit** in the admin UI to see what happened: the original SQL, the rewritten SQL (with the injected `WHERE org = 'acme'`), and which policies were applied.
 
-![Query audit entry showing rewritten SQL with injected WHERE clause](/screenshots/quickstart-audit-entry-v0.15.png)
+![Query audit entry showing rewritten SQL with injected WHERE clause](/screenshots/quickstart-audit-entry-v0.17.png)
 
 → Full options: [Audit & Debugging guide](/guides/audit-debugging)
 

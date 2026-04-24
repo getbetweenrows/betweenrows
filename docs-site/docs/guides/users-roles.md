@@ -44,7 +44,7 @@ These steps use the [demo schema](/reference/demo-schema) personas. Substitute y
 3. Leave `is_admin` unchecked (alice is a data plane user, not an admin).
 4. Save.
 
-![New user form in the admin UI](/screenshots/users-roles-create-user-v0.15.png)
+![New user form in the admin UI](/screenshots/users-roles-create-user-v0.17.png)
 
 5. **Edit alice** to set her attributes — e.g., `tenant: "acme"`. See [User Attributes](/guides/attributes) for the full workflow.
 
@@ -62,7 +62,7 @@ On the data source page, add alice in the **User Access** section (or grant via 
 2. Enter name `analyst` and an optional description.
 3. Save.
 
-![Create role form with name and description fields](/screenshots/users-roles-create-role-v0.15.png)
+![Create role form with name and description fields](/screenshots/users-roles-create-role-v0.17.png)
 
 ### Add members to a role
 
@@ -75,7 +75,7 @@ Roles can inherit from parent roles, forming a DAG (directed acyclic graph).
 1. On the `analyst` role page, go to **Parents** and add `viewer` as a parent.
 2. Now `analyst` inherits all policy assignments from `viewer`, plus its own.
 
-![Role inheritance configuration showing parent role selection](/screenshots/users-roles-role-inheritance-v0.15.png)
+![Role inheritance configuration showing parent role selection](/screenshots/users-roles-role-inheritance-v0.17.png)
 
 ### Assign policies via roles
 
@@ -85,7 +85,7 @@ On a data source page, assign a policy with **scope: role** and select `analyst`
 
 On any role page, the **Effective Members** tab shows all users who receive the role's policies — both direct members and those who inherit through child roles. Each entry shows the source (e.g., "direct" or "via role 'viewer'").
 
-![Effective members tab showing direct and inherited users](/screenshots/users-roles-effective-members-v0.15.png)
+![Effective members tab showing direct and inherited users](/screenshots/users-roles-effective-members-v0.17.png)
 
 ## Patterns and recipes
 
@@ -158,4 +158,4 @@ If a user is in two roles and one role's policy denies access while the other al
 - [Policies overview](/guides/policies/) — how to assign policies to users and roles
 - [Audit & Debugging → Admin audit log](/guides/audit-debugging#admin-audit-log) — admin audit tracks user/role mutations
 
-<!-- screenshots: [users-roles-create-user-v0.15.png, users-roles-create-role-v0.15.png, users-roles-role-inheritance-v0.15.png, users-roles-effective-members-v0.15.png] -->
+<!-- screenshots: [users-roles-create-user-v0.17.png, users-roles-create-role-v0.17.png, users-roles-role-inheritance-v0.17.png, users-roles-effective-members-v0.17.png] -->

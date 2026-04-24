@@ -24,7 +24,7 @@ docker run -d \
 
 Once the container is up, open `http://localhost:5435` and log in with your admin credentials:
 
-![BetweenRows admin login screen served from the Docker container on port 5435](/screenshots/docker-login-v0.14.png)
+![BetweenRows admin login screen served from the Docker container on port 5435](/screenshots/docker-login-v0.17.png)
 
 ## What the flags do
 

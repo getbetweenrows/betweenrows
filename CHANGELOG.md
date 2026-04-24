@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-04-23
+
 ### Added
 
 - **[Admin UI] Design standard and shared layout primitives** — new `admin-ui/DESIGN.md` defines four page templates (T1 sidebar detail, T2 single form, T3 list, T4 audit) plus the header / save / destructive / modal rules they share. Eight new primitives land under `src/components/` and `src/components/layout/`: `PageHeader`, `SecondaryNav` + `useSectionParam`, `SectionPane`, `DangerZone` + `DangerRow`, `ModalShell` (with focus trap, Esc, click-outside), `StatusDot` + `StatusChip`, `ConfirmDeleteModal`, and `ConfirmDialog`. Each ships with unit tests. `admin-ui/CLAUDE.md` gained a "Design standard" pointer so future sessions pick up the rules before building a new page.

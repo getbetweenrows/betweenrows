@@ -31,7 +31,7 @@ vi.mock('react-hot-toast', () => ({
   default: { success: vi.fn(), error: vi.fn() },
 }))
 
-import { deletePolicy, getPolicy, updatePolicy } from '../api/policies'
+import { deletePolicy, getPolicy, getPolicyAnchorCoverage, updatePolicy } from '../api/policies'
 import { listDataSources } from '../api/datasources'
 import { listUsers } from '../api/users'
 import { getCatalog } from '../api/catalog'
@@ -43,6 +43,7 @@ const mockDeletePolicy = deletePolicy as ReturnType<typeof vi.fn>
 const mockListDataSources = listDataSources as ReturnType<typeof vi.fn>
 const mockListUsers = listUsers as ReturnType<typeof vi.fn>
 const mockGetCatalog = getCatalog as ReturnType<typeof vi.fn>
+const mockGetPolicyAnchorCoverage = getPolicyAnchorCoverage as ReturnType<typeof vi.fn>
 const mockToastSuccess = toast.success as ReturnType<typeof vi.fn>
 
 beforeEach(() => {
@@ -50,6 +51,11 @@ beforeEach(() => {
   mockListDataSources.mockResolvedValue({ data: [], total: 0, page: 1, page_size: 200 })
   mockListUsers.mockResolvedValue({ data: [], total: 0, page: 1, page_size: 100 })
   mockGetCatalog.mockResolvedValue({ schemas: [] })
+  mockGetPolicyAnchorCoverage.mockResolvedValue({
+    policy_id: 'p-1',
+    policy_type: 'row_filter',
+    coverage: [],
+  })
 })
 
 function renderEditPage(path = '/policies/p-1/edit') {
@@ -137,6 +143,142 @@ describe('PolicyEditPage', () => {
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /^Anchor coverage$/ })).toBeInTheDocument(),
     )
+  })
+
+  it('shows no nav indicator when anchor coverage is clean', async () => {
+    const policy = makePolicy({ id: 'p-1', policy_type: 'row_filter' })
+    mockGetPolicy.mockResolvedValue(policy)
+    mockGetPolicyAnchorCoverage.mockResolvedValue({
+      policy_id: 'p-1',
+      policy_type: 'row_filter',
+      coverage: [
+        {
+          data_source_id: 'ds-1',
+          data_source_name: 'prod',
+          schema: 'public',
+          schema_upstream: 'public',
+          table: 'orders',
+          verdicts: [{ kind: 'on_table', column: 'tenant' }],
+        },
+      ],
+    })
+    renderEditPage()
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /^Anchor coverage$/ })).toBeInTheDocument(),
+    )
+    expect(screen.queryByTestId('section-indicator-coverage')).toBeNull()
+  })
+
+  it('shows a top banner when coverage is broken on a non-coverage section', async () => {
+    const policy = makePolicy({ id: 'p-1', policy_type: 'row_filter' })
+    mockGetPolicy.mockResolvedValue(policy)
+    mockGetPolicyAnchorCoverage.mockResolvedValue({
+      policy_id: 'p-1',
+      policy_type: 'row_filter',
+      coverage: [
+        {
+          data_source_id: 'ds-1',
+          data_source_name: 'prod',
+          schema: 'public',
+          schema_upstream: 'public',
+          table: 'invoices',
+          verdicts: [{ kind: 'missing_anchor', column: 'tenant' }],
+        },
+      ],
+    })
+    renderEditPage()
+    await waitFor(() =>
+      expect(screen.getByTestId('anchor-coverage-banner')).toBeInTheDocument(),
+    )
+    expect(document.body.textContent).toMatch(/silently deny on 1 table/i)
+  })
+
+  it('hides the banner once the user is on the Anchor coverage section', async () => {
+    const user = userEvent.setup()
+    const policy = makePolicy({ id: 'p-1', policy_type: 'row_filter' })
+    mockGetPolicy.mockResolvedValue(policy)
+    mockGetPolicyAnchorCoverage.mockResolvedValue({
+      policy_id: 'p-1',
+      policy_type: 'row_filter',
+      coverage: [
+        {
+          data_source_id: 'ds-1',
+          data_source_name: 'prod',
+          schema: 'public',
+          schema_upstream: 'public',
+          table: 'invoices',
+          verdicts: [{ kind: 'missing_anchor', column: 'tenant' }],
+        },
+      ],
+    })
+    renderEditPage()
+    await waitFor(() =>
+      expect(screen.getByTestId('anchor-coverage-banner')).toBeInTheDocument(),
+    )
+    await user.click(screen.getByRole('button', { name: /review/i }))
+    await waitFor(() =>
+      expect(screen.queryByTestId('anchor-coverage-banner')).toBeNull(),
+    )
+    // The indicator pill is part of the button's accessible name when broken,
+    // so match by leading label only.
+    expect(
+      screen.getByRole('button', { name: /^Anchor coverage/ }),
+    ).toHaveAttribute('aria-current', 'page')
+  })
+
+  it('does not show the banner when coverage is clean', async () => {
+    const policy = makePolicy({ id: 'p-1', policy_type: 'row_filter' })
+    mockGetPolicy.mockResolvedValue(policy)
+    mockGetPolicyAnchorCoverage.mockResolvedValue({
+      policy_id: 'p-1',
+      policy_type: 'row_filter',
+      coverage: [
+        {
+          data_source_id: 'ds-1',
+          data_source_name: 'prod',
+          schema: 'public',
+          schema_upstream: 'public',
+          table: 'orders',
+          verdicts: [{ kind: 'on_table', column: 'tenant' }],
+        },
+      ],
+    })
+    renderEditPage()
+    await waitFor(() => screen.getByDisplayValue(policy.name))
+    expect(screen.queryByTestId('anchor-coverage-banner')).toBeNull()
+  })
+
+  it('flags the Anchor coverage section with a red count pill when broken', async () => {
+    const policy = makePolicy({ id: 'p-1', policy_type: 'row_filter' })
+    mockGetPolicy.mockResolvedValue(policy)
+    mockGetPolicyAnchorCoverage.mockResolvedValue({
+      policy_id: 'p-1',
+      policy_type: 'row_filter',
+      coverage: [
+        {
+          data_source_id: 'ds-1',
+          data_source_name: 'prod',
+          schema: 'public',
+          schema_upstream: 'public',
+          table: 'invoices',
+          verdicts: [{ kind: 'missing_anchor', column: 'tenant' }],
+        },
+        {
+          data_source_id: 'ds-1',
+          data_source_name: 'prod',
+          schema: 'public',
+          schema_upstream: 'public',
+          table: 'payments',
+          verdicts: [{ kind: 'missing_anchor', column: 'tenant' }],
+        },
+      ],
+    })
+    renderEditPage()
+    await waitFor(() => {
+      const indicator = screen.getByTestId('section-indicator-coverage')
+      expect(indicator).toBeInTheDocument()
+      expect(indicator.textContent).toBe('2')
+    })
   })
 
   it('honors ?section=assignments on load', async () => {

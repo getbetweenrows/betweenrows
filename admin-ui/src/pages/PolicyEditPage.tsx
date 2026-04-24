@@ -1,8 +1,8 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
-import { deletePolicy, getPolicy, updatePolicy } from '../api/policies'
+import { deletePolicy, getPolicy, getPolicyAnchorCoverage, updatePolicy } from '../api/policies'
 import { PolicyForm } from '../components/PolicyForm'
 import type { PolicyFormValues } from '../components/PolicyForm'
 import { PolicyAssignmentEditPanel } from '../components/PolicyAssignmentPanel'
@@ -18,7 +18,13 @@ import { StatusDot, StatusChip } from '../components/Status'
 import { DangerZone, DangerRow } from '../components/DangerZone'
 import { ConfirmDeleteModal } from '../components/ConfirmDeleteModal'
 import { useSectionParam } from '../hooks/useSectionParam'
-import type { PolicyResponse } from '../types/policy'
+import type { PolicyAnchorCoverageResponse, PolicyResponse } from '../types/policy'
+
+const SECTION_WIDTH_CLASSES: Record<SectionWidth, string> = {
+  narrow: 'max-w-2xl',
+  wide: 'max-w-5xl',
+  full: 'max-w-none',
+}
 
 type SectionId = 'details' | 'assignments' | 'coverage' | 'code' | 'activity'
 
@@ -26,11 +32,40 @@ interface PolicySection extends SectionDef<SectionId> {
   width: SectionWidth
 }
 
-function sectionsFor(policy: PolicyResponse): readonly PolicySection[] {
+/// Count broken-anchor entries (those with at least one missing-anchor or
+/// alias-missing-target verdict) so the side-nav can flag the section.
+function countBrokenCoverageEntries(
+  data: PolicyAnchorCoverageResponse | undefined,
+): number {
+  if (!data) return 0
+  return data.coverage.filter((entry) =>
+    entry.verdicts.some(
+      (v) => v.kind === 'missing_anchor' || v.kind === 'missing_column_on_alias_target',
+    ),
+  ).length
+}
+
+function sectionsFor(
+  policy: PolicyResponse,
+  brokenCoverageCount: number,
+): readonly PolicySection[] {
   const all: PolicySection[] = [
     { id: 'details', label: 'Details', group: 'Configuration', width: 'narrow' },
     { id: 'assignments', label: 'Assignments', group: 'Access', width: 'wide' },
-    { id: 'coverage', label: 'Anchor coverage', group: 'Schema', width: 'wide' },
+    {
+      id: 'coverage',
+      label: 'Anchor coverage',
+      group: 'Schema',
+      width: 'wide',
+      indicator:
+        brokenCoverageCount > 0
+          ? {
+              tone: 'red',
+              label: String(brokenCoverageCount),
+              ariaLabel: `${brokenCoverageCount} table${brokenCoverageCount === 1 ? '' : 's'} will silently deny`,
+            }
+          : undefined,
+    },
     { id: 'code', label: 'View as code', group: 'Schema', width: 'wide' },
     { id: 'activity', label: 'Activity', group: 'History', width: 'wide' },
   ]
@@ -56,7 +91,18 @@ export function PolicyEditPage() {
   const hintDatasourceId = policy?.assignments?.[0]?.data_source_id ?? ''
   const catalogHints = useCatalogHints(hintDatasourceId)
 
-  const sections = policy ? sectionsFor(policy) : []
+  const isRowFilter = policy?.policy_type === 'row_filter'
+  const { data: anchorCoverage } = useQuery({
+    queryKey: ['policy-anchor-coverage', policyId, policy?.version ?? 0],
+    queryFn: () => getPolicyAnchorCoverage(policyId),
+    enabled: !!policy && isRowFilter,
+  })
+  const brokenCoverageCount = useMemo(
+    () => countBrokenCoverageEntries(anchorCoverage),
+    [anchorCoverage],
+  )
+
+  const sections = policy ? sectionsFor(policy, brokenCoverageCount) : []
   const validIds = sections.map((s) => s.id)
   const [activeSection, selectSection] = useSectionParam<SectionId>(
     validIds.length ? validIds : ['details'],
@@ -141,6 +187,37 @@ export function PolicyEditPage() {
         />
 
         <div className="flex-1 min-w-0">
+          {brokenCoverageCount > 0 && activeSection !== 'coverage' && (
+            <div
+              className={
+                SECTION_WIDTH_CLASSES[
+                  sections.find((s) => s.id === activeSection)?.width ?? 'wide'
+                ]
+              }
+            >
+              <div
+                data-testid="anchor-coverage-banner"
+                className="mb-4 flex items-center justify-between gap-3 bg-white border border-red-300 rounded-lg px-4 py-2.5"
+              >
+                <div className="text-sm text-red-800">
+                  <span className="font-semibold">
+                    This row filter will silently deny on {brokenCoverageCount}{' '}
+                    {brokenCoverageCount === 1 ? 'table' : 'tables'}.
+                  </span>{' '}
+                  <span className="text-red-700/80">
+                    Add a column anchor to fix it.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => selectSection('coverage')}
+                  className="shrink-0 text-xs font-medium px-3 py-1.5 rounded border border-red-300 text-red-700 bg-white hover:bg-red-50"
+                >
+                  Review
+                </button>
+              </div>
+            </div>
+          )}
           {sections.map((s) => (
             <SectionPane key={s.id} active={activeSection === s.id} width={s.width}>
               {s.id === 'details' && (
@@ -173,11 +250,7 @@ export function PolicyEditPage() {
               )}
 
               {s.id === 'coverage' && (
-                <PolicyAnchorCoveragePanel
-                  policyId={policyId}
-                  policyType={policy.policy_type}
-                  version={policy.version}
-                />
+                <PolicyAnchorCoveragePanel data={anchorCoverage} />
               )}
 
               {s.id === 'code' && (

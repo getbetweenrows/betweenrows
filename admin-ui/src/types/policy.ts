@@ -99,7 +99,10 @@ export type AnchorCoverageVerdict =
 export interface AnchorCoverageTableEntry {
   data_source_id: string
   data_source_name: string
+  /// Effective schema name (alias if set, else raw upstream).
   schema: string
+  /// Raw upstream schema name; equal to `schema` when no alias is set.
+  schema_upstream: string
   table: string
   verdicts: AnchorCoverageVerdict[]
 }

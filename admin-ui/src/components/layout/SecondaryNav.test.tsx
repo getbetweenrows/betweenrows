@@ -95,4 +95,43 @@ describe('SecondaryNav', () => {
     )
     expect(screen.getByRole('navigation', { name: 'My Sections' })).toBeInTheDocument()
   })
+
+  it('renders no indicator when none is provided', () => {
+    render(
+      <SecondaryNav
+        ariaLabel="Test sections"
+        sections={SECTIONS}
+        active="details"
+        onSelect={() => {}}
+      />,
+    )
+    for (const s of SECTIONS) {
+      expect(screen.queryByTestId(`section-indicator-${s.id}`)).toBeNull()
+    }
+  })
+
+  it('renders a red count pill when a section has an indicator', () => {
+    const sections: SectionDef[] = [
+      { id: 'details', label: 'Details' },
+      {
+        id: 'coverage',
+        label: 'Anchor coverage',
+        indicator: { tone: 'red', label: '3', ariaLabel: '3 broken anchor entries' },
+      },
+    ]
+    render(
+      <SecondaryNav
+        ariaLabel="Test sections"
+        sections={sections}
+        active="details"
+        onSelect={() => {}}
+      />,
+    )
+    const indicator = screen.getByTestId('section-indicator-coverage')
+    expect(indicator).toBeInTheDocument()
+    expect(indicator.textContent).toBe('3')
+    expect(indicator).toHaveAttribute('aria-label', '3 broken anchor entries')
+    // Red tone class is applied.
+    expect(indicator.className).toMatch(/bg-red-100/)
+  })
 })

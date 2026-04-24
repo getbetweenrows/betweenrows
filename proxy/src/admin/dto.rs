@@ -1076,7 +1076,13 @@ pub enum AnchorCoverageVerdict {
 pub struct AnchorCoverageTableEntry {
     pub data_source_id: Uuid,
     pub data_source_name: String,
+    /// Effective schema name (alias if set, else raw upstream name) — what
+    /// the user typed in the policy target and what the proxy keys columns
+    /// by at query time.
     pub schema: String,
+    /// Raw upstream schema name. Carried so the admin UI can show
+    /// `alias (upstream)` when the two differ; equal to `schema` otherwise.
+    pub schema_upstream: String,
     pub table: String,
     pub verdicts: Vec<AnchorCoverageVerdict>,
 }

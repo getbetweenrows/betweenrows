@@ -1,7 +1,20 @@
+export type SectionIndicatorTone = 'red' | 'yellow'
+
+export interface SectionIndicator {
+  tone: SectionIndicatorTone
+  /// Pill text. Use a small string (typically a number) — long labels will
+  /// crowd the nav row.
+  label: string
+  /// Optional accessible description (e.g. "3 broken anchor coverage entries").
+  /// Falls back to the visual label for screen readers.
+  ariaLabel?: string
+}
+
 export interface SectionDef<Id extends string = string> {
   id: Id
   label: string
   group?: string
+  indicator?: SectionIndicator
 }
 
 interface SecondaryNavProps<Id extends string> {
@@ -10,6 +23,11 @@ interface SecondaryNavProps<Id extends string> {
   active: Id
   onSelect: (id: Id) => void
   testId?: string
+}
+
+const INDICATOR_TONE_CLASSES: Record<SectionIndicatorTone, string> = {
+  red: 'bg-red-100 text-red-700',
+  yellow: 'bg-yellow-100 text-yellow-800',
 }
 
 function groupSections<Id extends string>(
@@ -59,13 +77,22 @@ export function SecondaryNav<Id extends string>({
                   type="button"
                   onClick={() => onSelect(s.id)}
                   aria-current={isActive ? 'page' : undefined}
-                  className={`w-full text-left px-3 py-1.5 rounded-md text-sm transition-colors ${
+                  className={`w-full text-left px-3 py-1.5 rounded-md text-sm transition-colors flex items-center justify-between gap-2 ${
                     isActive
                       ? 'bg-blue-50 text-blue-700 font-medium'
                       : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
                   }`}
                 >
-                  {s.label}
+                  <span>{s.label}</span>
+                  {s.indicator && (
+                    <span
+                      data-testid={`section-indicator-${s.id}`}
+                      aria-label={s.indicator.ariaLabel ?? s.indicator.label}
+                      className={`inline-flex items-center rounded-full px-1.5 text-[10px] font-semibold leading-4 ${INDICATOR_TONE_CLASSES[s.indicator.tone]}`}
+                    >
+                      {s.indicator.label}
+                    </span>
+                  )}
                 </button>
               )
             })}

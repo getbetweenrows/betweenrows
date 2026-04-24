@@ -1,32 +1,27 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
-import { screen, waitFor } from '@testing-library/react'
+import { describe, it, expect } from 'vitest'
+import { screen } from '@testing-library/react'
 import { PolicyAnchorCoveragePanel } from './PolicyAnchorCoveragePanel'
 import { renderWithProviders } from '../test/test-utils'
-import * as policiesApi from '../api/policies'
 import type { PolicyAnchorCoverageResponse } from '../types/policy'
 
-afterEach(() => {
-  vi.restoreAllMocks()
-})
-
-function mockCoverage(coverage: PolicyAnchorCoverageResponse) {
-  vi.spyOn(policiesApi, 'getPolicyAnchorCoverage').mockResolvedValue(coverage)
-}
-
 describe('PolicyAnchorCoveragePanel', () => {
-  it('renders nothing for non-row-filter policies', () => {
-    const { container } = renderWithProviders(
-      <PolicyAnchorCoveragePanel
-        policyId="p-1"
-        policyType="column_mask"
-        version={1}
-      />,
-    )
+  it('shows a loading shim when data is undefined', () => {
+    renderWithProviders(<PolicyAnchorCoveragePanel data={undefined} />)
+    expect(document.body.textContent).toMatch(/checking anchor coverage/i)
+  })
+
+  it('renders nothing when there are zero assigned tables', () => {
+    const data: PolicyAnchorCoverageResponse = {
+      policy_id: 'p-1',
+      policy_type: 'row_filter',
+      coverage: [],
+    }
+    const { container } = renderWithProviders(<PolicyAnchorCoveragePanel data={data} />)
     expect(container.firstChild).toBeNull()
   })
 
-  it('shows green banner when all verdicts pass', async () => {
-    mockCoverage({
+  it('shows green banner when all verdicts pass', () => {
+    const data: PolicyAnchorCoverageResponse = {
       policy_id: 'p-1',
       policy_type: 'row_filter',
       coverage: [
@@ -34,6 +29,7 @@ describe('PolicyAnchorCoveragePanel', () => {
           data_source_id: 'ds-1',
           data_source_name: 'prod',
           schema: 'public',
+          schema_upstream: 'public',
           table: 'orders',
           verdicts: [{ kind: 'on_table', column: 'tenant' }],
         },
@@ -41,6 +37,7 @@ describe('PolicyAnchorCoveragePanel', () => {
           data_source_id: 'ds-1',
           data_source_name: 'prod',
           schema: 'public',
+          schema_upstream: 'public',
           table: 'payments',
           verdicts: [
             {
@@ -55,20 +52,16 @@ describe('PolicyAnchorCoveragePanel', () => {
           ],
         },
       ],
-    })
+    }
 
-    renderWithProviders(
-      <PolicyAnchorCoveragePanel policyId="p-1" policyType="row_filter" version={1} />,
-    )
+    renderWithProviders(<PolicyAnchorCoveragePanel data={data} />)
 
-    await waitFor(() =>
-      expect(screen.getByTestId('anchor-coverage-clean')).toBeInTheDocument(),
-    )
+    expect(screen.getByTestId('anchor-coverage-clean')).toBeInTheDocument()
     expect(document.body.textContent).toMatch(/2 tables resolve cleanly/i)
   })
 
-  it('shows red panel listing broken pairs with datasource link', async () => {
-    mockCoverage({
+  it('shows red panel listing broken pairs with datasource link', () => {
+    const data: PolicyAnchorCoverageResponse = {
       policy_id: 'p-1',
       policy_type: 'row_filter',
       coverage: [
@@ -76,6 +69,7 @@ describe('PolicyAnchorCoveragePanel', () => {
           data_source_id: 'ds-42',
           data_source_name: 'prod',
           schema: 'public',
+          schema_upstream: 'public',
           table: 'invoices',
           verdicts: [{ kind: 'missing_anchor', column: 'tenant' }],
         },
@@ -83,20 +77,18 @@ describe('PolicyAnchorCoveragePanel', () => {
           data_source_id: 'ds-42',
           data_source_name: 'prod',
           schema: 'public',
+          schema_upstream: 'public',
           table: 'orders',
           verdicts: [{ kind: 'on_table', column: 'tenant' }],
         },
       ],
-    })
+    }
 
-    renderWithProviders(
-      <PolicyAnchorCoveragePanel policyId="p-1" policyType="row_filter" version={3} />,
-    )
+    renderWithProviders(<PolicyAnchorCoveragePanel data={data} />)
 
-    await waitFor(() =>
-      expect(screen.getByTestId('anchor-coverage-broken')).toBeInTheDocument(),
-    )
-    expect(document.body.textContent).toMatch(/silently deny on 1 of 2 tables/i)
+    expect(screen.getByTestId('anchor-coverage-broken')).toBeInTheDocument()
+    expect(document.body.textContent).toMatch(/silently deny on 1 table/i)
+    expect(document.body.textContent).not.toMatch(/of 2/)
     expect(document.body.textContent).toMatch(/invoices/)
     expect(document.body.textContent).toMatch(/no anchor configured/i)
 
@@ -105,5 +97,59 @@ describe('PolicyAnchorCoveragePanel', () => {
       'href',
       `/datasources/ds-42/edit?section=anchors&focus=${encodeURIComponent('public.invoices.tenant')}`,
     )
+  })
+
+  it('shows the upstream schema in muted parens when an alias is set', () => {
+    const data: PolicyAnchorCoverageResponse = {
+      policy_id: 'p-1',
+      policy_type: 'row_filter',
+      coverage: [
+        {
+          data_source_id: 'ds-99',
+          data_source_name: 'staging',
+          schema: 'pg',
+          schema_upstream: 'postgres',
+          table: 'payments',
+          verdicts: [{ kind: 'missing_anchor', column: 'tenant_id' }],
+        },
+      ],
+    }
+
+    renderWithProviders(<PolicyAnchorCoveragePanel data={data} />)
+
+    expect(document.body.textContent).toMatch(/pg\.payments/)
+    expect(document.body.textContent).toMatch(/\(postgres\.payments\)/)
+
+    const link = screen.getByRole('link', { name: /add anchor/i })
+    expect(link).toHaveAttribute(
+      'href',
+      `/datasources/ds-99/edit?section=anchors&focus=${encodeURIComponent('pg.payments.tenant_id')}`,
+    )
+  })
+
+  it('reports alias-target verdicts as their dedicated message', () => {
+    const data: PolicyAnchorCoverageResponse = {
+      policy_id: 'p-1',
+      policy_type: 'row_filter',
+      coverage: [
+        {
+          data_source_id: 'ds-1',
+          data_source_name: 'prod',
+          schema: 'public',
+          schema_upstream: 'public',
+          table: 'orders',
+          verdicts: [
+            {
+              kind: 'missing_column_on_alias_target',
+              column: 'tenant_id',
+              actual_column_name: 'org_id',
+            },
+          ],
+        },
+      ],
+    }
+    renderWithProviders(<PolicyAnchorCoveragePanel data={data} />)
+    expect(document.body.textContent).toMatch(/alias points at missing column/i)
+    expect(document.body.textContent).toMatch(/org_id/)
   })
 })

@@ -10273,6 +10273,7 @@ async fn anchor_coverage_endpoint_walk_anchor() {
     let entry = &coverage[0];
     assert_eq!(entry["data_source_id"].as_str().unwrap(), ds_id.to_string());
     assert_eq!(entry["schema"], schema);
+    assert_eq!(entry["schema_upstream"], schema);
     assert_eq!(entry["table"], "payments");
     let verdicts = entry["verdicts"].as_array().unwrap();
     assert_eq!(verdicts.len(), 1, "one referenced column");
@@ -10326,6 +10327,88 @@ async fn anchor_coverage_endpoint_silent_deny() {
     let verdicts = coverage[0]["verdicts"].as_array().unwrap();
     assert_eq!(verdicts.len(), 1);
     assert_eq!(verdicts[0]["column"], "tenant");
+    assert_eq!(verdicts[0]["kind"], "missing_anchor");
+    // No alias was set, so schema_upstream mirrors schema. The field must be
+    // present on every entry so the admin UI can render the muted upstream
+    // parens uniformly.
+    assert_eq!(coverage[0]["schema_upstream"], coverage[0]["schema"]);
+}
+
+#[tokio::test]
+async fn anchor_coverage_endpoint_returns_upstream_for_aliased_schema() {
+    // When the discovered schema has an alias, the response carries the alias
+    // as `schema` (matching what the proxy keys columns by at query time and
+    // what the admin UI deep-link uses) AND the raw upstream name as
+    // `schema_upstream` (so the warning panel can render `pg.payments
+    // (postgres.payments)` with both names visible).
+    let _pg = require_postgres!();
+    let server = support::ProxyTestServer::start().await;
+    let schema = "ac_alias";
+    let alias = "pg_alias";
+
+    server
+        .seed_upstream(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema};
+             DROP TABLE IF EXISTS {schema}.payments;
+             CREATE TABLE {schema}.payments (id INT PRIMARY KEY, order_id INT);"
+        ))
+        .await;
+
+    let ds_id = server.create_datasource("ds_ac_alias", "open").await;
+    server.discover(ds_id, &[schema]).await;
+
+    // Re-save the catalog with an explicit alias on the discovered schema.
+    let resave = server
+        .admin
+        .post(&format!("/api/v1/datasources/{ds_id}/discover"))
+        .authorization_bearer(&server.admin_token)
+        .json(&json!({
+            "action": "save_catalog",
+            "schemas": [{
+                "schema_name": schema,
+                "schema_alias": alias,
+                "is_selected": true,
+                "tables": [{
+                    "table_name": "payments",
+                    "table_type": "BASE TABLE",
+                    "is_selected": true,
+                }],
+            }],
+        }))
+        .await;
+    resave.assert_status(axum::http::StatusCode::ACCEPTED);
+    // Wait for the save_catalog job to settle.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Reference a column that's missing from the table — the response should
+    // surface missing_anchor with the alias as `schema` and the raw name as
+    // `schema_upstream`. The policy target uses the upstream name (the
+    // matcher resolves df aliases to upstream before matching).
+    let policy_id = server
+        .create_row_filter(
+            "ac-alias-policy",
+            schema,
+            "payments",
+            "tenant = {user.tenant}",
+            ds_id,
+            None,
+        )
+        .await;
+
+    let body = get_policy_anchor_coverage(&server, policy_id).await;
+    let coverage = body["coverage"].as_array().unwrap();
+    assert_eq!(coverage.len(), 1, "one matched table");
+    let entry = &coverage[0];
+    assert_eq!(
+        entry["schema"], alias,
+        "effective name (alias) is what the UI displays + deep-links by"
+    );
+    assert_eq!(
+        entry["schema_upstream"], schema,
+        "raw upstream name carried for the muted parens display"
+    );
+    assert_eq!(entry["table"], "payments");
+    let verdicts = entry["verdicts"].as_array().unwrap();
     assert_eq!(verdicts[0]["kind"], "missing_anchor");
 }
 

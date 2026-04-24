@@ -610,10 +610,15 @@ pub async fn get_policy_anchor_coverage(
                 verdicts.push(v);
             }
 
+            let schema_upstream = df_to_upstream
+                .get(df_schema)
+                .cloned()
+                .unwrap_or_else(|| df_schema.clone());
             coverage.push(AnchorCoverageTableEntry {
                 data_source_id: ds_id,
                 data_source_name: ds_name.clone(),
                 schema: df_schema.clone(),
+                schema_upstream,
                 table: table.clone(),
                 verdicts,
             });

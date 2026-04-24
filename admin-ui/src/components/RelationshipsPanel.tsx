@@ -20,25 +20,64 @@ import type {
   TableRelationship,
 } from '../types/catalog'
 import { ConfirmDialog } from './ConfirmDialog'
+import { effectiveSchemaName } from '../utils/schemaLabel'
 
-/// Format a flat "schema.table" label derived from the catalog.
-function tableLabel(schemaName: string, tableName: string): string {
-  return `${schemaName}.${tableName}`
+/// Format a flat "schema.table" label. `schema` is expected to already be the
+/// effective name (alias if set, else raw upstream).
+function tableLabel(schema: string, tableName: string): string {
+  return `${schema}.${tableName}`
 }
 
-/// Flatten all selected (schema, table, table_id) tuples from the catalog, sorted by label.
-function flattenTables(catalog?: CatalogResponse) {
+interface FlatTable {
+  id: string
+  schema: string
+  schema_upstream: string
+  table: string
+  columns: CatalogTableResponse['columns']
+}
+
+/// Flatten all selected (schema, table, table_id) tuples from the catalog, sorted
+/// by effective label. `schema` is the user-facing name (alias if set);
+/// `schema_upstream` is the raw upstream name carried for parenthetical display.
+function flattenTables(catalog?: CatalogResponse): FlatTable[] {
   if (!catalog) return []
-  const out: Array<{ id: string; schema: string; table: string; columns: CatalogTableResponse['columns'] }> = []
+  const out: FlatTable[] = []
   for (const s of catalog.schemas) {
+    const schema = effectiveSchemaName(s.schema_name, s.schema_alias)
     for (const t of s.tables) {
-      out.push({ id: t.id, schema: s.schema_name, table: t.table_name, columns: t.columns })
+      out.push({
+        id: t.id,
+        schema,
+        schema_upstream: s.schema_name,
+        table: t.table_name,
+        columns: t.columns,
+      })
     }
   }
-  return out.sort((a, b) => tableLabel(a.schema, a.table).localeCompare(tableLabel(b.schema, b.table)))
+  return out.sort((a, b) =>
+    tableLabel(a.schema, a.table).localeCompare(tableLabel(b.schema, b.table)),
+  )
 }
 
-type CatalogTables = ReturnType<typeof flattenTables>
+type CatalogTables = FlatTable[]
+
+/// Build a raw-schema-name → alias lookup so we can resolve effective names
+/// for relationship/FK-suggestion rows, which carry only the upstream name.
+function buildAliasMap(catalog?: CatalogResponse): Map<string, string | null> {
+  const map = new Map<string, string | null>()
+  if (!catalog) return map
+  for (const s of catalog.schemas) {
+    map.set(s.schema_name, s.schema_alias)
+  }
+  return map
+}
+
+function resolveEffective(
+  rawSchemaName: string,
+  aliasMap: Map<string, string | null>,
+): string {
+  return effectiveSchemaName(rawSchemaName, aliasMap.get(rawSchemaName) ?? null)
+}
 
 function errorMessage(err: unknown, fallback: string): string {
   return (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? fallback
@@ -65,6 +104,7 @@ export function RelationshipsSection({ datasourceId }: { datasourceId: string })
   })
 
   const catalogTables = useMemo(() => flattenTables(catalog), [catalog])
+  const aliasMap = useMemo(() => buildAliasMap(catalog), [catalog])
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['relationships', datasourceId] })
@@ -121,7 +161,11 @@ export function RelationshipsSection({ datasourceId }: { datasourceId: string })
       )}
 
       {showSuggestions && (
-        <FkSuggestionsList datasourceId={datasourceId} onMutated={invalidate} />
+        <FkSuggestionsList
+          datasourceId={datasourceId}
+          aliasMap={aliasMap}
+          onMutated={invalidate}
+        />
       )}
 
       {isLoading ? (
@@ -142,10 +186,10 @@ export function RelationshipsSection({ datasourceId }: { datasourceId: string })
                 <tr key={r.id} className="border-t border-gray-100 align-top">
                   <td className="px-3 py-1.5 text-gray-800 font-mono text-xs">
                     <div>
-                      {tableLabel(r.child_schema_name, r.child_table_name)}.{r.child_column_name}
+                      {tableLabel(resolveEffective(r.child_schema_name, aliasMap), r.child_table_name)}.{r.child_column_name}
                     </div>
                     <div className="text-gray-400">
-                      → {tableLabel(r.parent_schema_name, r.parent_table_name)}.{r.parent_column_name}
+                      → {tableLabel(resolveEffective(r.parent_schema_name, aliasMap), r.parent_table_name)}.{r.parent_column_name}
                     </div>
                   </td>
                   <td className="px-3 py-1.5 text-right whitespace-nowrap">
@@ -172,12 +216,12 @@ export function RelationshipsSection({ datasourceId }: { datasourceId: string })
             <>
               Removes the join path{' '}
               <code className="font-mono text-xs">
-                {tableLabel(relToDelete.child_schema_name, relToDelete.child_table_name)}.
+                {tableLabel(resolveEffective(relToDelete.child_schema_name, aliasMap), relToDelete.child_table_name)}.
                 {relToDelete.child_column_name}
               </code>
               {' → '}
               <code className="font-mono text-xs">
-                {tableLabel(relToDelete.parent_schema_name, relToDelete.parent_table_name)}.
+                {tableLabel(resolveEffective(relToDelete.parent_schema_name, aliasMap), relToDelete.parent_table_name)}.
                 {relToDelete.parent_column_name}
               </code>
               .
@@ -248,6 +292,7 @@ export function ColumnAnchorsSection({ datasourceId }: { datasourceId: string })
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['relationships', datasourceId] })
     queryClient.invalidateQueries({ queryKey: ['column-anchors', datasourceId] })
+    queryClient.invalidateQueries({ queryKey: ['fk-suggestions', datasourceId] })
   }
 
   const clearFocusParam = () => {
@@ -309,6 +354,8 @@ export function ColumnAnchorsSection({ datasourceId }: { datasourceId: string })
     onError: (err) => toast.error(errorMessage(err, 'Failed to delete anchor')),
   })
 
+  const aliasMap = useMemo(() => buildAliasMap(catalog), [catalog])
+
   const relationshipsByChild = useMemo(() => {
     const map = new Map<string, TableRelationship[]>()
     for (const r of relationships) {
@@ -346,12 +393,14 @@ export function ColumnAnchorsSection({ datasourceId }: { datasourceId: string })
           datasourceId={datasourceId}
           relationshipsByChild={relationshipsByChild}
           catalogTables={catalogTables}
+          aliasMap={aliasMap}
           prefill={prefill}
           onDone={() => {
             setShowForm(false)
             setPrefill(null)
             invalidate()
           }}
+          invalidate={invalidate}
         />
       )}
 
@@ -363,7 +412,7 @@ export function ColumnAnchorsSection({ datasourceId }: { datasourceId: string })
             <thead className="bg-gray-50 text-xs text-gray-500">
               <tr>
                 <th className="text-left px-3 py-1.5 font-medium">Anchor</th>
-                <th className="text-left px-3 py-1.5 font-medium">Via relationship</th>
+                <th className="text-left px-3 py-1.5 font-medium">Resolves via</th>
                 <th className="text-right px-3 py-1.5 font-medium"></th>
               </tr>
             </thead>
@@ -373,6 +422,8 @@ export function ColumnAnchorsSection({ datasourceId }: { datasourceId: string })
                   key={a.id}
                   anchor={a}
                   relationships={relationships}
+                  catalogTables={catalogTables}
+                  aliasMap={aliasMap}
                   highlighted={highlightedId === a.id}
                   onDelete={() => setAnchorToDelete(a)}
                   deleting={deleteAnchorMutation.isPending}
@@ -404,6 +455,8 @@ export function ColumnAnchorsSection({ datasourceId }: { datasourceId: string })
 function AnchorRow({
   anchor,
   relationships,
+  catalogTables,
+  aliasMap,
   highlighted,
   onDelete,
   deleting,
@@ -411,6 +464,8 @@ function AnchorRow({
 }: {
   anchor: ColumnAnchor
   relationships: TableRelationship[]
+  catalogTables: CatalogTables
+  aliasMap: Map<string, string | null>
   highlighted: boolean
   onDelete: () => void
   deleting: boolean
@@ -419,6 +474,9 @@ function AnchorRow({
   const rel = anchor.relationship_id
     ? relationships.find((r) => r.id === anchor.relationship_id)
     : undefined
+  const childTable = catalogTables.find((t) => t.id === anchor.child_table_id)
+  const childSchema = childTable?.schema ?? anchor.child_table_name
+  const childTableName = childTable?.table ?? anchor.child_table_name
   const highlightClass = highlighted
     ? 'ring-2 ring-amber-400 ring-offset-1 transition-shadow'
     : 'transition-shadow'
@@ -429,7 +487,7 @@ function AnchorRow({
       className={`border-t border-gray-100 align-top ${highlightClass}`}
     >
       <td className="px-3 py-1.5 text-gray-800 font-mono text-xs">
-        <div>{anchor.child_table_name}</div>
+        <div>{tableLabel(childSchema, childTableName)}</div>
         <div className="text-gray-500">.{anchor.resolved_column_name}</div>
       </td>
       <td className="px-3 py-1.5 text-gray-800 font-mono text-xs">
@@ -442,9 +500,13 @@ function AnchorRow({
           </>
         ) : rel ? (
           <>
-            <div>{rel.child_column_name}</div>
+            <div>
+              {tableLabel(resolveEffective(rel.child_schema_name, aliasMap), rel.child_table_name)}.
+              {rel.child_column_name}
+            </div>
             <div className="text-gray-400">
-              → {tableLabel(rel.parent_schema_name, rel.parent_table_name)}.{rel.parent_column_name}
+              → {tableLabel(resolveEffective(rel.parent_schema_name, aliasMap), rel.parent_table_name)}.
+              {rel.parent_column_name}
             </div>
           </>
         ) : (
@@ -521,6 +583,9 @@ function ManualRelationshipForm({
             {catalogTables.map((t) => (
               <option key={t.id} value={t.id}>
                 {tableLabel(t.schema, t.table)}
+                {t.schema !== t.schema_upstream
+                  ? `  (${t.schema_upstream}.${t.table})`
+                  : ''}
               </option>
             ))}
           </select>
@@ -555,6 +620,9 @@ function ManualRelationshipForm({
             {catalogTables.map((t) => (
               <option key={t.id} value={t.id}>
                 {tableLabel(t.schema, t.table)}
+                {t.schema !== t.schema_upstream
+                  ? `  (${t.schema_upstream}.${t.table})`
+                  : ''}
               </option>
             ))}
           </select>
@@ -594,10 +662,21 @@ function ManualRelationshipForm({
 
 function FkSuggestionsList({
   datasourceId,
+  aliasMap,
   onMutated,
+  childTableIdFilter,
+  emptyMessage,
+  onAdded,
 }: {
   datasourceId: string
+  aliasMap: Map<string, string | null>
   onMutated: () => void
+  /// When set, only show suggestions whose `child_table_id` matches.
+  childTableIdFilter?: string
+  /// Override the empty-state message (used by the in-anchor empty-state block).
+  emptyMessage?: string
+  /// Optional callback fired with the newly created relationship after Add.
+  onAdded?: (rel: TableRelationship) => void
 }) {
   const { data: suggestions, isLoading } = useQuery({
     queryKey: ['fk-suggestions', datasourceId],
@@ -612,9 +691,10 @@ function FkSuggestionsList({
         parent_table_id: s.parent_table_id,
         parent_column_name: s.parent_column_name,
       }),
-    onSuccess: () => {
+    onSuccess: (rel) => {
       toast.success('Relationship added')
       onMutated()
+      onAdded?.(rel)
     },
     onError: (err) => toast.error(errorMessage(err, 'Failed to add relationship from suggestion')),
   })
@@ -624,11 +704,15 @@ function FkSuggestionsList({
   }
 
   const list = suggestions ?? []
-  const pending = list.filter((s) => !s.already_added)
+  const pending = list
+    .filter((s) => !s.already_added)
+    .filter((s) => !childTableIdFilter || s.child_table_id === childTableIdFilter)
+
   if (pending.length === 0) {
     return (
       <div className="text-xs text-gray-400 mb-3 italic">
-        No new FK suggestions — all discovered foreign keys are already in your relationships list.
+        {emptyMessage ??
+          'No new FK suggestions — all discovered foreign keys are already in your relationships list.'}
       </div>
     )
   }
@@ -650,10 +734,12 @@ function FkSuggestionsList({
             >
               <td className="px-3 py-1.5 text-gray-800 font-mono text-xs">
                 <div>
-                  {tableLabel(s.child_schema_name, s.child_table_name)}.{s.child_column_name}
+                  {tableLabel(resolveEffective(s.child_schema_name, aliasMap), s.child_table_name)}.
+                  {s.child_column_name}
                 </div>
                 <div className="text-gray-400">
-                  → {tableLabel(s.parent_schema_name, s.parent_table_name)}.{s.parent_column_name}
+                  → {tableLabel(resolveEffective(s.parent_schema_name, aliasMap), s.parent_table_name)}.
+                  {s.parent_column_name}
                 </div>
                 <div className="text-[10px] text-gray-400 mt-0.5">{s.fk_constraint_name}</div>
               </td>
@@ -677,29 +763,82 @@ function FkSuggestionsList({
 
 type AnchorMode = 'relationship' | 'alias'
 
+/// Determine whether a relationship's parent table contains a column matching
+/// the resolved column name — i.e., whether walking that FK would actually
+/// resolve the policy reference. Used to surface the most useful candidate.
+function relationshipIsViable(
+  rel: TableRelationship,
+  resolvedColumn: string,
+  catalogTables: CatalogTables,
+): boolean {
+  if (!resolvedColumn.trim()) return false
+  const parent = catalogTables.find(
+    (t) =>
+      t.schema_upstream === rel.parent_schema_name && t.table === rel.parent_table_name,
+  )
+  if (!parent) return false
+  return parent.columns.some((c) => c.column_name === resolvedColumn)
+}
+
 function ColumnAnchorForm({
   datasourceId,
   relationshipsByChild,
   catalogTables,
+  aliasMap,
   prefill,
   onDone,
+  invalidate,
 }: {
   datasourceId: string
   relationshipsByChild: Map<string, TableRelationship[]>
   catalogTables: CatalogTables
+  aliasMap: Map<string, string | null>
   prefill: { childTableId: string; resolvedColumn: string } | null
   onDone: () => void
+  invalidate: () => void
 }) {
   const [mode, setMode] = useState<AnchorMode>('relationship')
   const [childTableId, setChildTableId] = useState(prefill?.childTableId ?? '')
   const [resolvedColumn, setResolvedColumn] = useState(prefill?.resolvedColumn ?? '')
   const [relationshipId, setRelationshipId] = useState('')
   const [actualColumn, setActualColumn] = useState('')
+  const [showFkSuggestions, setShowFkSuggestions] = useState(false)
 
   const candidateRelationships = childTableId
     ? (relationshipsByChild.get(childTableId) ?? [])
     : []
   const childTable = catalogTables.find((t) => t.id === childTableId)
+
+  // Sort: viable candidates (parent has the resolved column) first, then the rest.
+  const sortedCandidates = useMemo(() => {
+    const annotated = candidateRelationships.map((r) => ({
+      rel: r,
+      viable: relationshipIsViable(r, resolvedColumn, catalogTables),
+    }))
+    annotated.sort((a, b) => {
+      if (a.viable !== b.viable) return a.viable ? -1 : 1
+      return a.rel.parent_table_name.localeCompare(b.rel.parent_table_name)
+    })
+    return annotated
+  }, [candidateRelationships, resolvedColumn, catalogTables])
+  const viableCount = sortedCandidates.filter((c) => c.viable).length
+
+  // Auto-select when there is exactly one viable candidate — the obvious choice.
+  // Fires once per (childTableId, resolvedColumn) pair so a deliberate clear
+  // by the user is honored rather than silently re-populated.
+  const autoSelectedFor = useRef<string | null>(null)
+  useEffect(() => {
+    if (mode !== 'relationship') return
+    const key = `${childTableId}::${resolvedColumn}`
+    if (autoSelectedFor.current === key) return
+    if (relationshipId) return
+    if (viableCount !== 1) return
+    const only = sortedCandidates.find((c) => c.viable)
+    if (only) {
+      setRelationshipId(only.rel.id)
+      autoSelectedFor.current = key
+    }
+  }, [mode, relationshipId, viableCount, sortedCandidates, childTableId, resolvedColumn])
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -732,6 +871,12 @@ function ColumnAnchorForm({
     !!childTableId &&
     !!resolvedColumn &&
     (mode === 'relationship' ? !!relationshipId : !!actualColumn.trim())
+
+  const childSchemaLabel = childTable
+    ? tableLabel(childTable.schema, childTable.table)
+    : ''
+  const showEmptyStateGuidance =
+    mode === 'relationship' && !!childTableId && candidateRelationships.length === 0
 
   return (
     <div className="mb-3 border border-gray-200 rounded-lg p-3 bg-gray-50">
@@ -768,6 +913,7 @@ function ColumnAnchorForm({
               setChildTableId(e.target.value)
               setRelationshipId('')
               setActualColumn('')
+              setShowFkSuggestions(false)
             }}
             className="w-full border border-gray-300 rounded px-2 py-1"
           >
@@ -775,6 +921,9 @@ function ColumnAnchorForm({
             {catalogTables.map((t) => (
               <option key={t.id} value={t.id}>
                 {tableLabel(t.schema, t.table)}
+                {t.schema !== t.schema_upstream
+                  ? `  (${t.schema_upstream}.${t.table})`
+                  : ''}
               </option>
             ))}
           </select>
@@ -795,21 +944,27 @@ function ColumnAnchorForm({
             <select
               value={relationshipId}
               onChange={(e) => setRelationshipId(e.target.value)}
-              disabled={!childTableId}
-              className="w-full border border-gray-300 rounded px-2 py-1"
+              disabled={!childTableId || candidateRelationships.length === 0}
+              className="w-full border border-gray-300 rounded px-2 py-1 disabled:bg-gray-100"
             >
               <option value="">Select…</option>
-              {candidateRelationships.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.child_column_name} → {tableLabel(r.parent_schema_name, r.parent_table_name)}.
-                  {r.parent_column_name}
-                </option>
-              ))}
+              {sortedCandidates.map(({ rel, viable }) => {
+                const childEff = resolveEffective(rel.child_schema_name, aliasMap)
+                const parentEff = resolveEffective(rel.parent_schema_name, aliasMap)
+                const arrow = `${tableLabel(childEff, rel.child_table_name)}.${rel.child_column_name} → ${tableLabel(parentEff, rel.parent_table_name)}.${rel.parent_column_name}`
+                return (
+                  <option key={rel.id} value={rel.id}>
+                    {viable ? '✓ ' : ''}
+                    {arrow}
+                  </option>
+                )
+              })}
             </select>
-            {childTableId && candidateRelationships.length === 0 && (
-              <div className="mt-1 text-xs text-amber-600">
-                No relationships from this child table yet. Add one in the Relationships section
-                first.
+            {!showEmptyStateGuidance && candidateRelationships.length > 0 && viableCount === 0 && resolvedColumn && (
+              <div className="mt-1 text-[11px] text-amber-700">
+                None of these parent tables contain a column named{' '}
+                <code className="font-mono">{resolvedColumn}</code>. Pick the path you intend, or
+                switch to <em>Same-table alias</em>.
               </div>
             )}
           </div>
@@ -841,6 +996,64 @@ function ColumnAnchorForm({
           </div>
         )}
       </div>
+
+      {showEmptyStateGuidance && (
+        <div
+          data-testid="anchor-empty-state-guidance"
+          className="mt-3 border border-amber-200 bg-amber-50 rounded-lg p-3 text-xs"
+        >
+          <div className="text-amber-900 font-medium mb-1">
+            No relationships from <code className="font-mono">{childSchemaLabel}</code> yet.
+          </div>
+          <p className="text-amber-800 mb-2">
+            An anchor needs an FK walk to a parent table that has{' '}
+            <code className="font-mono">{resolvedColumn || 'this column'}</code>, or a same-table
+            column alias if it exists under another name on this table.
+          </p>
+          <div className="flex flex-wrap gap-2 mb-2">
+            <button
+              type="button"
+              onClick={() => setMode('alias')}
+              className="text-xs px-2 py-1 rounded bg-white border border-amber-300 text-amber-900 hover:bg-amber-100"
+            >
+              Switch to Same-table alias
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowFkSuggestions((v) => !v)}
+              className="text-xs px-2 py-1 rounded bg-white border border-amber-300 text-amber-900 hover:bg-amber-100"
+            >
+              {showFkSuggestions ? 'Hide FK suggestions' : 'Add a relationship ↓'}
+            </button>
+          </div>
+          {showFkSuggestions && (
+            <div className="mt-2">
+              <FkSuggestionsList
+                datasourceId={datasourceId}
+                aliasMap={aliasMap}
+                childTableIdFilter={childTableId}
+                emptyMessage="No FK suggestions for this table — add one manually below."
+                onMutated={invalidate}
+                onAdded={(rel) => {
+                  setRelationshipId(rel.id)
+                  setShowFkSuggestions(false)
+                }}
+              />
+              <InlineManualRelationshipForm
+                datasourceId={datasourceId}
+                childTable={childTable}
+                catalogTables={catalogTables}
+                onCreated={(rel) => {
+                  invalidate()
+                  setRelationshipId(rel.id)
+                  setShowFkSuggestions(false)
+                }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="flex justify-end gap-2 mt-3">
         <button
           type="button"
@@ -849,6 +1062,129 @@ function ColumnAnchorForm({
           className="text-xs bg-blue-600 text-white px-3 py-1.5 rounded hover:bg-blue-700 disabled:opacity-50"
         >
           {createMutation.isPending ? 'Saving…' : 'Save anchor'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/// Compact inline relationship-create form rendered inside the anchor empty-state
+/// guidance. The child table is locked to the anchor's prefilled value; the user
+/// only picks parent table + columns, and on success the new relationship is
+/// auto-selected for the anchor.
+function InlineManualRelationshipForm({
+  datasourceId,
+  childTable,
+  catalogTables,
+  onCreated,
+}: {
+  datasourceId: string
+  childTable: FlatTable | undefined
+  catalogTables: CatalogTables
+  onCreated: (rel: TableRelationship) => void
+}) {
+  const [childColumnName, setChildColumnName] = useState('')
+  const [parentTableId, setParentTableId] = useState('')
+  const [parentColumnName, setParentColumnName] = useState('')
+
+  const parentTable = catalogTables.find((t) => t.id === parentTableId)
+
+  const createMutation = useMutation({
+    mutationFn: () =>
+      createRelationship(datasourceId, {
+        child_table_id: childTable?.id ?? '',
+        child_column_name: childColumnName,
+        parent_table_id: parentTableId,
+        parent_column_name: parentColumnName,
+      }),
+    onSuccess: (rel) => {
+      toast.success('Relationship added')
+      setChildColumnName('')
+      setParentTableId('')
+      setParentColumnName('')
+      onCreated(rel)
+    },
+    onError: (err) => toast.error(errorMessage(err, 'Failed to add relationship')),
+  })
+
+  const canSubmit =
+    !!childTable && !!childColumnName && !!parentTableId && !!parentColumnName
+
+  if (!childTable) return null
+
+  return (
+    <div
+      data-testid="anchor-inline-relationship-form"
+      className="mt-2 border border-amber-200 rounded p-2 bg-white"
+    >
+      <div className="text-[11px] font-medium text-amber-900 mb-2">
+        Or create a relationship from{' '}
+        <code className="font-mono">{tableLabel(childTable.schema, childTable.table)}</code>:
+      </div>
+      <div className="grid grid-cols-3 gap-2 text-xs">
+        <div>
+          <label className="block text-[10px] text-gray-500 mb-0.5">Child column (FK)</label>
+          <select
+            value={childColumnName}
+            onChange={(e) => setChildColumnName(e.target.value)}
+            className="w-full border border-gray-300 rounded px-2 py-1"
+          >
+            <option value="">Select…</option>
+            {childTable.columns.map((c) => (
+              <option key={c.id} value={c.column_name}>
+                {c.column_name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-[10px] text-gray-500 mb-0.5">Parent table</label>
+          <select
+            value={parentTableId}
+            onChange={(e) => {
+              setParentTableId(e.target.value)
+              setParentColumnName('')
+            }}
+            className="w-full border border-gray-300 rounded px-2 py-1"
+          >
+            <option value="">Select…</option>
+            {catalogTables
+              .filter((t) => t.id !== childTable.id)
+              .map((t) => (
+                <option key={t.id} value={t.id}>
+                  {tableLabel(t.schema, t.table)}
+                  {t.schema !== t.schema_upstream
+                    ? `  (${t.schema_upstream}.${t.table})`
+                    : ''}
+                </option>
+              ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-[10px] text-gray-500 mb-0.5">Parent column (PK)</label>
+          <select
+            value={parentColumnName}
+            onChange={(e) => setParentColumnName(e.target.value)}
+            disabled={!parentTable}
+            className="w-full border border-gray-300 rounded px-2 py-1 disabled:bg-gray-100"
+          >
+            <option value="">Select…</option>
+            {parentTable?.columns.map((c) => (
+              <option key={c.id} value={c.column_name}>
+                {c.column_name}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+      <div className="flex justify-end mt-2">
+        <button
+          type="button"
+          onClick={() => createMutation.mutate()}
+          disabled={!canSubmit || createMutation.isPending}
+          className="text-xs bg-amber-600 text-white px-3 py-1 rounded hover:bg-amber-700 disabled:opacity-50"
+        >
+          {createMutation.isPending ? 'Adding…' : 'Add and use'}
         </button>
       </div>
     </div>

@@ -60,6 +60,8 @@ Once the user confirms the version and changelog entries:
 
 5. **`docs-site/docs/.vitepress/constants.ts`** — Update the `VERSION` constant. This is the single source of truth for the `{{VERSION}}` token substituted across every docs page at build time (see `docs-site/CLAUDE.md` → "Version-bump checklist"). Forgetting this leaves `docs.betweenrows.dev` showing the previous version in install/upgrade instructions.
 
+6. **`docs-site/docs/public/screenshots/{introduction-dashboard,row-filters-policy-editor,row-filters-audit}.png`** — Refresh the unversioned README screenshots from their newly-captured versioned counterparts whenever screenshots were re-captured this cycle (`cp <name>-vX.Y.png <name>.png` for each of the three). The README references the unversioned files so its image links never go stale across releases — skip this only when no screenshots were re-captured.
+
 ### 5. Commit and tag
 
 - Stage the five files above plus `Cargo.lock` (updated when Cargo.toml versions change) **and any docs-site edits applied in step 2**.

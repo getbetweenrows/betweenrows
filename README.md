@@ -33,9 +33,9 @@ Built in **Rust** on **DataFusion** — low overhead, memory-safe, production-gr
 
 | | |
 |---|---|
-| ![Admin dashboard](docs-site/docs/public/screenshots/introduction-dashboard-v0.14.png) | The admin dashboard — data sources, users, roles, and policies at a glance. |
-| ![Row filter policy editor](docs-site/docs/public/screenshots/row-filters-policy-editor-v0.15.png) | Row filter policy editor — write a `WHERE` expression with template variables like `{user.tenant}`. |
-| ![Query audit detail](docs-site/docs/public/screenshots/row-filters-audit-v0.15.png) | Query audit — see the original SQL, the rewritten SQL, and which policies fired. |
+| ![Admin dashboard](docs-site/docs/public/screenshots/introduction-dashboard.png) | The admin dashboard — data sources, users, roles, and policies at a glance. |
+| ![Row filter policy editor](docs-site/docs/public/screenshots/row-filters-policy-editor.png) | Row filter policy editor — write a `WHERE` expression with template variables like `{user.tenant}`. |
+| ![Query audit detail](docs-site/docs/public/screenshots/row-filters-audit.png) | Query audit — see the original SQL, the rewritten SQL, and which policies fired. |
 
 ## 🏗️ Components
 

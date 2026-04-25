@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-04-24
+
+### Changed
+
+- **[Infrastructure] Bump Fly.io VM to `shared-cpu-2x` / 512 MB** — doubles memory headroom and burst CPU credits. The previous `shared-cpu-1x` / 256 MB sized warm-idle around 150 MB, leaving ~50 MB of headroom that a single active session could exhaust under non-pushdown DataFusion execution (cross-datasource joins, `json_length` / `json_keys` UDFs). The spike-then-throttle pattern under heavy queries is reduced (longer burst window before kernel CFS throttling kicks in) but not eliminated — moving to `performance-1x` would be required to remove burst-credit throttling outright.
+
+### Docs
+
+- **[Docs] README points at unversioned screenshot filenames** — image links no longer go stale across releases.
+
 ## [0.17.1] - 2026-04-24
 
 ### Changed

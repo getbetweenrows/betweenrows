@@ -15,10 +15,10 @@ image = 'ghcr.io/getbetweenrows/betweenrows:latest'
   destination  = '/data'
   initial_size = '1gb'
 
-# ── VM size: smallest available (shared CPU, 256 MB RAM) ─────────────────────
+# ── VM size: 2 shared CPU shares, 512 MB RAM ────────────────────────────────
 [[vm]]
-  size   = 'shared-cpu-1x'
-  memory = '256mb'
+  size   = 'shared-cpu-2x'
+  memory = '512mb'
 
 # ── Admin REST API + bundled UI (HTTP/HTTPS on 80/443) ────────────────────────
 [[services]]

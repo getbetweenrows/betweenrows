@@ -16,6 +16,11 @@ pub struct Model {
     /// JSON array of {policy_id, version, name}
     pub policies_applied: String,
     pub execution_time_ms: Option<i64>,
+    /// DEPRECATED — logically dropped 2026-04-26. Always written as `None`.
+    /// The TCP peer address pgwire exposes is the Fly edge proxy, not the real
+    /// client, so the value was misleading. Column kept for backward DB compat.
+    /// Do NOT start writing it again without first parsing PROXY protocol v2 in
+    /// the accept loop and gating it behind `BR_TRUST_PROXY_PROTOCOL`.
     pub client_ip: Option<String>,
     pub client_info: Option<String>,
     pub created_at: DateTime,

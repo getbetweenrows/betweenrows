@@ -892,7 +892,6 @@ pub struct AuditLogResponse {
     pub rewritten_query: Option<String>,
     pub policies_applied: serde_json::Value,
     pub execution_time_ms: Option<i64>,
-    pub client_ip: Option<String>,
     pub client_info: Option<String>,
     pub created_at: chrono::NaiveDateTime,
     pub status: String,

@@ -22,7 +22,6 @@ export interface AuditLogEntry {
     }
   }>
   execution_time_ms: number | null
-  client_ip: string | null
   client_info: string | null
   created_at: string
   status: 'success' | 'error' | 'denied'

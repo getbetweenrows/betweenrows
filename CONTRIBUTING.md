@@ -208,7 +208,7 @@ policy_assignment  (id UUID v7, policy_id, data_source_id, user_id?, role_id?,
 admin_audit_log    (id UUID v7, resource_type, resource_id, action, actor_id, changes JSON, created_at)
 query_audit_log    (id UUID v7, user_id, username, data_source_id, datasource_name,
                     original_query, rewritten_query, policies_applied JSON,
-                    execution_time_ms, client_ip, client_info, created_at)
+                    execution_time_ms, client_info, created_at)
 ```
 
 Catalog entity IDs (schemas, tables, columns) are deterministic UUID v5 fingerprints derived from their natural keys. Re-discovering the same upstream object always produces the same ID, so re-syncs are safe upserts.

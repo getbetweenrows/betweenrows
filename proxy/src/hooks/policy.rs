@@ -793,7 +793,6 @@ impl PolicyHook {
         };
         let username = metadata.get("user").cloned().unwrap_or_default();
         let datasource = metadata.get("datasource").cloned().unwrap_or_default();
-        let client_ip = Some(client.socket_addr().ip().to_string());
         let client_info = metadata.get("application_name").cloned();
 
         let session = match self.get_session(user_id, &datasource).await {
@@ -816,7 +815,7 @@ impl PolicyHook {
                 rewritten_query: sea_orm::Set(None),
                 policies_applied: sea_orm::Set("[]".to_string()),
                 execution_time_ms: sea_orm::Set(None),
-                client_ip: sea_orm::Set(client_ip),
+                client_ip: sea_orm::Set(None),
                 client_info: sea_orm::Set(client_info),
                 created_at: sea_orm::Set(now),
                 status: sea_orm::Set("denied".to_string()),
@@ -2439,7 +2438,6 @@ impl QueryHook for PolicyHook {
         };
         let username = metadata.get("user").cloned().unwrap_or_default();
         let datasource = metadata.get("datasource").cloned().unwrap_or_default();
-        let client_ip = Some(client.socket_addr().ip().to_string());
         let client_info = metadata.get("application_name").cloned();
 
         // Load session data
@@ -2668,7 +2666,6 @@ impl QueryHook for PolicyHook {
         let audit_ds_name = session.datasource_name.clone();
         let audit_orig_q = original_query;
         let audit_policies = serde_json::to_string(&policies_applied).unwrap_or_default();
-        let audit_ip = client_ip;
         let audit_info = client_info;
         let audit_status_owned = audit_status.to_string();
 
@@ -2684,7 +2681,7 @@ impl QueryHook for PolicyHook {
                 rewritten_query: sea_orm::Set(audit_rewritten),
                 policies_applied: sea_orm::Set(audit_policies),
                 execution_time_ms: sea_orm::Set(Some(elapsed_ms)),
-                client_ip: sea_orm::Set(audit_ip),
+                client_ip: sea_orm::Set(None),
                 client_info: sea_orm::Set(audit_info),
                 created_at: sea_orm::Set(now),
                 status: sea_orm::Set(audit_status_owned),

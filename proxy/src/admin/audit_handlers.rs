@@ -79,7 +79,6 @@ pub async fn list_audit_logs(
                 rewritten_query: m.rewritten_query,
                 policies_applied,
                 execution_time_ms: m.execution_time_ms,
-                client_ip: m.client_ip,
                 client_info: m.client_info,
                 created_at: m.created_at,
                 status: m.status,

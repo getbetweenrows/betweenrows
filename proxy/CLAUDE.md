@@ -97,7 +97,7 @@ A single shared WASM runtime created once at startup in `main.rs` and passed to 
 
 **Column-level policies must be enforced at scan level**: All column-level policies (deny, mask, and any future types) MUST be enforced at the `TableScan` level (visibility-level for deny, `transform_up` Projection for mask) to prevent CTE/subquery alias bypass. `SubqueryAlias` and CTE nodes change the DFSchema qualifier from the real table name to the alias, causing top-level-only matching to miss. Top-level `apply_projection_qualified` is defense-in-depth only.
 
-**Audit logging**: after each query, `PolicyHook` spawns a `tokio::spawn` task to insert a `query_audit_log` row asynchronously. The row captures `original_query`, `rewritten_query`, `policies_applied` (JSON with name+version snapshot including decision function results), `client_ip`, and `client_info` (application_name from pgwire startup params).
+**Audit logging**: after each query, `PolicyHook` spawns a `tokio::spawn` task to insert a `query_audit_log` row asynchronously. The row captures `original_query`, `rewritten_query`, `policies_applied` (JSON with name+version snapshot including decision function results), and `client_info` (application_name from pgwire startup params).
 
 ### Decision Functions in PolicyHook
 

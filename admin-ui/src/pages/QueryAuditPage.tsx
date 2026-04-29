@@ -300,7 +300,6 @@ export function QueryAuditPage() {
                             </div>
                           )}
                           <div className="flex gap-6 text-xs text-gray-500">
-                            {entry.client_ip && <span>IP: {entry.client_ip}</span>}
                             {entry.client_info && <span>App: {entry.client_info}</span>}
                           </div>
                         </div>

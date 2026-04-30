@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-04-26
+
+### Changed
+
+- **[Both] Drop `client_ip` from audit log** — the recorded value was the Fly edge proxy address, not the real client, so it was misleading. The field is removed from the admin API response (`AuditLogResponse`) and the React audit page; the proxy stops writing it (always `None`) on both the deny path and the query-completed path.
+  - DB column kept for backward compatibility but no longer populated
+  - Public docs (`guides/audit-debugging.md`) updated
+
 ## [0.17.2] - 2026-04-24
 
 ### Changed

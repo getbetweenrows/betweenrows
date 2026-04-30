@@ -43,7 +43,6 @@ A row is written for every query that reaches the proxy, including denied querie
 | `rewritten_query` | string (nullable) | The SQL actually executed against the upstream database, with all row filters and column masks applied. This is the key debugging field — compare it with `original_query` to see what BetweenRows changed. NULL if the query was denied before rewriting. |
 | `policies_applied` | JSON string | Array of `{policy_id, version, name}` objects — a snapshot of which policies fired for this query, including decision function results. Use this to answer "which policies affected this query?" |
 | `execution_time_ms` | integer (nullable) | Wall-clock time for the upstream query execution, in milliseconds. NULL for denied queries. |
-| `client_ip` | string (nullable) | Client IP address from the pgwire connection |
 | `client_info` | string (nullable) | Application name from pgwire startup parameters (e.g. `psql`, `DBeaver`, your app's connection string) |
 | `status` | string | One of: `success` (query completed), `error` (query failed), `denied` (query blocked by policy or read-only enforcement) |
 | `error_message` | string (nullable) | Error details when `status` is `error` or `denied`. For denied queries, does **not** reveal which policy caused the denial (404-not-403 principle). |
